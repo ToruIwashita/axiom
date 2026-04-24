@@ -1,21 +1,18 @@
-# MySQL. Versions 5.6.4 and up are supported.
+# MySQL 8.0.44(ローカルインストール済)を使用
 #
-# Install the MySQL driver
-#   gem install mysql2
-#
-# Ensure the MySQL gem is defined in your Gemfile
-#   gem "mysql2"
-#
-# And be sure to use new-style password hashing:
-#   https://dev.mysql.com/doc/refman/5.7/en/password-hashing.html
+# 設計書: 03_全体アーキテクチャ初期設計.md §8.6 運用構成
+# - 開発/本番ともに同一PCで運用し, database名で環境分離
+# - 認証情報はcredentials経由で取得(直書き禁止)
 #
 default: &default
   adapter: mysql2
   encoding: utf8mb4
-  max_connections: <%= ENV.fetch("RAILS_MAX_THREADS") { 5 } %>
-  username: root
-  password:
-  host: <%= ENV.fetch("DB_HOST") { "127.0.0.1" } %>
+  collation: utf8mb4_general_ci
+  host: 127.0.0.1
+  port: 3306
+  username: <%= Rails.application.credentials.dig(:database, Rails.env.to_sym, :username) %>
+  password: <%= Rails.application.credentials.dig(:database, Rails.env.to_sym, :password) %>
+  pool: <%= ENV.fetch("RAILS_MAX_THREADS") { 5 } %>
 
 development:
   <<: *default
@@ -28,47 +25,6 @@ test:
   <<: *default
   database: axiom_test
 
-# As with config/credentials.yml, you never want to store sensitive information,
-# like your database password, in your source code. If your source code is
-# ever seen by anyone, they now have access to your database.
-#
-# Instead, provide the password or a full connection URL as an environment
-# variable when you boot the app. For example:
-#
-#   DATABASE_URL="mysql2://myuser:mypass@localhost/somedatabase"
-#
-# If the connection URL is provided in the special DATABASE_URL environment
-# variable, Rails will automatically merge its configuration values on top of
-# the values provided in this file. Alternatively, you can specify a connection
-# URL environment variable explicitly:
-#
-#   production:
-#     url: <%= ENV["MY_APP_DATABASE_URL"] %>
-#
-# Connection URLs for non-primary databases can also be configured using
-# environment variables. The variable name is formed by concatenating the
-# connection name with `_DATABASE_URL`. For example:
-#
-#   CACHE_DATABASE_URL="mysql2://cacheuser:cachepass@localhost/cachedatabase"
-#
-# Read https://guides.rubyonrails.org/configuring.html#configuring-a-database
-# for a full overview on how database connection configuration can be specified.
-#
 production:
-  primary: &primary_production
-    <<: *default
-    database: axiom_production
-    username: axiom
-    password: <%= ENV["AXIOM_DATABASE_PASSWORD"] %>
-  cache:
-    <<: *primary_production
-    database: axiom_production_cache
-    migrations_paths: db/cache_migrate
-  queue:
-    <<: *primary_production
-    database: axiom_production_queue
-    migrations_paths: db/queue_migrate
-  cable:
-    <<: *primary_production
-    database: axiom_production_cable
-    migrations_paths: db/cable_migrate
+  <<: *default
+  database: axiom_production
