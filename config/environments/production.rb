@@ -46,6 +46,10 @@ Rails.application.configure do
   # Don't log any deprecations.
   config.active_support.report_deprecations = false
 
+  # master.key (or RAILS_MASTER_KEY env) が未設定の場合は Rails 起動を中止する
+  # credentials が静かに nil を返す事故(DB接続情報が空になる等)を防止
+  config.require_master_key = true
+
   # Ignore bad email addresses and do not raise email delivery errors.
   # Set this to true and configure the email server for immediate delivery to raise delivery errors.
   # config.action_mailer.raise_delivery_errors = false
