@@ -1,0 +1,30 @@
+# MySQL 8.0.44(ローカルインストール済)を使用
+#
+# 設計書: 03_全体アーキテクチャ初期設計.md §8.6 運用構成
+# - 開発/本番ともに同一PCで運用し, database名で環境分離
+# - 認証情報はcredentials経由で取得(直書き禁止)
+#
+default: &default
+  adapter: mysql2
+  encoding: utf8mb4
+  collation: utf8mb4_general_ci
+  host: 127.0.0.1
+  port: 3307
+  username: <%= Rails.application.credentials.dig(:database, Rails.env.to_sym, :username) %>
+  password: <%= Rails.application.credentials.dig(:database, Rails.env.to_sym, :password) %>
+  pool: <%= ENV.fetch("RAILS_MAX_THREADS") { 5 } %>
+
+development:
+  <<: *default
+  database: axiom_development
+
+# Warning: The database defined as "test" will be erased and
+# re-generated from your development database when you run "rake".
+# Do not set this db to the same as development or production.
+test:
+  <<: *default
+  database: axiom_test
+
+production:
+  <<: *default
+  database: axiom_production
