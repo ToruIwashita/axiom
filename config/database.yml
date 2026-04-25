@@ -9,7 +9,7 @@ default: &default
   encoding: utf8mb4
   collation: utf8mb4_general_ci
   host: 127.0.0.1
-  port: 3306
+  port: 3307
   username: <%= Rails.application.credentials.dig(:database, Rails.env.to_sym, :username) %>
   password: <%= Rails.application.credentials.dig(:database, Rails.env.to_sym, :password) %>
   pool: <%= ENV.fetch("RAILS_MAX_THREADS") { 5 } %>
