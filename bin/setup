@@ -15,10 +15,8 @@ FileUtils.chdir APP_ROOT do
   puts "== Installing dependencies =="
   system("bundle check") || system!("bundle install")
 
-  # puts "\n== Copying sample files =="
-  # unless File.exist?("config/database.yml")
-  #   FileUtils.cp "config/database.yml.sample", "config/database.yml"
-  # end
+  # axiom は database.yml を Rails.application.credentials 経由で参照する方針のため
+  # database.yml.sample をコピーするテンプレ手順は不要 (Rails 標準コメントブロックを削除)
 
   puts "\n== Preparing database =="
   system! "bin/rails db:prepare"
