@@ -6,11 +6,11 @@
 #   - production:  DB 1
 #   - test:        DB 15(テスト専用)
 redis_url = case Rails.env
-            when "development" then "redis://127.0.0.1:6379/0"
-            when "production"  then "redis://127.0.0.1:6379/1"
-            when "test"        then "redis://127.0.0.1:6379/15"
-            else raise "Unknown Rails.env: #{Rails.env}"
-            end
+when "development" then "redis://127.0.0.1:6379/0"
+when "production"  then "redis://127.0.0.1:6379/1"
+when "test"        then "redis://127.0.0.1:6379/15"
+else raise "Unknown Rails.env: #{Rails.env}"
+end
 
 Sidekiq.configure_server do |config|
   config.redis = { url: redis_url }
