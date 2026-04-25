@@ -122,6 +122,31 @@ RAILS_ENV=production bin/rails s
 RAILS_ENV=production bundle exec sidekiq
 ```
 
+### 本番投入の事前作業(初回のみ)
+
+`config/environments/production.rb` で `config.require_master_key = true` を有効化しているため,master.key または `RAILS_MASTER_KEY` 環境変数が未設定の状態では production 起動できない。本番初回投入時は以下を実施する
+
+1. `axiom_production` データベースを MySQL に作成
+
+   ```sh
+   mysql --no-defaults -u root -proot_password -h 127.0.0.1 -P 3307 \
+     -e "CREATE DATABASE IF NOT EXISTS axiom_production CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci"
+   ```
+
+2. production credentials を編集して本番用 DB 認証情報を投入
+
+   ```sh
+   EDITOR=vim bin/rails credentials:edit -e production
+   ```
+
+   `database.production.{username,password}` に本番用 MySQL ユーザー/パスワードを設定
+
+3. master.key または `config/credentials/production.key` を本番ホストに配置(`.gitignore` で除外済のためリポジトリには含まれない)
+
+4. `RAILS_ENV=production bin/rails db:migrate` でスキーマ反映
+
+5. tmux セッション内で Rails / Sidekiq を起動(本番運用例参照)
+
 ## 関連設計書
 
 実装の詳細仕様は以下を参照(本リポジトリ外,ローカルのworks配下):
