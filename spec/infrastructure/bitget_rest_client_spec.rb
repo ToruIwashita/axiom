@@ -151,10 +151,11 @@ RSpec.describe Infrastructure::BitgetRestClient do
       end
     end
 
-    context "paptrading_enabled: true の場合" do
+    context "paptrading_enabled: true で /api/v2/public/* 以外のパスの場合" do
       subject { client.request(:get, path) }
 
       let(:paptrading_enabled) { true }
+      let(:path) { "/api/v2/mix/market/history-candles" }
 
       before do
         stub_request(:get, "#{base_url}#{path}")
@@ -169,6 +170,29 @@ RSpec.describe Infrastructure::BitgetRestClient do
         subject
         expect(WebMock).to have_requested(:get, "#{base_url}#{path}")
           .with(headers: { "Paptrading" => "1" })
+      end
+    end
+
+    context "paptrading_enabled: true で /api/v2/public/* パスの場合" do
+      subject { client.request(:get, path) }
+
+      let(:paptrading_enabled) { true }
+      let(:path) { "/api/v2/public/time" }
+
+      before do
+        stub_request(:get, "#{base_url}#{path}")
+          .to_return(
+            status: 200,
+            body: { code: "00000", data: { serverTime: "1234567890123" } }.to_json,
+            headers: { "Content-Type" => "application/json" }
+          )
+      end
+
+      it "Bitget 仕様により paptrading ヘッダは付与されない(40404 Request URL NOT FOUND 回避)" do
+        subject
+        expect(WebMock).to have_requested(:get, "#{base_url}#{path}").with { |req|
+          req.headers["Paptrading"].nil?
+        }
       end
     end
 

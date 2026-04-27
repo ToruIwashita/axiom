@@ -141,13 +141,19 @@ module Infrastructure
     private_constant :AuthenticationMiddleware
 
     class PaptradingMiddleware < Faraday::Middleware
+      # Bitget の `/api/v2/public/*` パスは paptrading: 1 ヘッダ付与で 40404 Request URL NOT FOUND
+      # を返すため,このプリフィックスではヘッダを付与しない(実機検証で確認済み)。
+      PUBLIC_PATH_PREFIX = "/api/v2/public".freeze
+
       def initialize(app, paptrading_enabled:)
         super(app)
         @paptrading_enabled = paptrading_enabled
       end
 
       def on_request(env)
-        env.request_headers["paptrading"] = "1" if @paptrading_enabled
+        return unless @paptrading_enabled
+        return if env.url.path.start_with?(PUBLIC_PATH_PREFIX)
+        env.request_headers["paptrading"] = "1"
       end
     end
     private_constant :PaptradingMiddleware
