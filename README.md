@@ -63,6 +63,33 @@ credentials の内容を確認/編集する場合:
 EDITOR=vim bin/rails credentials:edit
 ```
 
+#### 必須セクション
+
+```yaml
+database:
+  development:
+    username: <MySQLユーザー名>
+    password: <MySQLパスワード>
+  test:
+    username: <同上>
+    password: <同上>
+  production:
+    username: <本番用,別管理>
+    password: <本番用,別管理>
+
+bitget:
+  api_key: <Bitget API Key>
+  secret_key: <Bitget Secret Key>
+  passphrase: <Bitget API 作成時に設定したパスフレーズ>
+  paptrading_enabled: true   # 開発時 Demo環境用,本番では false 必須
+```
+
+`paptrading_enabled` は Bitget Demo環境(模擬取引)を有効化するフラグ:
+
+- **開発(development)**: `true` 必須(Demoキーで動作確認)
+- **本番(production)**: `false` 必須(誤起動防止)
+- **ENV 上書き**: `PAPTRADING_ENABLED=true|false` で開発時の一時切替可能(本番では設定しないこと)
+
 ### 4. データベース作成
 
 ```sh
