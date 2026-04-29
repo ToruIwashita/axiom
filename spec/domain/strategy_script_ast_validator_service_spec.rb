@@ -61,6 +61,34 @@ RSpec.describe Domain::StrategyScriptAstValidatorService do
       end
     end
 
+    %i[public_send method const_get const_set].each do |meth|
+      context "リフレクション: obj.#{meth} を呼ぶ場合" do
+        let(:script_content) { "class Foo; def bar; obj.#{meth}(:x); end; end" }
+
+        it "status :failed を返す" do
+          expect(subject.status).to eq(:failed)
+        end
+      end
+    end
+
+    context "リフレクション: ObjectSpace.each_object を呼ぶ場合" do
+      let(:script_content) { "ObjectSpace.each_object(Class)" }
+
+      it "status :failed を返し ObjectSpace を含む report を返す" do
+        expect(subject.status).to eq(:failed)
+        expect(subject.report).to include("ObjectSpace")
+      end
+    end
+
+    context "プロセス/シェル: 文字列補間内のバッククォート(DSTR 内 XSTR)" do
+      let(:script_content) { 'puts "result: #{`ls`}"' }
+
+      it "status :failed を返し shell を含む report を返す" do
+        expect(subject.status).to eq(:failed)
+        expect(subject.report).to include("shell")
+      end
+    end
+
     context "ファイル/IO: File.open" do
       let(:script_content) { "File.open('/etc/passwd')" }
 

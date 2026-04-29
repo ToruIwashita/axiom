@@ -61,14 +61,15 @@ module Domain
 
     DANGEROUS_METHOD_NAMES = %i[
       eval instance_eval module_eval class_eval binding
-      __send__ send define_method method_missing
+      __send__ send public_send define_method method_missing
+      method const_get const_set
       exec system open
       require require_relative load autoload
     ].to_set.freeze
     private_constant :DANGEROUS_METHOD_NAMES
 
     DANGEROUS_TOP_CONSTS = %i[
-      File Dir IO Pathname Process Thread Fiber Mutex
+      File Dir IO Pathname Process Thread Fiber Mutex ObjectSpace
       Net Socket TCPSocket UDPSocket URI Faraday HTTP FFI Fiddle
     ].to_set.freeze
     private_constant :DANGEROUS_TOP_CONSTS
