@@ -19,8 +19,19 @@ DEFAULT_CPU_SECONDS = 1
 DEFAULT_MEMORY_BYTES = 256 * 1024 * 1024
 
 # === setrlimit インライン適用(05_§1.7.2) ===
-Process.setrlimit(Process::RLIMIT_CPU, DEFAULT_CPU_SECONDS) if defined?(Process::RLIMIT_CPU)
-Process.setrlimit(Process::RLIMIT_AS, DEFAULT_MEMORY_BYTES) if defined?(Process::RLIMIT_AS)
+# macOS / Darwin では RLIMIT_AS が EINVAL で拒否されるため rescue で守る(02_§注意事項).
+# Linux 本番では setrlimit が確実に効く前提で運用する.
+begin
+  Process.setrlimit(Process::RLIMIT_CPU, DEFAULT_CPU_SECONDS) if defined?(Process::RLIMIT_CPU)
+rescue Errno::EINVAL
+  # macOS 開発時のフォールバック(本番 Linux では発生しない想定)
+end
+
+begin
+  Process.setrlimit(Process::RLIMIT_AS, DEFAULT_MEMORY_BYTES) if defined?(Process::RLIMIT_AS)
+rescue Errno::EINVAL
+  # macOS は RLIMIT_AS の精密な enforcement 不可
+end
 
 def emit_error_response(callback_name, error_class:, message:, backtrace: nil)
   error_entry = { "class" => error_class, "message" => message }
@@ -60,8 +71,10 @@ trading_script_base_path = File.expand_path("../app/domain/trading_script_base",
 require trading_script_base_path
 
 # === eval + callback 実行 ===
+# TOPLEVEL_BINDING を明示することで戦略 class を Object 直下の定数として登録する
+# (eval をトップレベルで呼んでも begin/rescue ブロック内のローカルスコープになるため).
 begin
-  eval(input["script_content"])
+  TOPLEVEL_BINDING.eval(input["script_content"]) # rubocop:disable Security/Eval
   strategy_class = Object.const_get(input["script_entrypoint"])
   strategy = strategy_class.new
 

@@ -17,12 +17,14 @@ module Infrastructure
     # 子プロセス内でリソース制限を適用する(05_§1.7.2)
     #
     # @return [void]
-    # @note macOS では `Process::RLIMIT_AS` が完全には機能しない場合がある(Darwin 仕様).
-    #   spec では `Process.setrlimit` の呼び出し検証で代替し,本格的な enforcement は
-    #   Linux 本番運用で確認する(02_§注意事項).
+    # @note macOS では `Process::RLIMIT_AS` が `Errno::EINVAL` で拒否される(Darwin 仕様).
+    #   設計書 02_§注意事項 に従い rescue でフォールバックし,本格的な enforcement は
+    #   Linux 本番運用で確認する.
     def apply_limits!
       Process.setrlimit(Process::RLIMIT_CPU, DEFAULT_CPU_SECONDS)
       Process.setrlimit(Process::RLIMIT_AS, DEFAULT_MEMORY_BYTES) if rlimit_as_supported?
+    rescue Errno::EINVAL
+      # macOS 開発時のフォールバック.Linux 本番では発生しない想定.
     end
 
     # 子プロセスへ渡す最小環境変数 Hash を返す(macOS 開発時の `ENV` 遮断,05_§1.6.4)
