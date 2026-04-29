@@ -10,8 +10,8 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_04_27_032552) do
-  create_table "market_data_funding_rate_histories", charset: "utf8mb4", collation: "utf8mb4_general_ci", force: :cascade do |t|
+ActiveRecord::Schema[8.1].define(version: 2026_04_29_215814) do
+  create_table "market_data_funding_rate_histories", charset: "utf8mb4", collation: "utf8mb4_0900_ai_ci", force: :cascade do |t|
     t.datetime "created_at", null: false
     t.decimal "funding_rate", precision: 12, scale: 8, null: false
     t.datetime "funding_time", null: false
@@ -19,7 +19,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_04_27_032552) do
     t.index ["symbol", "funding_time"], name: "idx_on_symbol_funding_time_5496f59fa9", unique: true
   end
 
-  create_table "market_data_futures_candles", charset: "utf8mb4", collation: "utf8mb4_general_ci", force: :cascade do |t|
+  create_table "market_data_futures_candles", charset: "utf8mb4", collation: "utf8mb4_0900_ai_ci", force: :cascade do |t|
     t.decimal "base_volume", precision: 24, scale: 8
     t.decimal "close", precision: 24, scale: 8, null: false
     t.datetime "created_at", null: false
@@ -33,7 +33,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_04_27_032552) do
     t.index ["symbol", "granularity", "ts"], name: "idx_on_symbol_granularity_ts_54dc471ada", unique: true
   end
 
-  create_table "market_data_index_candles", charset: "utf8mb4", collation: "utf8mb4_general_ci", force: :cascade do |t|
+  create_table "market_data_index_candles", charset: "utf8mb4", collation: "utf8mb4_0900_ai_ci", force: :cascade do |t|
     t.decimal "close", precision: 24, scale: 8, null: false
     t.datetime "created_at", null: false
     t.string "granularity", limit: 16, null: false
@@ -45,7 +45,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_04_27_032552) do
     t.index ["symbol", "granularity", "ts"], name: "idx_on_symbol_granularity_ts_73e0563f93", unique: true
   end
 
-  create_table "market_data_mark_candles", charset: "utf8mb4", collation: "utf8mb4_general_ci", force: :cascade do |t|
+  create_table "market_data_mark_candles", charset: "utf8mb4", collation: "utf8mb4_0900_ai_ci", force: :cascade do |t|
     t.decimal "close", precision: 24, scale: 8, null: false
     t.datetime "created_at", null: false
     t.string "granularity", limit: 16, null: false
@@ -57,7 +57,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_04_27_032552) do
     t.index ["symbol", "granularity", "ts"], name: "idx_on_symbol_granularity_ts_71a4edf2f8", unique: true
   end
 
-  create_table "market_data_spot_candles", charset: "utf8mb4", collation: "utf8mb4_general_ci", force: :cascade do |t|
+  create_table "market_data_spot_candles", charset: "utf8mb4", collation: "utf8mb4_0900_ai_ci", force: :cascade do |t|
     t.decimal "base_volume", precision: 24, scale: 8
     t.decimal "close", precision: 24, scale: 8, null: false
     t.datetime "created_at", null: false
@@ -69,5 +69,13 @@ ActiveRecord::Schema[8.1].define(version: 2026_04_27_032552) do
     t.string "symbol", limit: 32, null: false
     t.datetime "ts", null: false
     t.index ["symbol", "granularity", "ts"], name: "idx_on_symbol_granularity_ts_901ca45d76", unique: true
+  end
+
+  create_table "users", charset: "utf8mb4", collation: "utf8mb4_0900_ai_ci", force: :cascade do |t|
+    t.datetime "created_at", null: false
+    t.string "email", null: false
+    t.string "name", null: false
+    t.datetime "updated_at", null: false
+    t.index ["email"], name: "index_users_on_email", unique: true
   end
 end
