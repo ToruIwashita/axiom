@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_04_29_215814) do
+ActiveRecord::Schema[8.1].define(version: 2026_04_29_220341) do
   create_table "market_data_funding_rate_histories", charset: "utf8mb4", collation: "utf8mb4_0900_ai_ci", force: :cascade do |t|
     t.datetime "created_at", null: false
     t.decimal "funding_rate", precision: 12, scale: 8, null: false
@@ -71,6 +71,18 @@ ActiveRecord::Schema[8.1].define(version: 2026_04_29_215814) do
     t.index ["symbol", "granularity", "ts"], name: "idx_on_symbol_granularity_ts_901ca45d76", unique: true
   end
 
+  create_table "strategy_definitions", charset: "utf8mb4", collation: "utf8mb4_0900_ai_ci", force: :cascade do |t|
+    t.datetime "created_at", null: false
+    t.text "description"
+    t.string "market_type", limit: 32, null: false
+    t.string "name", null: false
+    t.string "status", limit: 32, null: false
+    t.datetime "updated_at", null: false
+    t.bigint "user_id", null: false
+    t.index ["status"], name: "index_strategy_definitions_on_status"
+    t.index ["user_id"], name: "index_strategy_definitions_on_user_id"
+  end
+
   create_table "users", charset: "utf8mb4", collation: "utf8mb4_0900_ai_ci", force: :cascade do |t|
     t.datetime "created_at", null: false
     t.string "email", null: false
@@ -78,4 +90,6 @@ ActiveRecord::Schema[8.1].define(version: 2026_04_29_215814) do
     t.datetime "updated_at", null: false
     t.index ["email"], name: "index_users_on_email", unique: true
   end
+
+  add_foreign_key "strategy_definitions", "users"
 end
