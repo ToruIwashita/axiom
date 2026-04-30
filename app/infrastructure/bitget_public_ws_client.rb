@@ -22,6 +22,10 @@ module Infrastructure
     # ヘッダーマージンを取り 60 秒(= interval × 2)で pong タイムアウトと判定する。
     DEFAULT_HEARTBEAT_INTERVAL = 30.0
     DEFAULT_HEARTBEAT_TIMEOUT = 60.0
+    # 再接続の指数バックオフ。Bitget のリリース時間帯切断 + 24 時間強制切断を前提に
+    # 初期 1 秒で開始し,接続失敗が連続しても 30 秒上限で再試行を継続する。
+    DEFAULT_RECONNECT_INITIAL_INTERVAL = 1.0
+    DEFAULT_RECONNECT_MAX_INTERVAL = 30.0
 
     class ConnectionError < StandardError; end
 
@@ -33,6 +37,8 @@ module Infrastructure
     # @param logger [Logger] ログ出力先
     # @param heartbeat_interval [Float] ping 送信間隔(秒)
     # @param heartbeat_timeout [Float] pong 未受信タイムアウト(秒)
+    # @param reconnect_initial_interval [Float] 再接続の初期 sleep 秒数
+    # @param reconnect_max_interval [Float] 再接続の最大 sleep 秒数(指数バックオフの上限)
     def initialize(
       paptrading_enabled: false,
       url: nil,
@@ -41,7 +47,9 @@ module Infrastructure
       clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) },
       logger: Rails.logger,
       heartbeat_interval: DEFAULT_HEARTBEAT_INTERVAL,
-      heartbeat_timeout: DEFAULT_HEARTBEAT_TIMEOUT
+      heartbeat_timeout: DEFAULT_HEARTBEAT_TIMEOUT,
+      reconnect_initial_interval: DEFAULT_RECONNECT_INITIAL_INTERVAL,
+      reconnect_max_interval: DEFAULT_RECONNECT_MAX_INTERVAL
     )
       @paptrading_enabled = paptrading_enabled
       @url_override = url
@@ -51,6 +59,8 @@ module Infrastructure
       @logger = logger
       @heartbeat_interval = heartbeat_interval
       @heartbeat_timeout = heartbeat_timeout
+      @reconnect_initial_interval = reconnect_initial_interval
+      @reconnect_max_interval = reconnect_max_interval
       @subscriptions = {}
       @ws = nil
       @heartbeat_thread = nil
@@ -139,7 +149,9 @@ module Infrastructure
     private
 
     attr_reader :paptrading_enabled, :url_override, :ws_factory, :decoder, :clock, :logger,
-                :heartbeat_interval, :heartbeat_timeout, :subscriptions, :mutex
+                :heartbeat_interval, :heartbeat_timeout,
+                :reconnect_initial_interval, :reconnect_max_interval,
+                :subscriptions, :mutex
     attr_accessor :ws, :heartbeat_thread, :stop_requested, :open_event_received, :last_pong_at
 
     # mutex 内で呼ばれる前提の接続状態判定(再帰ロック回避)
@@ -239,14 +251,48 @@ module Infrastructure
       end
     end
 
-    # Step 7 で本実装される再接続トリガー(本ステップではログ出力のみのスタブ)
-    def trigger_reconnect(reason)
-      logger.warn("[BitgetPublicWsClient] reconnect triggered: #{reason}")
-      # Step 7 で reconnect_with_backoff 呼び出しを実装
+    # ws.on(:close) / ws.on(:error) callback または heartbeat タイムアウトから呼ばれる切断検知ハンドラ。
+    # disconnect 中(stop_requested=true)は再接続しない。
+    def handle_disconnection(reason, _error = nil)
+      return if stop_requested
+
+      trigger_reconnect(reason)
     end
 
-    def handle_disconnection(_reason, _error = nil)
-      # Step 7 で本実装(stop_requested 判定 + trigger_reconnect 呼び出し)
+    def trigger_reconnect(reason)
+      logger.warn("[BitgetPublicWsClient] reconnect triggered: #{reason}")
+      reconnect_with_backoff
+    end
+
+    # 指数バックオフで再接続を試行する。
+    # - sleep の前後で stop_requested をチェックし,disconnect 中の establish_connection を防ぐ(設計時レビュー重要2)
+    # - 接続成功時は既存購読を resubscribe してから return
+    # - 接続失敗時は interval を 2 倍にしてリトライ(reconnect_max_interval で頭打ち)
+    def reconnect_with_backoff
+      interval = reconnect_initial_interval
+      loop do
+        break if stop_requested
+
+        sleep(interval)
+        break if stop_requested
+
+        begin
+          list_to_resubscribe = mutex.synchronize do
+            next nil if stop_requested
+
+            establish_connection_internal
+            subscriptions.keys.dup
+          end
+          next if list_to_resubscribe.nil?
+
+          wait_until_open
+          send_subscribe(list_to_resubscribe) unless list_to_resubscribe.empty?
+          return
+        rescue StandardError => e
+          logger.warn("[BitgetPublicWsClient] reconnect failed: #{e.message}")
+          interval = [ interval * 2, reconnect_max_interval ].min
+        end
+      end
     end
 
     def default_ws_factory

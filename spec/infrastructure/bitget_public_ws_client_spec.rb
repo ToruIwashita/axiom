@@ -4,13 +4,15 @@ RSpec.describe Infrastructure::BitgetPublicWsClient do
   let(:current_time) { [ 0.0 ] }
   let(:clock) { -> { current_time[0] } }
   let(:ws) { instance_double("WebSocket::Client::Simple::Client") }
-  let(:ws_factory) { ->(_url) { ws } }
+  let(:ws_factory) { instance_double(Proc) }
   let(:logger) { instance_double(Logger, warn: nil, info: nil) }
   let(:registered_callbacks) { {} }
   let(:paptrading_enabled) { true }
   let(:url_override) { nil }
   let(:heartbeat_interval) { 30.0 }
   let(:heartbeat_timeout) { 60.0 }
+  let(:reconnect_initial_interval) { 1.0 }
+  let(:reconnect_max_interval) { 30.0 }
   let(:fake_thread) { instance_double(Thread, kill: nil, join: nil) }
   let(:client) do
     described_class.new(
@@ -20,11 +22,14 @@ RSpec.describe Infrastructure::BitgetPublicWsClient do
       clock: clock,
       logger: logger,
       heartbeat_interval: heartbeat_interval,
-      heartbeat_timeout: heartbeat_timeout
+      heartbeat_timeout: heartbeat_timeout,
+      reconnect_initial_interval: reconnect_initial_interval,
+      reconnect_max_interval: reconnect_max_interval
     )
   end
 
   before do
+    allow(ws_factory).to receive(:call).and_return(ws)
     allow(ws).to receive(:on) do |event, &blk|
       registered_callbacks[event] = blk
     end
@@ -286,6 +291,134 @@ RSpec.describe Infrastructure::BitgetPublicWsClient do
           allow(client).to receive(:trigger_reconnect)
           subject
           expect(client).to have_received(:trigger_reconnect).with(:heartbeat_timeout)
+        end
+      end
+    end
+  end
+
+  describe "切断検知と再接続" do
+    let(:sleep_calls) { [] }
+
+    before do
+      allow(client).to receive(:sleep) { |sec| sleep_calls << sec }
+      client.connect
+    end
+
+    describe "#handle_disconnection 経路" do
+      context "ws.on(:close) callback が発火した場合" do
+        subject { registered_callbacks[:close].call }
+
+        it "trigger_reconnect が呼ばれる(reason=:close)" do
+          allow(client).to receive(:trigger_reconnect)
+          subject
+          expect(client).to have_received(:trigger_reconnect).with(:close)
+        end
+      end
+
+      context "ws.on(:error) callback が発火した場合" do
+        subject { registered_callbacks[:error].call(StandardError.new("ws error")) }
+
+        it "trigger_reconnect が呼ばれる(reason=:error)" do
+          allow(client).to receive(:trigger_reconnect)
+          subject
+          expect(client).to have_received(:trigger_reconnect).with(:error)
+        end
+      end
+
+      context "disconnect 中(stop_requested=true)に close が発火した場合" do
+        subject { registered_callbacks[:close].call }
+
+        before do
+          client.disconnect(thread_join_timeout: 0.01)
+        end
+
+        it "trigger_reconnect は呼ばれない" do
+          allow(client).to receive(:trigger_reconnect)
+          subject
+          expect(client).not_to have_received(:trigger_reconnect)
+        end
+      end
+    end
+
+    describe "#reconnect_with_backoff" do
+      subject { client.send(:reconnect_with_backoff) }
+
+      context "1 回目接続成功の場合" do
+        it "sleep(初期 interval) → ws_factory 再呼び出し → wait_until_open の流れになる" do
+          subject
+          expect(sleep_calls).to eq([ reconnect_initial_interval ])
+          # connect 時 1 回 + reconnect 時 1 回 = 2 回呼ばれる
+          expect(ws_factory).to have_received(:call).at_least(:twice)
+        end
+      end
+
+      context "1 回目失敗 → 2 回目成功の場合" do
+        before do
+          # connect 時の 1 回目呼出は外側 before で成功済み。reconnect 内の最初の試行で raise させる
+          reconnect_call_count = 0
+          allow(ws_factory).to receive(:call) do
+            reconnect_call_count += 1
+            raise StandardError, "connection failed" if reconnect_call_count == 1
+
+            ws
+          end
+        end
+
+        it "sleep の引数列が指数バックオフで増える(初期 interval → 初期 interval × 2)" do
+          subject
+          expect(sleep_calls).to eq([ reconnect_initial_interval, reconnect_initial_interval * 2 ])
+        end
+      end
+
+      context "再接続成功時に既存購読が再送される場合" do
+        let(:subscription) do
+          Infrastructure::BitgetPublicWsSubscription.new(
+            channel: "ticker",
+            inst_type: "USDT-FUTURES",
+            inst_id: "BTCUSDT"
+          )
+        end
+        let(:expected_payload) do
+          { op: "subscribe",
+            args: [ { instType: "USDT-FUTURES", channel: "ticker", instId: "BTCUSDT" } ] }.to_json
+        end
+
+        before do
+          client.subscribe(subscription)
+        end
+
+        it "subscribe 時 + 再接続時の合計で subscribe メッセージが 2 回以上送信される" do
+          subject
+          expect(ws).to have_received(:send).with(expected_payload).at_least(:twice)
+        end
+      end
+
+      context "sleep 中に disconnect された場合(設計時レビュー重要2)" do
+        before do
+          allow(client).to receive(:sleep) do |sec|
+            sleep_calls << sec
+            # sleep 中に disconnect 相当の状態にする(stop_requested=true)
+            client.instance_variable_set(:@stop_requested, true)
+          end
+        end
+
+        it "sleep 直後の stop_requested チェックで establish_connection_internal が呼ばれない" do
+          # connect 時の 1 回呼出のみ(reconnect では呼ばれない)
+          subject
+          expect(ws_factory).to have_received(:call).once
+        end
+      end
+
+      context "stop_requested が初期から true の場合" do
+        before do
+          client.instance_variable_set(:@stop_requested, true)
+        end
+
+        it "sleep も establish も呼ばれず即座に return する" do
+          subject
+          expect(sleep_calls).to be_empty
+          # connect 時の 1 回のみ
+          expect(ws_factory).to have_received(:call).once
         end
       end
     end
