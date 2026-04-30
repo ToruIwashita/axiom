@@ -5,7 +5,7 @@ RSpec.describe Infrastructure::BitgetPublicWsClient do
   let(:clock) { -> { current_time[0] } }
   let(:ws) { instance_double("WebSocket::Client::Simple::Client") }
   let(:ws_factory) { instance_double(Proc) }
-  let(:logger) { instance_double(Logger, warn: nil, info: nil) }
+  let(:logger) { instance_double(Logger, warn: nil, info: nil, error: nil) }
   let(:registered_callbacks) { {} }
   let(:paptrading_enabled) { true }
   let(:url_override) { nil }
@@ -264,6 +264,28 @@ RSpec.describe Infrastructure::BitgetPublicWsClient do
       it "@last_pong_at が clock の現在時刻で更新される" do
         subject
         expect(client.send(:last_pong_at)).to eq(100.0)
+      end
+    end
+
+    describe "heartbeat_tick の例外捕捉(silent 死亡防止)" do
+      subject { client.send(:safe_heartbeat_tick) }
+
+      context "heartbeat_tick が StandardError を投げた場合" do
+        before do
+          allow(client).to receive(:heartbeat_tick).and_raise(StandardError.new("ws send failed"))
+        end
+
+        it "例外を握りつぶして logger.error にログ出力する(ループ継続のため re-raise しない)" do
+          expect { subject }.not_to raise_error
+          expect(logger).to have_received(:error).with(/heartbeat error.*ws send failed/)
+        end
+      end
+
+      context "heartbeat_tick が正常終了した場合" do
+        it "logger.error は呼ばれない" do
+          subject
+          expect(logger).not_to have_received(:error)
+        end
       end
     end
 

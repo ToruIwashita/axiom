@@ -224,8 +224,17 @@ module Infrastructure
         sleep(heartbeat_interval)
         break if stop_requested
 
-        heartbeat_tick
+        safe_heartbeat_tick
       end
+    end
+
+    # heartbeat_tick の例外を握りつぶしてログ出力するラッパー(完了レビュー観察1 対応)。
+    # heartbeat スレッドが silent 死亡すると ping/pong 監視 + 再接続トリガーが停止するため,
+    # 例外を捕捉してループは継続させる(次の sleep サイクルで再試行)。
+    def safe_heartbeat_tick
+      heartbeat_tick
+    rescue StandardError => e
+      logger.error("[BitgetPublicWsClient] heartbeat error: #{e.class}: #{e.message}")
     end
 
     def heartbeat_tick
