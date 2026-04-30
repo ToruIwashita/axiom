@@ -424,6 +424,95 @@ RSpec.describe Infrastructure::BitgetPublicWsClient do
     end
   end
 
+  describe "受信メッセージのディスパッチ" do
+    let(:subscription) do
+      Infrastructure::BitgetPublicWsSubscription.new(
+        channel: "ticker",
+        inst_type: "USDT-FUTURES",
+        inst_id: "BTCUSDT"
+      )
+    end
+    let(:received_data) { [] }
+    let(:callback) { ->(data, _result) { received_data << data } }
+
+    before do
+      client.connect
+      client.subscribe(subscription, &callback)
+    end
+
+    def deliver_raw(raw)
+      registered_callbacks[:message].call(double(data: raw))
+    end
+
+    context "snapshot push を受信した場合" do
+      let(:raw) do
+        '{"action":"snapshot","arg":{"instType":"USDT-FUTURES","channel":"ticker","instId":"BTCUSDT"},' \
+          '"data":[{"lastPr":"50000.0"}],"ts":1695716059516}'
+      end
+
+      it "登録済み subscription の callback が data 引数で呼ばれる" do
+        deliver_raw(raw)
+        expect(received_data).to eq([ [ { "lastPr" => "50000.0" } ] ])
+      end
+    end
+
+    context "update push を受信した場合" do
+      let(:raw) do
+        '{"action":"update","arg":{"instType":"USDT-FUTURES","channel":"books","instId":"BTCUSDT"},' \
+          '"data":[{"asks":[]}],"ts":1695716059520}'
+      end
+
+      it "未登録 subscription(books チャネル)への push では callback が呼ばれない" do
+        deliver_raw(raw)
+        expect(received_data).to be_empty
+      end
+    end
+
+    context "未登録 subscription への push を受信した場合" do
+      let(:raw) do
+        '{"action":"snapshot","arg":{"instType":"SPOT","channel":"ticker","instId":"ETHUSDT"},' \
+          '"data":[{"lastPr":"3000.0"}],"ts":1695716059516}'
+      end
+
+      it "callback は呼ばれない" do
+        deliver_raw(raw)
+        expect(received_data).to be_empty
+      end
+    end
+
+    context "subscribe 成功イベントを受信した場合" do
+      let(:raw) do
+        '{"event":"subscribe","arg":{"instType":"USDT-FUTURES","channel":"ticker","instId":"BTCUSDT"}}'
+      end
+
+      it "副作用なし(callback も logger.warn も呼ばれない)" do
+        deliver_raw(raw)
+        expect(received_data).to be_empty
+        expect(logger).not_to have_received(:warn)
+      end
+    end
+
+    context "error イベントを受信した場合" do
+      let(:raw) do
+        '{"event":"error","arg":{},"code":30003,"msg":"Symbol not exists","op":"subscribe"}'
+      end
+
+      it "logger.warn が code/message 含む形で呼ばれる" do
+        deliver_raw(raw)
+        expect(logger).to have_received(:warn).with(/event error.*Symbol not exists/)
+      end
+    end
+
+    context "JSON パースエラーが発生した場合" do
+      let(:raw) { "not a json" }
+
+      it "logger.warn が呼ばれて Client が例外で落ちない" do
+        expect { deliver_raw(raw) }.not_to raise_error
+        expect(logger).to have_received(:warn).with(/parse error/)
+      end
+    end
+  end
+
   describe "#connected?" do
     subject { client.connected? }
 

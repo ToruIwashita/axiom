@@ -247,8 +247,30 @@ module Infrastructure
       if raw == "pong"
         @last_pong_at = clock.call
       else
-        # Step 8: decoder.decode + dispatch を実装
+        dispatch(decoder.decode(raw))
       end
+    end
+
+    # Decoder の Result 型を述語メソッドで分岐(設計時レビュー重要3 対応:
+    # private_constant の Decoder::Result::* を case/when で参照しない)
+    def dispatch(result)
+      if result.push?
+        callback = lookup_callback(result.arg)
+        callback&.call(result.data, result)
+      elsif result.event?
+        logger.warn("[BitgetPublicWsClient] event error: #{result.message}") if result.error?
+      elsif result.parse_error?
+        logger.warn("[BitgetPublicWsClient] parse error: #{result.error.message}")
+      end
+    end
+
+    def lookup_callback(arg)
+      subscription = Infrastructure::BitgetPublicWsSubscription.new(
+        channel: arg["channel"],
+        inst_type: arg["instType"],
+        inst_id: arg["instId"]
+      )
+      mutex.synchronize { subscriptions[subscription] }
     end
 
     # ws.on(:close) / ws.on(:error) callback または heartbeat タイムアウトから呼ばれる切断検知ハンドラ。
