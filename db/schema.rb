@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_04_29_220634) do
+ActiveRecord::Schema[8.1].define(version: 2026_04_30_124324) do
   create_table "market_data_funding_rate_histories", charset: "utf8mb4", collation: "utf8mb4_0900_ai_ci", force: :cascade do |t|
     t.datetime "created_at", null: false
     t.decimal "funding_rate", precision: 12, scale: 8, null: false
@@ -69,6 +69,19 @@ ActiveRecord::Schema[8.1].define(version: 2026_04_29_220634) do
     t.string "symbol", limit: 32, null: false
     t.datetime "ts", null: false
     t.index ["symbol", "granularity", "ts"], name: "idx_on_symbol_granularity_ts_901ca45d76", unique: true
+  end
+
+  create_table "risk_policies", charset: "utf8mb4", collation: "utf8mb4_0900_ai_ci", force: :cascade do |t|
+    t.integer "consecutive_loss_limit", null: false
+    t.integer "cooldown_minutes", null: false
+    t.datetime "created_at", null: false
+    t.decimal "daily_loss_limit_usdt", precision: 20, scale: 8, null: false
+    t.decimal "max_drawdown_pct", precision: 5, scale: 2, null: false
+    t.integer "max_leverage", null: false
+    t.decimal "max_position_exposure_usdt", precision: 20, scale: 8, null: false
+    t.string "name", limit: 100, null: false
+    t.datetime "updated_at", null: false
+    t.index ["name"], name: "index_risk_policies_on_name", unique: true
   end
 
   create_table "strategy_definitions", charset: "utf8mb4", collation: "utf8mb4_0900_ai_ci", force: :cascade do |t|

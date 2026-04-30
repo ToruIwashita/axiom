@@ -37,6 +37,9 @@ gem "redis"
 gem "faraday"
 gem "faraday-retry"
 
+# WebSocket client for Bitget Public/Private WebSocket integration
+gem "websocket-client-simple"
+
 group :development, :test do
   # See https://guides.rubyonrails.org/debugging_rails_applications.html#debugging-with-the-debug-gem
   gem "debug", platforms: %i[ mri windows ], require: "debug/prelude"
