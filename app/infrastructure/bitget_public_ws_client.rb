@@ -16,7 +16,7 @@ module Infrastructure
     DEFAULT_PRODUCTION_URL = "wss://ws.bitget.com/v2/ws/public".freeze
     DEFAULT_PAPTRADING_URL = "wss://wspap.bitget.com/v2/ws/public".freeze
     DEFAULT_THREAD_JOIN_TIMEOUT = 5.0
-    DEFAULT_WAIT_OPEN_TIMEOUT = 5.0
+    DEFAULT_WAIT_OPEN_TIMEOUT = 10.0
     DEFAULT_WAIT_OPEN_POLL_INTERVAL = 0.01
     # Bitget WS 公式仕様(05_§3.5): 30 秒ごとに "ping",2 分未受信で切断。
     # ヘッダーマージンを取り 60 秒(= interval × 2)で pong タイムアウトと判定する。
@@ -170,10 +170,13 @@ module Infrastructure
     end
 
     def attach_callbacks(ws)
-      ws.on(:message) { |msg| handle_message(msg.data) }
-      ws.on(:open)    { handle_open }
-      ws.on(:close)   { handle_disconnection(:close) }
-      ws.on(:error)   { |err| handle_disconnection(:error, err) }
+      # event_emitter gem は instance_exec で callback を呼ぶため,ブロック内の `self` は
+      # WebSocket::Client::Simple::Client に変わる。外側 self を `this` として捕捉して呼び出す。
+      this = self
+      ws.on(:message) { |msg| this.send(:handle_message, msg.data) }
+      ws.on(:open)    { this.send(:handle_open) }
+      ws.on(:close)   { this.send(:handle_disconnection, :close) }
+      ws.on(:error)   { |err| this.send(:handle_disconnection, :error, err) }
     end
 
     def handle_open
