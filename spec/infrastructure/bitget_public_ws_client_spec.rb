@@ -9,13 +9,18 @@ RSpec.describe Infrastructure::BitgetPublicWsClient do
   let(:registered_callbacks) { {} }
   let(:paptrading_enabled) { true }
   let(:url_override) { nil }
+  let(:heartbeat_interval) { 30.0 }
+  let(:heartbeat_timeout) { 60.0 }
+  let(:fake_thread) { instance_double(Thread, kill: nil, join: nil) }
   let(:client) do
     described_class.new(
       paptrading_enabled: paptrading_enabled,
       url: url_override,
       ws_factory: ws_factory,
       clock: clock,
-      logger: logger
+      logger: logger,
+      heartbeat_interval: heartbeat_interval,
+      heartbeat_timeout: heartbeat_timeout
     )
   end
 
@@ -26,6 +31,9 @@ RSpec.describe Infrastructure::BitgetPublicWsClient do
     allow(ws).to receive(:send)
     allow(ws).to receive(:close)
     allow(client).to receive(:wait_until_open)
+    # Thread.new をスタブ化してブロック未実行の fake_thread を返す
+    # (heartbeat ループの本体は heartbeat_tick の単体テストで確認する)
+    allow(Thread).to receive(:new).and_return(fake_thread)
   end
 
   describe "#connect" do
@@ -215,6 +223,70 @@ RSpec.describe Infrastructure::BitgetPublicWsClient do
         subject
         client.connect
         expect(ws).not_to have_received(:send)
+      end
+    end
+  end
+
+  describe "heartbeat" do
+    before do
+      client.connect
+    end
+
+    describe "起動" do
+      subject { Thread }
+
+      it "connect 時に heartbeat スレッドが起動される" do
+        expect(subject).to have_received(:new)
+      end
+    end
+
+    describe "ping 送信(heartbeat_tick 単体)" do
+      subject { client.send(:heartbeat_tick) }
+
+      it "ws.send('ping') が呼ばれる" do
+        subject
+        expect(ws).to have_received(:send).with("ping")
+      end
+    end
+
+    describe "pong 受信" do
+      subject { registered_callbacks[:message].call(double(data: "pong")) }
+
+      before do
+        current_time[0] = 100.0
+      end
+
+      it "@last_pong_at が clock の現在時刻で更新される" do
+        subject
+        expect(client.send(:last_pong_at)).to eq(100.0)
+      end
+    end
+
+    describe "pong タイムアウト判定(check_pong_timeout 単体)" do
+      subject { client.send(:check_pong_timeout) }
+
+      context "経過時間が heartbeat_timeout 以下の場合" do
+        before do
+          current_time[0] = 30.0  # last_pong_at は connect 時に 0.0
+        end
+
+        it "trigger_reconnect は呼ばれない" do
+          allow(client).to receive(:trigger_reconnect)
+          subject
+          expect(client).not_to have_received(:trigger_reconnect)
+        end
+      end
+
+      context "経過時間が heartbeat_timeout を超えた場合" do
+        before do
+          current_time[0] = heartbeat_timeout + 1.0
+        end
+
+        it "trigger_reconnect(:heartbeat_timeout) が呼ばれる" do
+          allow(client).to receive(:trigger_reconnect)
+          subject
+          expect(client).to have_received(:trigger_reconnect).with(:heartbeat_timeout)
+        end
       end
     end
   end

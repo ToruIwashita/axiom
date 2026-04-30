@@ -18,6 +18,10 @@ module Infrastructure
     DEFAULT_THREAD_JOIN_TIMEOUT = 5.0
     DEFAULT_WAIT_OPEN_TIMEOUT = 5.0
     DEFAULT_WAIT_OPEN_POLL_INTERVAL = 0.01
+    # Bitget WS 公式仕様(05_§3.5): 30 秒ごとに "ping",2 分未受信で切断。
+    # ヘッダーマージンを取り 60 秒(= interval × 2)で pong タイムアウトと判定する。
+    DEFAULT_HEARTBEAT_INTERVAL = 30.0
+    DEFAULT_HEARTBEAT_TIMEOUT = 60.0
 
     class ConnectionError < StandardError; end
 
@@ -27,13 +31,17 @@ module Infrastructure
     # @param decoder [#decode] 受信メッセージを Result に変換するデコーダ
     # @param clock [#call] 単調増加時刻を返すクロージャ(テスト用 DI)
     # @param logger [Logger] ログ出力先
+    # @param heartbeat_interval [Float] ping 送信間隔(秒)
+    # @param heartbeat_timeout [Float] pong 未受信タイムアウト(秒)
     def initialize(
       paptrading_enabled: false,
       url: nil,
       ws_factory: default_ws_factory,
       decoder: Infrastructure::BitgetPublicWsMessageDecoder,
       clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) },
-      logger: Rails.logger
+      logger: Rails.logger,
+      heartbeat_interval: DEFAULT_HEARTBEAT_INTERVAL,
+      heartbeat_timeout: DEFAULT_HEARTBEAT_TIMEOUT
     )
       @paptrading_enabled = paptrading_enabled
       @url_override = url
@@ -41,6 +49,8 @@ module Infrastructure
       @decoder = decoder
       @clock = clock
       @logger = logger
+      @heartbeat_interval = heartbeat_interval
+      @heartbeat_timeout = heartbeat_timeout
       @subscriptions = {}
       @ws = nil
       @heartbeat_thread = nil
@@ -62,11 +72,13 @@ module Infrastructure
 
         @stop_requested = false
         @open_event_received = false
+        @last_pong_at = clock.call
         establish_connection_internal
         subscriptions.keys.dup
       end
       wait_until_open
       send_subscribe(list_to_subscribe) unless list_to_subscribe.empty?
+      start_heartbeat_thread
     end
 
     # WebSocket 接続を切断する。stop_requested フラグを立てて heartbeat スレッドを停止し,ws を close する。
@@ -127,7 +139,7 @@ module Infrastructure
     private
 
     attr_reader :paptrading_enabled, :url_override, :ws_factory, :decoder, :clock, :logger,
-                :subscriptions, :mutex
+                :heartbeat_interval, :heartbeat_timeout, :subscriptions, :mutex
     attr_accessor :ws, :heartbeat_thread, :stop_requested, :open_event_received, :last_pong_at
 
     # mutex 内で呼ばれる前提の接続状態判定(再帰ロック回避)
@@ -184,14 +196,57 @@ module Infrastructure
       ws.send(payload.to_json)
     end
 
-    # ===== Step 8 以降で実装される受信処理のスタブ(Step 4 段階では何もしない) =====
+    # ===== Heartbeat 関連(設計書 §3.5: 30 秒 ping / 2 分未受信切断) =====
 
-    def handle_message(_raw)
-      # Step 6: pong 判定 / Step 8: dispatch を実装
+    def start_heartbeat_thread
+      @heartbeat_thread = Thread.new { heartbeat_loop }
+    end
+
+    def heartbeat_loop
+      loop do
+        break if stop_requested
+
+        sleep(heartbeat_interval)
+        break if stop_requested
+
+        heartbeat_tick
+      end
+    end
+
+    def heartbeat_tick
+      send_ping
+      check_pong_timeout
+    end
+
+    def send_ping
+      ws&.send("ping")
+    end
+
+    def check_pong_timeout
+      return if last_pong_at.nil?
+
+      elapsed = clock.call - last_pong_at
+      trigger_reconnect(:heartbeat_timeout) if elapsed > heartbeat_timeout
+    end
+
+    # ===== 受信メッセージ処理(Step 6: pong / Step 8: dispatch) =====
+
+    def handle_message(raw)
+      if raw == "pong"
+        @last_pong_at = clock.call
+      else
+        # Step 8: decoder.decode + dispatch を実装
+      end
+    end
+
+    # Step 7 で本実装される再接続トリガー(本ステップではログ出力のみのスタブ)
+    def trigger_reconnect(reason)
+      logger.warn("[BitgetPublicWsClient] reconnect triggered: #{reason}")
+      # Step 7 で reconnect_with_backoff 呼び出しを実装
     end
 
     def handle_disconnection(_reason, _error = nil)
-      # Step 7 で実装(stop_requested 判定 + reconnect トリガー)
+      # Step 7 で本実装(stop_requested 判定 + trigger_reconnect 呼び出し)
     end
 
     def default_ws_factory
