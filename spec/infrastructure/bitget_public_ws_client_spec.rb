@@ -106,6 +106,119 @@ RSpec.describe Infrastructure::BitgetPublicWsClient do
     end
   end
 
+  describe "#subscribe" do
+    let(:subscription) do
+      Infrastructure::BitgetPublicWsSubscription.new(
+        channel: "ticker",
+        inst_type: "USDT-FUTURES",
+        inst_id: "BTCUSDT"
+      )
+    end
+
+    context "接続中に subscribe する場合" do
+      subject { client.subscribe(subscription) }
+
+      before do
+        client.connect
+      end
+
+      it "ws.send が subscribe メッセージ JSON で呼ばれる" do
+        subject
+        expect(ws).to have_received(:send).with(
+          { op: "subscribe",
+            args: [ { instType: "USDT-FUTURES", channel: "ticker", instId: "BTCUSDT" } ] }.to_json
+        )
+      end
+    end
+
+    context "切断中に subscribe する場合" do
+      subject { client.subscribe(subscription) }
+
+      it "ws.send は呼ばれず内部購読リストにのみ登録される" do
+        subject
+        expect(ws).not_to have_received(:send)
+      end
+
+      it "次回 connect 時に既存購読が再送される" do
+        subject
+        client.connect
+        expect(ws).to have_received(:send).with(
+          { op: "subscribe",
+            args: [ { instType: "USDT-FUTURES", channel: "ticker", instId: "BTCUSDT" } ] }.to_json
+        )
+      end
+    end
+
+    context "callback ブロック付きで subscribe する場合" do
+      subject do
+        client.subscribe(subscription) { |_data| nil }
+      end
+
+      before do
+        client.connect
+      end
+
+      it "ws.send が呼ばれる(callback の登録/呼び出しは Step 8 で確認)" do
+        subject
+        expect(ws).to have_received(:send)
+      end
+    end
+  end
+
+  describe "#unsubscribe" do
+    let(:subscription) do
+      Infrastructure::BitgetPublicWsSubscription.new(
+        channel: "ticker",
+        inst_type: "USDT-FUTURES",
+        inst_id: "BTCUSDT"
+      )
+    end
+
+    context "接続中に unsubscribe する場合" do
+      subject { client.unsubscribe(subscription) }
+
+      before do
+        client.connect
+        client.subscribe(subscription)
+      end
+
+      it "ws.send が unsubscribe メッセージ JSON で呼ばれる" do
+        subject
+        expect(ws).to have_received(:send).with(
+          { op: "unsubscribe",
+            args: [ { instType: "USDT-FUTURES", channel: "ticker", instId: "BTCUSDT" } ] }.to_json
+        )
+      end
+    end
+
+    context "未登録の subscription を unsubscribe する場合" do
+      subject { client.unsubscribe(subscription) }
+
+      before do
+        client.connect
+      end
+
+      it "例外なく完了し ws.send は呼ばれない" do
+        expect { subject }.not_to raise_error
+        expect(ws).not_to have_received(:send)
+      end
+    end
+
+    context "切断中に unsubscribe する場合" do
+      subject { client.unsubscribe(subscription) }
+
+      before do
+        client.subscribe(subscription)
+      end
+
+      it "内部購読リストから削除され,次回 connect 時に subscribe されない" do
+        subject
+        client.connect
+        expect(ws).not_to have_received(:send)
+      end
+    end
+  end
+
   describe "#connected?" do
     subject { client.connected? }
 

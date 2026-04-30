@@ -93,6 +93,37 @@ module Infrastructure
       mutex.synchronize { connected_internal? }
     end
 
+    # チャネルを購読する。
+    # 接続中であれば即座に subscribe メッセージを送信し,切断中であれば内部購読リストにのみ登録される
+    # (次回 `connect` 時にまとめて再送信される)。
+    #
+    # @param subscription [Infrastructure::BitgetPublicWsSubscription]
+    # @yield [data, result] 該当チャネルの push データと Result(任意,Step 8 で dispatch から呼び出される)
+    # @return [void]
+    def subscribe(subscription, &callback)
+      send_target = mutex.synchronize do
+        subscriptions[subscription] = callback
+        connected_internal? ? [ subscription ] : nil
+      end
+      send_subscribe(send_target) if send_target
+    end
+
+    # チャネル購読を解除する。
+    # 接続中であれば即座に unsubscribe メッセージを送信し,内部購読リストからも削除する。
+    # 未登録の subscription を渡された場合は例外なく完了する(ws.send も呼ばない)。
+    #
+    # @param subscription [Infrastructure::BitgetPublicWsSubscription]
+    # @return [void]
+    def unsubscribe(subscription)
+      send_target = mutex.synchronize do
+        next nil unless subscriptions.key?(subscription)
+
+        subscriptions.delete(subscription)
+        connected_internal? ? [ subscription ] : nil
+      end
+      send_unsubscribe(send_target) if send_target
+    end
+
     private
 
     attr_reader :paptrading_enabled, :url_override, :ws_factory, :decoder, :clock, :logger,
@@ -138,10 +169,19 @@ module Infrastructure
       end
     end
 
-    # ===== Step 5 以降で実装する機能のスタブ(Step 4 では空 list 受け付けのみ) =====
+    # ===== I/O 実行: mutex 外で呼ばれる前提(ws.send 内部の mutex とのロック順序逆転を防ぐ) =====
 
-    def send_subscribe(_list)
-      # Step 5 で本実装(JSON 整形 + ws.send)
+    def send_subscribe(list)
+      send_op_message(op: "subscribe", list: list)
+    end
+
+    def send_unsubscribe(list)
+      send_op_message(op: "unsubscribe", list: list)
+    end
+
+    def send_op_message(op:, list:)
+      payload = { op: op, args: list.map(&:to_args_hash) }
+      ws.send(payload.to_json)
     end
 
     # ===== Step 8 以降で実装される受信処理のスタブ(Step 4 段階では何もしない) =====
