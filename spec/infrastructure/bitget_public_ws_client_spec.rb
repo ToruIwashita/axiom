@@ -533,6 +533,22 @@ RSpec.describe Infrastructure::BitgetPublicWsClient do
         expect(logger).to have_received(:warn).with(/parse error/)
       end
     end
+
+    # 完了レビュー観察2 対応: Bitget が予期しない arg(必須キー欠落 / nil 等)を返した場合,
+    # BitgetPublicWsSubscription.new が ArgumentError を raise すると受信スレッドが死亡し,
+    # 以降 close/error callback も発火せず再接続不能になる致命的問題を防ぐ。
+    context "push の arg に必須キーが欠落していた場合" do
+      let(:raw) do
+        '{"action":"snapshot","arg":{"channel":"ticker"},' \
+          '"data":[{"lastPr":"50000.0"}],"ts":1695716059516}'
+      end
+
+      it "logger.warn が呼ばれて Client が例外で落ちず callback も呼ばれない" do
+        expect { deliver_raw(raw) }.not_to raise_error
+        expect(received_data).to be_empty
+        expect(logger).to have_received(:warn).with(/invalid push arg/)
+      end
+    end
   end
 
   describe "#connected?" do

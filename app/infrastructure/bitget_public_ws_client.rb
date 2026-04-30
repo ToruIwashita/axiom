@@ -276,6 +276,10 @@ module Infrastructure
       end
     end
 
+    # arg Hash から購読対象を構築し対応する callback を返す。
+    # 完了レビュー観察2 対応: Bitget が予期しない arg(必須キー欠落 / nil 等)を返した場合の
+    # ArgumentError を捕捉する。受信スレッドが死亡すると close/error callback も発火せず
+    # 再接続不能になる致命的問題を防ぐ。
     def lookup_callback(arg)
       subscription = Infrastructure::BitgetPublicWsSubscription.new(
         channel: arg["channel"],
@@ -283,6 +287,9 @@ module Infrastructure
         inst_id: arg["instId"]
       )
       mutex.synchronize { subscriptions[subscription] }
+    rescue ArgumentError => e
+      logger.warn("[BitgetPublicWsClient] invalid push arg: #{arg.inspect} (#{e.message})")
+      nil
     end
 
     # ws.on(:close) / ws.on(:error) callback または heartbeat タイムアウトから呼ばれる切断検知ハンドラ。
