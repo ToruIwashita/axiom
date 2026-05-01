@@ -1,10 +1,8 @@
 require "rails_helper"
 
 RSpec.describe Strategy::Revision, type: :model do
-  let(:user) { User.create!(email: "creator@example.com", name: "Creator") }
-  let(:approver) { User.create!(email: "approver@example.com", name: "Approver") }
   let(:definition) do
-    Strategy::Definition.create!(user: user, name: "Strat", market_type: "futures", status: "active")
+    Strategy::Definition.create!(name: "Strat", market_type: "futures", status: "active")
   end
   let(:script_body) do
     <<~RUBY
@@ -24,8 +22,7 @@ RSpec.describe Strategy::Revision, type: :model do
       ast_validation_status: "pending",
       uses_live_forbidden_input: false,
       ai_filter_enabled: false,
-      ai_sizing_enabled: false,
-      created_by: user
+      ai_sizing_enabled: false
     }
   end
 
@@ -64,7 +61,7 @@ RSpec.describe Strategy::Revision, type: :model do
 
     context "別の strategy_definition で revision_number が同じ場合" do
       let(:other_definition) do
-        Strategy::Definition.create!(user: user, name: "Other", market_type: "futures", status: "active")
+        Strategy::Definition.create!(name: "Other", market_type: "futures", status: "active")
       end
       let(:attributes) { base_attributes.merge(strategy_definition: other_definition) }
 
@@ -145,39 +142,19 @@ RSpec.describe Strategy::Revision, type: :model do
         expect(subject.options[:class_name]).to eq("Strategy::Definition")
       end
     end
-
-    context "belongs_to :created_by の場合" do
-      subject { described_class.reflect_on_association(:created_by) }
-
-      it "User を class_name に持つ belongs_to" do
-        expect(subject.macro).to eq(:belongs_to)
-        expect(subject.options[:class_name]).to eq("User")
-      end
-    end
-
-    context "belongs_to :approved_by の場合" do
-      subject { described_class.reflect_on_association(:approved_by) }
-
-      it "User を class_name に持ち optional: true な belongs_to" do
-        expect(subject.macro).to eq(:belongs_to)
-        expect(subject.options[:class_name]).to eq("User")
-        expect(subject.options[:optional]).to be true
-      end
-    end
   end
 
   describe "#approve!" do
     let(:revision) { described_class.create!(base_attributes) }
     let(:approved_at) { Time.utc(2026, 4, 30, 0, 0, 0) }
 
-    subject { revision.approve!(approved_by: approver, approved_at: approved_at) }
+    subject { revision.approve!(approved_at: approved_at) }
 
     context "draft 状態の Revision に approve! を呼ぶ場合" do
-      it "state_approved? が true で approved_by / approved_at が設定される" do
+      it "state_approved? が true で approved_at が設定される" do
         subject
         revision.reload
         expect(revision).to be_state_approved
-        expect(revision.approved_by).to eq(approver)
         expect(revision.approved_at).to eq(approved_at)
       end
     end
@@ -299,7 +276,7 @@ RSpec.describe Strategy::Revision, type: :model do
 
     context "revision の strategy_definition_id と引数が一致しない場合" do
       let(:other_definition) do
-        Strategy::Definition.create!(user: user, name: "Other", market_type: "futures", status: "active")
+        Strategy::Definition.create!(name: "Other", market_type: "futures", status: "active")
       end
       subject { described_class.assert_strategy_definition_consistency!(revision.id, other_definition.id) }
 

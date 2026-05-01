@@ -19,8 +19,6 @@ module Strategy
     belongs_to :strategy_definition,
                class_name: "Strategy::Definition",
                inverse_of: :revisions
-    belongs_to :created_by, class_name: "User"
-    belongs_to :approved_by, class_name: "User", optional: true
 
     validates :revision_number, presence: true,
                                 uniqueness: { scope: :strategy_definition_id }
@@ -37,12 +35,12 @@ module Strategy
 
     # Revision を approved 状態に遷移する(公開ドメインAPI)
     #
-    # @param approved_by [User] 承認者
     # @param approved_at [Time] 承認時刻
     # @return [Boolean] update! の結果
     # @note 内部実装は update! を使い AR enum 自動生成 state_approved! は呼ばない
-    def approve!(approved_by:, approved_at: Time.current)
-      update!(status: "approved", approved_by:, approved_at:)
+    # @note Phase 2 の User 削除に伴い approved_by 引数は廃止(ローカル運用のみで承認者識別は不要)
+    def approve!(approved_at: Time.current)
+      update!(status: "approved", approved_at:)
     end
 
     # Revision を promoted 状態に遷移する(公開ドメインAPI)
