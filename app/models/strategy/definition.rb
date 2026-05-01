@@ -6,7 +6,6 @@ module Strategy
 
     enum :status, STATUSES.index_with(&:itself), prefix: :state
 
-    belongs_to :user
     has_many :revisions,
              class_name: "Strategy::Revision",
              foreign_key: :strategy_definition_id,
