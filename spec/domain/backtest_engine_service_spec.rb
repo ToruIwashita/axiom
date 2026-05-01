@@ -68,7 +68,7 @@ RSpec.describe Domain::BacktestEngineService do
       "status" => "error",
       "order_intents" => [],
       "logs" => [],
-      "errors" => [{ "class" => error_class, "message" => message }],
+      "errors" => [ { "class" => error_class, "message" => message } ],
       "strategy_state_diff" => { "ops" => [] }
     }
   end
@@ -123,8 +123,8 @@ RSpec.describe Domain::BacktestEngineService do
 
       before do
         allow(spawner).to receive(:run).and_return(
-          ipc_ok(order_intents: [{ "side" => "long", "size" => "1.0", "order_type" => "market" }]),
-          ipc_ok(order_intents: [{ "side" => "close", "size" => "0", "order_type" => "market" }])
+          ipc_ok(order_intents: [ { "side" => "long", "size" => "1.0", "order_type" => "market" } ]),
+          ipc_ok(order_intents: [ { "side" => "close", "size" => "0", "order_type" => "market" } ])
         )
       end
 
@@ -175,12 +175,12 @@ RSpec.describe Domain::BacktestEngineService do
 
       before do
         allow(spawner).to receive(:run).and_return(
-          ipc_ok(order_intents: [{
+          ipc_ok(order_intents: [ {
             "side" => "long",
             "size" => "1.0",
             "order_type" => "limit",
             "limit_price" => "98"
-          }])
+          } ])
         )
       end
 
@@ -211,12 +211,12 @@ RSpec.describe Domain::BacktestEngineService do
 
       before do
         allow(spawner).to receive(:run).and_return(
-          ipc_ok(order_intents: [{
+          ipc_ok(order_intents: [ {
             "side" => "long",
             "size" => "1.0",
             "order_type" => "limit",
             "limit_price" => "80"
-          }])
+          } ])
         )
       end
 
@@ -248,7 +248,7 @@ RSpec.describe Domain::BacktestEngineService do
         # 1 candle 目: state を { "counter" => 5 } に置換
         # 2 candle 目: 受信 ctx_input.state が前 candle の置換結果を引き継いでいることを検証
         allow(spawner).to receive(:run).and_return(
-          ipc_ok(state_diff_ops: [{ "op" => "replace_all", "value" => { "counter" => 5 } }]),
+          ipc_ok(state_diff_ops: [ { "op" => "replace_all", "value" => { "counter" => 5 } } ]),
           ipc_ok
         )
       end
@@ -267,7 +267,7 @@ RSpec.describe Domain::BacktestEngineService do
         received_states = []
         allow(spawner).to receive(:run) do |callback:, revision:, ctx_input:|
           received_states << ctx_input["state"]
-          received_states.size == 1 ? ipc_ok(state_diff_ops: [{ "op" => "replace_all", "value" => { "counter" => 5 } }]) : ipc_ok
+          received_states.size == 1 ? ipc_ok(state_diff_ops: [ { "op" => "replace_all", "value" => { "counter" => 5 } } ]) : ipc_ok
         end
         subject
         expect(received_states[0]).to eq({})
@@ -277,7 +277,7 @@ RSpec.describe Domain::BacktestEngineService do
 
     context "spawner が status=error を返す場合" do
       let(:candles) do
-        [candle(ts: Time.utc(2026, 1, 1, 0), open: 100, high: 100, low: 100, close: 100)]
+        [ candle(ts: Time.utc(2026, 1, 1, 0), open: 100, high: 100, low: 100, close: 100) ]
       end
 
       before { allow(spawner).to receive(:run).and_return(ipc_error) }
@@ -299,7 +299,7 @@ RSpec.describe Domain::BacktestEngineService do
 
     context "spawner が status=timeout を返す場合" do
       let(:candles) do
-        [candle(ts: Time.utc(2026, 1, 1, 0), open: 100, high: 100, low: 100, close: 100)]
+        [ candle(ts: Time.utc(2026, 1, 1, 0), open: 100, high: 100, low: 100, close: 100) ]
       end
 
       before do
@@ -324,7 +324,7 @@ RSpec.describe Domain::BacktestEngineService do
     end
 
     context "evaluator への委譲" do
-      let(:candles) { [candle(ts: Time.utc(2026, 1, 1, 0), open: 100, high: 100, low: 100, close: 100)] }
+      let(:candles) { [ candle(ts: Time.utc(2026, 1, 1, 0), open: 100, high: 100, low: 100, close: 100) ] }
       let(:evaluator) { instance_double(Domain::StrategyEvaluatorService) }
       let(:engine) { described_class.new(spawner: spawner, evaluator: evaluator) }
       let(:dummy_metrics) do

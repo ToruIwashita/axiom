@@ -8,7 +8,7 @@ class CreateBacktestingEquityCurvePoints < ActiveRecord::Migration[8.1]
       t.decimal :position_size, precision: 24, scale: 8, null: false
       t.timestamps
 
-      t.index [:backtesting_run_id, :ts], name: "idx_equity_curve_run_ts"
+      t.index [ :backtesting_run_id, :ts ], name: "idx_equity_curve_run_ts"
     end
   end
 end

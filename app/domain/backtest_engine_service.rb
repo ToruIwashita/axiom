@@ -137,7 +137,7 @@ module Domain
       close_price = BigDecimal(candle["close"].to_s)
 
       if intent.side == :close
-        return [position, balance, open_position, nil] unless open_position
+        return [ position, balance, open_position, nil ] unless open_position
 
         return close_position(
           close_price: close_price, candle: candle,
@@ -147,10 +147,10 @@ module Domain
       end
 
       # MVP: 1 ポジ運用(既ポジあれば追加 entry を無視)
-      return [position, balance, open_position, nil] if open_position
+      return [ position, balance, open_position, nil ] if open_position
 
       fill_price = calc_fill_price(intent: intent, candle: candle, slippage_rate: slippage_rate, close_price: close_price)
-      return [position, balance, open_position, nil] if fill_price.nil?
+      return [ position, balance, open_position, nil ] if fill_price.nil?
 
       fee = intent.size * fill_price * fee_rate
       new_balance = balance - fee
@@ -160,7 +160,7 @@ module Domain
       new_open = {
         side: intent.side, size: intent.size, entry_price: fill_price, entry_at: candle["ts"]
       }
-      [new_position, new_balance, new_open, nil]
+      [ new_position, new_balance, new_open, nil ]
     end
 
     def calc_fill_price(intent:, candle:, slippage_rate:, close_price:)
@@ -198,7 +198,7 @@ module Domain
         quantity: size,
         pnl: net_pnl
       }
-      [Domain::PositionValueObject.new, new_balance, nil, trade]
+      [ Domain::PositionValueObject.new, new_balance, nil, trade ]
     end
 
     def build_equity_point(candle:, balance:, position:, peak_equity:)

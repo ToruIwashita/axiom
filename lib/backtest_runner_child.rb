@@ -113,7 +113,7 @@ begin
     "order_intents" => ctx.order_intents,
     "logs" => [],
     "errors" => [],
-    "strategy_state_diff" => { "ops" => [{ "op" => "replace_all", "value" => ctx.state }] }
+    "strategy_state_diff" => { "ops" => [ { "op" => "replace_all", "value" => ctx.state } ] }
   }.to_json)
 rescue => e # rubocop:disable Style/RescueStandardError
   emit_error_response(callback_name, error_class: e.class.name, message: e.message, backtrace: e.backtrace&.first(10))
