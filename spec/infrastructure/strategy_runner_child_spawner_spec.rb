@@ -1,8 +1,7 @@
 require "rails_helper"
 
 RSpec.describe Infrastructure::StrategyRunnerChildSpawner do
-  let(:user) { User.create!(email: "spawner@example.com", name: "Spawner") }
-  let(:definition) { Strategy::Definition.create!(user: user, name: "S", market_type: "futures", status: "active") }
+  let(:definition) { Strategy::Definition.create!(name: "S", market_type: "futures", status: "active") }
   let(:script_body) do
     <<~RUBY
       class Sample < Domain::TradingScriptBase
@@ -20,8 +19,7 @@ RSpec.describe Infrastructure::StrategyRunnerChildSpawner do
       ast_validation_status: "passed",
       uses_live_forbidden_input: false,
       ai_filter_enabled: false,
-      ai_sizing_enabled: false,
-      created_by: user
+      ai_sizing_enabled: false
     )
   end
   let(:ctx_input) { { "candle" => { "ts" => 0 }, "state" => {} } }
