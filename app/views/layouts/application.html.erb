@@ -24,6 +24,13 @@
   </head>
 
   <body>
-    <%= yield %>
+    <nav>
+      <%= link_to "戦略定義一覧", "/strategy_definitions" %>
+      |
+      <%= link_to "バックテスト一覧", "/backtesting_runs" %>
+    </nav>
+    <main>
+      <%= yield %>
+    </main>
   </body>
 </html>
