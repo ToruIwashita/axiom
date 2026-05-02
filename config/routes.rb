@@ -9,6 +9,26 @@ Rails.application.routes.draw do
   # get "manifest" => "rails/pwa#manifest", as: :pwa_manifest
   # get "service-worker" => "rails/pwa#service_worker", as: :pwa_service_worker
 
+  # === axiom Phase 2.2: REST API(02_§4.7 確定仕様) ===
+  namespace :api do
+    namespace :v1 do
+      resources :strategy_definitions, only: %i[index show create update] do
+        resources :revisions, controller: "strategy_revisions", only: %i[index show create] do
+          post :approve, on: :member
+        end
+        resources :backtesting_runs, only: %i[create]
+      end
+
+      resources :backtesting_runs, only: %i[index show] do
+        post :cancel, on: :member
+        resources :trades, controller: "backtesting_run_trades", only: %i[index]
+        resource :equity_curve, controller: "backtesting_run_equity_curve", only: %i[show]
+      end
+
+      post "market_data/sync", to: "market_data#sync"
+    end
+  end
+
   # Defines the root path route ("/")
   # root "posts#index"
 end
