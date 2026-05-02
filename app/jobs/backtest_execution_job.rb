@@ -90,21 +90,28 @@ class BacktestExecutionJob < ApplicationJob
               .map { |ts, c| { "ts" => ts, "close" => c.to_s } }
   end
 
+  # Phase 2.2 完了レビュー軽微 1 反映: 3 種別の DB 書き込みを単一 transaction で
+  # ラップし,Metrics.create! 失敗時に Trades 含めて全ロールバックさせる.
+  # これにより Run = failed / Trades = 残存 / Metrics = なし の不整合状態を回避する.
+  # 重要 2(BacktestingRunService の transaction 削除)とは独立した文脈
+  # (commit 後 enqueue 完了済の Job 内処理)であり矛盾しない.
   def persist_result(run:, result:)
     now = Time.current
 
-    if result[:trades].any?
-      Backtesting::Trade.insert_all(
-        result[:trades].map { |t| t.merge(backtesting_run_id: run.id, created_at: now, updated_at: now) }
-      )
-    end
+    ActiveRecord::Base.transaction do
+      if result[:trades].any?
+        Backtesting::Trade.insert_all(
+          result[:trades].map { |t| t.merge(backtesting_run_id: run.id, created_at: now, updated_at: now) }
+        )
+      end
 
-    Backtesting::Metrics.create!(result[:metrics].to_h.merge(backtesting_run_id: run.id))
+      Backtesting::Metrics.create!(result[:metrics].to_h.merge(backtesting_run_id: run.id))
 
-    if result[:equity_curve].any?
-      Backtesting::EquityCurvePoint.insert_all(
-        result[:equity_curve].map { |p| p.merge(backtesting_run_id: run.id, created_at: now, updated_at: now) }
-      )
+      if result[:equity_curve].any?
+        Backtesting::EquityCurvePoint.insert_all(
+          result[:equity_curve].map { |p| p.merge(backtesting_run_id: run.id, created_at: now, updated_at: now) }
+        )
+      end
     end
   end
 end

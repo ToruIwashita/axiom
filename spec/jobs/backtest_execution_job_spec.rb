@@ -151,4 +151,36 @@ RSpec.describe BacktestExecutionJob do
       expect(subject["retry"]).to be false
     end
   end
+
+  describe "軽微 1: persist_result transaction(Phase 2.2 完了レビュー)" do
+    subject { described_class.new.perform(run.id) }
+
+    let(:invalid_metrics) do
+      # win_rate を範囲外(2.0 = >1)で生成し Backtesting::Metrics validation 違反を誘発
+      Domain::PnLMetricsValueObject.new(
+        win_rate: BigDecimal("2.0"), total_pnl: BigDecimal("100"), max_drawdown: BigDecimal("0.1"),
+        sharpe_ratio: BigDecimal("1.0"), sortino_ratio: BigDecimal("1.5"), volatility: BigDecimal("0.2"),
+        profit_factor: BigDecimal("1.5"), total_trades: 5, avg_holding_seconds: 3_600
+      )
+    end
+    let(:engine_result_with_invalid_metrics) do
+      { trades: [ dummy_trade ], metrics: invalid_metrics, equity_curve: [ dummy_curve_point ] }
+    end
+
+    context "Metrics.create! が validation 違反で失敗する場合" do
+      before { allow(engine).to receive(:run).and_return(engine_result_with_invalid_metrics) }
+
+      it "Trade も EquityCurvePoint もロールバックされる(部分書込なし)" do
+        before_trade_count = Backtesting::Trade.count
+        before_metrics_count = Backtesting::Metrics.count
+        before_curve_count = Backtesting::EquityCurvePoint.count
+        subject
+        expect(Backtesting::Trade.count).to eq(before_trade_count)
+        expect(Backtesting::Metrics.count).to eq(before_metrics_count)
+        expect(Backtesting::EquityCurvePoint.count).to eq(before_curve_count)
+        expect(run.reload).to be_state_failed
+        expect(run.failure_reason).to be_present
+      end
+    end
+  end
 end
