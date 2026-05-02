@@ -1,0 +1,36 @@
+<% content_for :title, "戦略定義一覧" %>
+
+<h1>戦略定義一覧</h1>
+
+<p><%= link_to "新規作成", new_strategy_definition_path %></p>
+
+<% if @definitions.any? %>
+  <table>
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>名前</th>
+        <th>市場区分</th>
+        <th>状態</th>
+        <th>作成日時</th>
+        <th>操作</th>
+      </tr>
+    </thead>
+    <tbody>
+      <% @definitions.each do |definition| %>
+        <tr>
+          <td><%= definition.id %></td>
+          <td><%= link_to definition.name, strategy_definition_path(definition) %></td>
+          <td><%= definition.market_type %></td>
+          <td><%= definition.status %></td>
+          <td><%= definition.created_at.iso8601 %></td>
+          <td>
+            <%= link_to "編集", edit_strategy_definition_path(definition) %>
+          </td>
+        </tr>
+      <% end %>
+    </tbody>
+  </table>
+<% else %>
+  <p>戦略定義が登録されていません。</p>
+<% end %>
