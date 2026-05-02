@@ -31,17 +31,17 @@ module ApplicationServices
 
       data_types.each_with_object({}) do |type, results|
         results[type] = case type
-                        when "futures_candles"
+        when "futures_candles"
                           repository.fetch_futures_candles(symbol, granularity, range).size
-                        when "spot_candles"
+        when "spot_candles"
                           repository.fetch_spot_candles(symbol, granularity, range).size
-                        when "mark_candles"
+        when "mark_candles"
                           repository.fetch_mark_candles(symbol, granularity, range).size
-                        when "index_candles"
+        when "index_candles"
                           repository.fetch_index_candles(symbol, granularity, range).size
-                        when "funding_rates"
+        when "funding_rates"
                           repository.fetch_funding_rates(symbol, range).size
-                        end
+        end
       end
     end
 
