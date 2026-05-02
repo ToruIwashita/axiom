@@ -354,4 +354,25 @@ RSpec.describe Domain::BacktestEngineService do
       end
     end
   end
+
+  describe "#apply_state_diff(軽微追加 B: fail-fast 異常系)" do
+    let(:engine) { described_class.new(spawner: spawner) }
+
+    context "未対応 op を含む diff を受信した場合" do
+      let(:diff) { { "ops" => [ { "op" => "set", "path" => "key", "value" => 1 } ] } }
+
+      it "ArgumentError を raise する(silent ignore 禁止)" do
+        expect { engine.send(:apply_state_diff, {}, diff) }
+          .to raise_error(ArgumentError, /unsupported strategy_state_diff op/)
+      end
+    end
+
+    context "ops が空配列または nil または diff 自体が nil の場合" do
+      it "ArgumentError を raise せず元の state を返す" do
+        expect(engine.send(:apply_state_diff, { "x" => 1 }, nil)).to eq({ "x" => 1 })
+        expect(engine.send(:apply_state_diff, { "x" => 1 }, { "ops" => [] })).to eq({ "x" => 1 })
+        expect(engine.send(:apply_state_diff, { "x" => 1 }, { "ops" => nil })).to eq({ "x" => 1 })
+      end
+    end
+  end
 end
