@@ -12,6 +12,18 @@ module Backtesting
 
     enum :status, STATUSES.index_with(&:itself), prefix: :state
 
+    # Q-2B 反映(02_§5.5): status 変更時に Turbo Streams で UI へ broadcast
+    # `backtesting_run_<id>_status` 要素を _status_badge partial で置換する.
+    # Sidekiq Job(BacktestExecutionJob)からの run.start! / run.complete! /
+    # run.fail! / run.cancel! 呼出時に発火する.polling controller(Step 3-6)
+    # は Action Cable 切断時の fallback として併用.
+    after_update_commit -> {
+      broadcast_replace_to "backtesting_run_#{id}",
+                           target: "backtesting_run_#{id}_status",
+                           partial: "backtesting_runs/status_badge",
+                           locals: { run: self }
+    }
+
     belongs_to :strategy_definition, class_name: "Strategy::Definition"
     belongs_to :strategy_revision, class_name: "Strategy::Revision"
     belongs_to :risk_policy, class_name: "Risk::Policy"

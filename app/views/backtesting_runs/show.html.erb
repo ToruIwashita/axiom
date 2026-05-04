@@ -1,5 +1,11 @@
 <% content_for :title, "Backtesting::Run ##{@run.id}" %>
 
+<%# Q-2B 反映(02_§5.5): Turbo Streams で status 自動更新を購読する.
+    Backtesting::Run#after_update_commit が backtesting_run_<id> stream に
+    broadcast_replace_to で _status_badge partial を送信し,この turbo_stream_from
+    が DOM 上で受信して backtesting_run_<id>_status 要素を差し替える. %>
+<%= turbo_stream_from "backtesting_run_#{@run.id}" %>
+
 <h1>Backtesting::Run #<%= @run.id %></h1>
 
 <dl>
