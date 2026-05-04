@@ -4,16 +4,91 @@
 
 <dl>
   <dt>戦略定義</dt><dd><%= link_to @run.strategy_definition.name, strategy_definition_path(@run.strategy_definition) %></dd>
-  <dt>Revision</dt><dd>#<%= @run.strategy_revision.revision_number %></dd>
-  <dt>状態</dt><dd><%= render partial: "backtesting_runs/status_badge", locals: { run: @run } %></dd>
+  <dt>Revision</dt>
+  <dd>
+    <%= link_to "##{@run.strategy_revision.revision_number}",
+                strategy_definition_revision_path(@run.strategy_definition, @run.strategy_revision) %>
+  </dd>
+  <dt>状態</dt>
+  <dd id="backtesting_run_<%= @run.id %>_status">
+    <%= render partial: "backtesting_runs/status_badge", locals: { run: @run } %>
+  </dd>
   <dt>symbol</dt><dd><%= @run.symbol %></dd>
   <dt>granularity</dt><dd><%= @run.granularity %></dd>
   <dt>期間</dt><dd><%= @run.period_from.iso8601 %> 〜 <%= @run.period_to.iso8601 %></dd>
   <dt>fee_rate / slippage_rate</dt><dd><%= @run.fee_rate %> / <%= @run.slippage_rate %></dd>
+  <dt>started_at</dt><dd><%= @run.started_at&.iso8601 %></dd>
+  <dt>finished_at</dt><dd><%= @run.finished_at&.iso8601 %></dd>
+  <% if @run.failure_reason.present? %>
+    <dt>failure_reason</dt><dd><pre><%= @run.failure_reason %></pre></dd>
+  <% end %>
 </dl>
 
 <% unless @run.terminal? %>
   <%= button_to "キャンセル", cancel_backtesting_run_path(@run), method: :post, data: { turbo_confirm: "キャンセルしますか?" } %>
+
+  <%# 軽微 4 反映: API URL を data-* で渡し JS 側のハードコードを排除 %>
+  <div data-controller="backtest-status-polling"
+       data-backtest-status-polling-api-url-value="<%= api_v1_backtesting_run_url(@run, format: :json) %>"
+       data-backtest-status-polling-status-value="<%= @run.status %>">
+    <small>進行中(自動再読込で完了を待ちます)</small>
+  </div>
+<% end %>
+
+<% if @run.state_completed? && @metrics %>
+  <h2>Metrics</h2>
+  <table>
+    <tr><th>win_rate</th><td><%= @metrics.win_rate %></td></tr>
+    <tr><th>total_pnl</th><td><%= @metrics.total_pnl %></td></tr>
+    <tr><th>max_drawdown</th><td><%= @metrics.max_drawdown %></td></tr>
+    <tr><th>sharpe_ratio</th><td><%= @metrics.sharpe_ratio %></td></tr>
+    <tr><th>sortino_ratio</th><td><%= @metrics.sortino_ratio %></td></tr>
+    <tr><th>volatility</th><td><%= @metrics.volatility %></td></tr>
+    <tr><th>profit_factor</th><td><%= @metrics.profit_factor %></td></tr>
+    <tr><th>total_trades</th><td><%= @metrics.total_trades %></td></tr>
+    <tr><th>avg_holding_seconds</th><td><%= @metrics.avg_holding_seconds %></td></tr>
+  </table>
+
+  <h2>エクイティカーブ</h2>
+  <%# 軽微 4 反映: API URL を data-* で渡す + Q-2C: sample_size でサーバー側間引き %>
+  <div data-controller="equity-curve"
+       data-equity-curve-api-url-value="<%= api_v1_backtesting_run_equity_curve_url(@run, format: :json) %>"
+       data-equity-curve-sample-size-value="1000"
+       style="max-width: 900px;">
+    <canvas data-equity-curve-target="canvas" width="900" height="400"></canvas>
+  </div>
+
+  <h2>Trades</h2>
+  <% if @trades.any? %>
+    <table>
+      <thead>
+        <tr>
+          <th>side</th>
+          <th>entry_at</th>
+          <th>exit_at</th>
+          <th>entry_price</th>
+          <th>exit_price</th>
+          <th>quantity</th>
+          <th>pnl</th>
+        </tr>
+      </thead>
+      <tbody>
+        <% @trades.each do |trade| %>
+          <tr>
+            <td><%= trade.side %></td>
+            <td><%= trade.entry_at.iso8601 %></td>
+            <td><%= trade.exit_at.iso8601 %></td>
+            <td><%= trade.entry_price %></td>
+            <td><%= trade.exit_price %></td>
+            <td><%= trade.quantity %></td>
+            <td><%= trade.pnl %></td>
+          </tr>
+        <% end %>
+      </tbody>
+    </table>
+  <% else %>
+    <p>トレードが発生していません。</p>
+  <% end %>
 <% end %>
 
 <p><%= link_to "バックテスト一覧へ", backtesting_runs_path %></p>

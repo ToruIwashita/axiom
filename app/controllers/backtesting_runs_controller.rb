@@ -5,6 +5,8 @@ class BacktestingRunsController < ApplicationController
 
   def show
     @run = service.get(run_id: params[:id].to_i)
+    @metrics = @run.metrics
+    @trades = @run.trades.order(:entry_at) if @run.state_completed?
   rescue ActiveRecord::RecordNotFound
     redirect_to backtesting_runs_path, alert: "Backtesting::Run not found"
   end
