@@ -1,0 +1,79 @@
+<% content_for :title, "バックテスト実行 - #{@definition.name}" %>
+
+<h1>バックテスト実行 - <%= @definition.name %></h1>
+
+<% if flash[:alert] %>
+  <div class="alert"><%= flash[:alert] %></div>
+<% end %>
+
+<% if @available_revisions.empty? %>
+  <p><strong>注意:</strong> このストラテジーには approved/promoted/deprecated/archived 状態のリビジョンがありません。先に Revision を作成・承認してください。</p>
+  <p><%= link_to "戦略定義詳細へ", strategy_definition_path(@definition) %></p>
+<% elsif @available_risk_policies.empty? %>
+  <p><strong>注意:</strong> Risk::Policy が登録されていません。先に rails console 等で Risk::Policy を 1 件作成してください。</p>
+  <p><%= link_to "戦略定義詳細へ", strategy_definition_path(@definition) %></p>
+<% else %>
+  <%= form_with url: strategy_definition_backtesting_runs_path(@definition), method: :post, local: true do |f| %>
+    <div>
+      <label>Revision(軽微 12: バックテスト実行可能なもののみ表示)</label>
+      <%= f.select "backtesting_run[strategy_revision_id]",
+                   @available_revisions.map { |r| ["##{r.revision_number} (#{r.status} / #{r.script_entrypoint})", r.id] },
+                   { selected: @form_defaults[:strategy_revision_id]&.to_i },
+                   required: true %>
+    </div>
+    <div>
+      <label>Risk::Policy</label>
+      <%= f.select "backtesting_run[risk_policy_id]",
+                   @available_risk_policies.map { |p| [p.name, p.id] },
+                   {},
+                   required: true %>
+    </div>
+    <div>
+      <label>symbol</label>
+      <%= f.text_field "backtesting_run[symbol]", value: @form_defaults[:symbol], required: true %>
+    </div>
+    <div>
+      <label>granularity</label>
+      <%= f.select "backtesting_run[granularity]",
+                   [ ["1m", "1m"], ["5m", "5m"], ["15m", "15m"], ["1H", "1H"], ["4H", "4H"], ["1D", "1D"] ],
+                   { selected: @form_defaults[:granularity] } %>
+    </div>
+    <div>
+      <label>period_from(UTC)</label>
+      <%= f.text_field "backtesting_run[period_from]", value: @form_defaults[:period_from], required: true %>
+    </div>
+    <div>
+      <label>period_to(UTC)</label>
+      <%= f.text_field "backtesting_run[period_to]", value: @form_defaults[:period_to], required: true %>
+    </div>
+    <div>
+      <label>fee_rate</label>
+      <%= f.text_field "backtesting_run[fee_rate]", value: @form_defaults[:fee_rate], required: true %>
+    </div>
+    <div>
+      <label>slippage_rate</label>
+      <%= f.text_field "backtesting_run[slippage_rate]", value: @form_defaults[:slippage_rate], required: true %>
+    </div>
+    <div>
+      <label>
+        <%= f.check_box "backtesting_run[include_funding_rate]", { checked: @form_defaults[:include_funding_rate] }, "1", "0" %>
+        funding rate を含める
+      </label>
+    </div>
+    <div>
+      <label>
+        <%= f.check_box "backtesting_run[use_mark_basis]", { checked: @form_defaults[:use_mark_basis] }, "1", "0" %>
+        mark basis を使う(83 日制約)
+      </label>
+    </div>
+    <div>
+      <label>
+        <%= f.check_box "backtesting_run[use_spot_basis]", { checked: @form_defaults[:use_spot_basis] }, "1", "0" %>
+        spot basis を使う
+      </label>
+    </div>
+    <%= f.submit "バックテスト実行" %>
+  <% end %>
+<% end %>
+
+<p><%= link_to "戦略定義詳細へ", strategy_definition_path(@definition) %></p>

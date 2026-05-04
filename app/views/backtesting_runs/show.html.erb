@@ -1,0 +1,19 @@
+<% content_for :title, "Backtesting::Run ##{@run.id}" %>
+
+<h1>Backtesting::Run #<%= @run.id %></h1>
+
+<dl>
+  <dt>戦略定義</dt><dd><%= link_to @run.strategy_definition.name, strategy_definition_path(@run.strategy_definition) %></dd>
+  <dt>Revision</dt><dd>#<%= @run.strategy_revision.revision_number %></dd>
+  <dt>状態</dt><dd><%= render partial: "backtesting_runs/status_badge", locals: { run: @run } %></dd>
+  <dt>symbol</dt><dd><%= @run.symbol %></dd>
+  <dt>granularity</dt><dd><%= @run.granularity %></dd>
+  <dt>期間</dt><dd><%= @run.period_from.iso8601 %> 〜 <%= @run.period_to.iso8601 %></dd>
+  <dt>fee_rate / slippage_rate</dt><dd><%= @run.fee_rate %> / <%= @run.slippage_rate %></dd>
+</dl>
+
+<% unless @run.terminal? %>
+  <%= button_to "キャンセル", cancel_backtesting_run_path(@run), method: :post, data: { turbo_confirm: "キャンセルしますか?" } %>
+<% end %>
+
+<p><%= link_to "バックテスト一覧へ", backtesting_runs_path %></p>

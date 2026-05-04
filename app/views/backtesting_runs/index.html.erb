@@ -1,0 +1,41 @@
+<% content_for :title, "バックテスト一覧" %>
+
+<h1>バックテスト一覧</h1>
+
+<% if @runs.any? %>
+  <table>
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>戦略定義</th>
+        <th>Revision</th>
+        <th>symbol</th>
+        <th>granularity</th>
+        <th>期間</th>
+        <th>状態</th>
+        <th>作成日時</th>
+        <th>操作</th>
+      </tr>
+    </thead>
+    <tbody>
+      <% @runs.each do |run| %>
+        <tr>
+          <td><%= run.id %></td>
+          <td><%= link_to run.strategy_definition.name, strategy_definition_path(run.strategy_definition) %></td>
+          <td>#<%= run.strategy_revision.revision_number %></td>
+          <td><%= run.symbol %></td>
+          <td><%= run.granularity %></td>
+          <td><%= run.period_from.iso8601 %><br><%= run.period_to.iso8601 %></td>
+          <td><%= render partial: "backtesting_runs/status_badge", locals: { run: run } %></td>
+          <td><%= run.created_at.iso8601 %></td>
+          <td>
+            <%= link_to "詳細", backtesting_run_path(run) %>
+          </td>
+        </tr>
+      <% end %>
+    </tbody>
+  </table>
+<% else %>
+  <p>バックテストが登録されていません。戦略定義詳細から実行できます。</p>
+  <p><%= link_to "戦略定義一覧へ", strategy_definitions_path %></p>
+<% end %>
