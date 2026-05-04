@@ -1,0 +1,38 @@
+<% content_for :title, "リビジョン一覧 - #{@definition.name}" %>
+
+<h1>リビジョン一覧 - <%= @definition.name %></h1>
+
+<p><%= link_to "新規 Revision 作成", new_strategy_definition_revision_path(@definition) %></p>
+
+<% if @revisions.any? %>
+  <table>
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>状態</th>
+        <th>AST 検証</th>
+        <th>script_entrypoint</th>
+        <th>作成日時</th>
+        <th>操作</th>
+      </tr>
+    </thead>
+    <tbody>
+      <% @revisions.each do |revision| %>
+        <tr>
+          <td><%= revision.revision_number %></td>
+          <td><%= revision.status %></td>
+          <td><%= revision.ast_validation_status %></td>
+          <td><code><%= revision.script_entrypoint %></code></td>
+          <td><%= revision.created_at.iso8601 %></td>
+          <td>
+            <%= link_to "詳細", strategy_definition_revision_path(@definition, revision) %>
+          </td>
+        </tr>
+      <% end %>
+    </tbody>
+  </table>
+<% else %>
+  <p>リビジョンが登録されていません。</p>
+<% end %>
+
+<p><%= link_to "戦略定義詳細へ", strategy_definition_path(@definition) %></p>

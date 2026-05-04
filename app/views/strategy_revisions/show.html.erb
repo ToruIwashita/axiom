@@ -1,0 +1,43 @@
+<% content_for :title, "Revision ##{@revision.revision_number} - #{@definition.name}" %>
+
+<h1>Revision #<%= @revision.revision_number %></h1>
+
+<dl>
+  <dt>戦略定義</dt><dd><%= link_to @definition.name, strategy_definition_path(@definition) %></dd>
+  <dt>状態</dt><dd><%= @revision.status %></dd>
+  <dt>AST 検証</dt><dd><%= @revision.ast_validation_status %></dd>
+  <% if @revision.ast_validation_report.present? %>
+    <dt>AST 検証レポート</dt><dd><pre><%= @revision.ast_validation_report %></pre></dd>
+  <% end %>
+  <dt>uses_live_forbidden_input</dt><dd><%= @revision.uses_live_forbidden_input %></dd>
+  <dt>script_entrypoint</dt><dd><code><%= @revision.script_entrypoint %></code></dd>
+  <dt>script_checksum</dt><dd><code><%= @revision.script_checksum %></code></dd>
+  <dt>AI フィルタ</dt><dd><%= @revision.ai_filter_enabled ? "有効(template: #{@revision.ai_filter_template_name})" : "無効" %></dd>
+  <dt>AI サイジング</dt><dd><%= @revision.ai_sizing_enabled ? "有効" : "無効" %></dd>
+  <% if @revision.approved_at %>
+    <dt>承認日時</dt><dd><%= @revision.approved_at.iso8601 %></dd>
+  <% end %>
+  <dt>作成日時</dt><dd><%= @revision.created_at.iso8601 %></dd>
+</dl>
+
+<h2>script_content</h2>
+
+<pre><code><%= @revision.script_content %></code></pre>
+
+<% if @revision.state_draft? && @revision.ast_validation_passed? %>
+  <%= button_to "承認(approve)", approve_strategy_definition_revision_path(@definition, @revision), method: :post, data: { turbo_confirm: "approve しますか?" } %>
+<% elsif @revision.state_draft? %>
+  <p><strong>注意:</strong> AST 検証が <%= @revision.ast_validation_status %> のため承認できません。</p>
+<% end %>
+
+<% if @revision.acceptable_for_backtest? %>
+  <p>
+    <%= link_to "このリビジョンでバックテスト実行", new_strategy_definition_backtesting_run_path(@definition, strategy_revision_id: @revision.id) %>
+  </p>
+<% end %>
+
+<p>
+  <%= link_to "リビジョン一覧へ", strategy_definition_revisions_path(@definition) %>
+  |
+  <%= link_to "戦略定義詳細へ", strategy_definition_path(@definition) %>
+</p>
