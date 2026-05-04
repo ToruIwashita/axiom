@@ -1,0 +1,7 @@
+<% content_for :title, "戦略定義を編集 - #{@definition.name}" %>
+
+<h1>戦略定義を編集</h1>
+
+<%= render "form", definition: @definition, url: strategy_definition_path(@definition), method: :patch %>
+
+<p><%= link_to "戦略定義詳細へ", strategy_definition_path(@definition) %></p>

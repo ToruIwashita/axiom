@@ -1,0 +1,7 @@
+<% content_for :title, "戦略定義を新規作成" %>
+
+<h1>戦略定義を新規作成</h1>
+
+<%= render "form", definition: @definition, url: strategy_definitions_path, method: :post %>
+
+<p><%= link_to "戦略定義一覧へ", strategy_definitions_path %></p>

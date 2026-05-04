@@ -1,0 +1,13 @@
+<%
+  color = case run.status
+          when "pending"   then "#888"
+          when "running"   then "#1976d2"
+          when "completed" then "#2e7d32"
+          when "failed"    then "#c62828"
+          when "cancelled" then "#444"
+          else "#666"
+          end
+%>
+<span style="display:inline-block; padding:2px 8px; border-radius:4px; background:<%= color %>; color:#fff; font-size:0.85em;">
+  <%= run.status %>
+</span>

@@ -1,0 +1,54 @@
+<% content_for :title, "#{@definition.name} - 戦略定義" %>
+
+<h1><%= @definition.name %></h1>
+
+<dl>
+  <dt>ID</dt><dd><%= @definition.id %></dd>
+  <dt>説明</dt><dd><%= @definition.description %></dd>
+  <dt>市場区分</dt><dd><%= @definition.market_type %></dd>
+  <dt>状態</dt><dd><%= @definition.status %></dd>
+  <dt>作成日時</dt><dd><%= @definition.created_at.iso8601 %></dd>
+</dl>
+
+<p>
+  <%= link_to "編集", edit_strategy_definition_path(@definition) %>
+  |
+  <%= link_to "戦略定義一覧へ", strategy_definitions_path %>
+</p>
+
+<h2>リビジョン一覧</h2>
+
+<p><%= link_to "新規 Revision 作成", new_strategy_definition_revision_path(@definition) %></p>
+
+<% if @revisions.any? %>
+  <table>
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>状態</th>
+        <th>AST 検証</th>
+        <th>作成日時</th>
+        <th>操作</th>
+      </tr>
+    </thead>
+    <tbody>
+      <% @revisions.each do |revision| %>
+        <tr>
+          <td><%= revision.revision_number %></td>
+          <td><%= revision.status %></td>
+          <td><%= revision.ast_validation_status %></td>
+          <td><%= revision.created_at.iso8601 %></td>
+          <td>
+            <%= link_to "詳細", strategy_definition_revision_path(@definition, revision) %>
+            <% if revision.acceptable_for_backtest? %>
+              |
+              <%= link_to "バックテスト実行", new_strategy_definition_backtesting_run_path(@definition, strategy_revision_id: revision.id) %>
+            <% end %>
+          </td>
+        </tr>
+      <% end %>
+    </tbody>
+  </table>
+<% else %>
+  <p>リビジョンが登録されていません。</p>
+<% end %>

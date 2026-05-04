@@ -29,6 +29,17 @@ Rails.application.routes.draw do
     end
   end
 
+  # === axiom Phase 2.3: UI ルート ===
+  resources :strategy_definitions do
+    resources :revisions, controller: "strategy_revisions", only: %i[index show new create] do
+      post :approve, on: :member
+    end
+    resources :backtesting_runs, only: %i[new create]
+  end
+  resources :backtesting_runs, only: %i[index show] do
+    post :cancel, on: :member
+  end
+
   # Defines the root path route ("/")
-  # root "posts#index"
+  root "backtesting_runs#index"
 end
