@@ -86,7 +86,15 @@ module Infrastructure
         establish_connection_internal
         subscriptions.keys.dup
       end
-      wait_until_open
+
+      # Phase 1.3 obs-6 反映: wait_until_open 例外時に @ws をクリーンアップしてから再 raise
+      begin
+        wait_until_open
+      rescue ConnectionError
+        cleanup_ws_after_open_failure
+        raise
+      end
+
       send_subscribe(list_to_subscribe) unless list_to_subscribe.empty?
       start_heartbeat_thread
     end
@@ -332,10 +340,23 @@ module Infrastructure
           send_subscribe(list_to_resubscribe) unless list_to_resubscribe.empty?
           return
         rescue StandardError => e
+          # Phase 1.3 obs-6 反映: wait_until_open 失敗等で @ws を取り残さない
+          cleanup_ws_after_open_failure
           logger.warn("[BitgetPublicWsClient] reconnect failed: #{e.message}")
           interval = [ interval * 2, reconnect_max_interval ].min
         end
       end
+    end
+
+    # Phase 1.3 obs-6 反映: open 失敗時に @ws を close + nil クリアし,後続の establish/connected? が
+    # 整合するようにする(未クリーンアップだと「ws.nil? は false だが open 未完了」の中途半端状態が残る)
+    def cleanup_ws_after_open_failure
+      ws_to_close = mutex.synchronize do
+        closed = @ws
+        @ws = nil
+        closed
+      end
+      ws_to_close&.close
     end
 
     def default_ws_factory

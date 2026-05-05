@@ -84,6 +84,19 @@ RSpec.describe Infrastructure::BitgetPublicWsClient do
         expect { subject }.to raise_error(described_class::ConnectionError, /already connected/)
       end
     end
+
+    context "wait_until_open が ConnectionError を raise した場合(レビュー obs-6 反映: @ws クリーンアップ)" do
+      before do
+        allow(client).to receive(:wait_until_open)
+          .and_raise(described_class::ConnectionError, "WebSocket open timeout (5.0s)")
+      end
+
+      it "ws.close が呼ばれて @ws が nil クリアされた上で例外が再 raise される" do
+        expect { subject }.to raise_error(described_class::ConnectionError)
+        expect(ws).to have_received(:close)
+        expect(client.connected?).to be false
+      end
+    end
   end
 
   describe "#disconnect" do
@@ -470,6 +483,26 @@ RSpec.describe Infrastructure::BitgetPublicWsClient do
           expect(sleep_calls).to be_empty
           # connect 時の 1 回のみ
           expect(ws_factory).to have_received(:call).once
+        end
+      end
+
+      context "reconnect 内の wait_until_open が ConnectionError を raise した場合(レビュー obs-6 反映: @ws クリーンアップ)" do
+        before do
+          # 外側 before の client.connect は完了済(その時の wait_until_open は outer before で stub 済)
+          # subject 実行(reconnect_with_backoff)時: 1 回目 wait_until_open で raise → 2 回目で成功
+          wait_call_count = 0
+          allow(client).to receive(:wait_until_open) do
+            wait_call_count += 1
+            raise described_class::ConnectionError, "open timeout" if wait_call_count == 1
+          end
+        end
+
+        it "失敗回の @ws が close + nil クリアされた上で次回 reconnect で再 establish される" do
+          subject
+          # connect 時 1 回 + reconnect 失敗 1 回 + reconnect 成功 1 回 = 3 回
+          expect(ws_factory).to have_received(:call).at_least(3).times
+          # wait_until_open 失敗時に ws.close が呼ばれる(cleanup_ws_after_open_failure 経由)
+          expect(ws).to have_received(:close).at_least(:once)
         end
       end
     end
