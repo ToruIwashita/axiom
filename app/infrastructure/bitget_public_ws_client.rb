@@ -86,12 +86,22 @@ module Infrastructure
         establish_connection_internal
         subscriptions.keys.dup
       end
-      wait_until_open
+
+      # Phase 1.3 obs-6 反映: wait_until_open 例外時に @ws をクリーンアップしてから再 raise
+      begin
+        wait_until_open
+      rescue ConnectionError
+        cleanup_ws_after_open_failure
+        raise
+      end
+
       send_subscribe(list_to_subscribe) unless list_to_subscribe.empty?
       start_heartbeat_thread
     end
 
     # WebSocket 接続を切断する。stop_requested フラグを立てて heartbeat スレッドを停止し,ws を close する。
+    # Phase 1.3 obs-7 反映: thread.join(timeout) 後も alive な場合は Thread#kill で最終救済する
+    # (heartbeat sleep 中で stop_requested チェックが届かずゾンビ化するケースの safety net)
     #
     # @param thread_join_timeout [Float] heartbeat スレッドの join タイムアウト(秒)
     # @return [void]
@@ -101,6 +111,7 @@ module Infrastructure
         [ @heartbeat_thread, @ws ]
       end
       thread_to_join&.join(thread_join_timeout)
+      thread_to_join.kill if thread_to_join&.alive?
       ws_to_close&.close
       mutex.synchronize do
         @heartbeat_thread = nil
@@ -265,6 +276,8 @@ module Infrastructure
 
     # Decoder の Result 型を述語メソッドで分岐(設計時レビュー重要3 対応:
     # private_constant の Decoder::Result::* を case/when で参照しない)
+    # Phase 1.3 obs-8 反映: Unknown 型をサイレント無視せず logger.debug で出力
+    # (Bitget 仕様変更時の早期検知,本番では DEBUG レベルなので運用ノイズなし)
     def dispatch(result)
       if result.push?
         callback = lookup_callback(result.arg)
@@ -273,6 +286,8 @@ module Infrastructure
         logger.warn("[BitgetPublicWsClient] event error: #{result.message}") if result.error?
       elsif result.parse_error?
         logger.warn("[BitgetPublicWsClient] parse error: #{result.error.message}")
+      elsif result.unknown?
+        logger.debug("[BitgetPublicWsClient] unknown frame: #{result.inspect}")
       end
     end
 
@@ -294,14 +309,16 @@ module Infrastructure
 
     # ws.on(:close) / ws.on(:error) callback または heartbeat タイムアウトから呼ばれる切断検知ハンドラ。
     # disconnect 中(stop_requested=true)は再接続しない。
-    def handle_disconnection(reason, _error = nil)
+    def handle_disconnection(reason, error = nil)
       return if stop_requested
 
-      trigger_reconnect(reason)
+      trigger_reconnect(reason, error)
     end
 
-    def trigger_reconnect(reason)
-      logger.warn("[BitgetPublicWsClient] reconnect triggered: #{reason}")
+    def trigger_reconnect(reason, error = nil)
+      message = "[BitgetPublicWsClient] reconnect triggered: #{reason}"
+      message += " (#{error.message})" if error
+      logger.warn(message)
       reconnect_with_backoff
     end
 
@@ -330,10 +347,23 @@ module Infrastructure
           send_subscribe(list_to_resubscribe) unless list_to_resubscribe.empty?
           return
         rescue StandardError => e
+          # Phase 1.3 obs-6 反映: wait_until_open 失敗等で @ws を取り残さない
+          cleanup_ws_after_open_failure
           logger.warn("[BitgetPublicWsClient] reconnect failed: #{e.message}")
           interval = [ interval * 2, reconnect_max_interval ].min
         end
       end
+    end
+
+    # Phase 1.3 obs-6 反映: open 失敗時に @ws を close + nil クリアし,後続の establish/connected? が
+    # 整合するようにする(未クリーンアップだと「ws.nil? は false だが open 未完了」の中途半端状態が残る)
+    def cleanup_ws_after_open_failure
+      ws_to_close = mutex.synchronize do
+        closed = @ws
+        @ws = nil
+        closed
+      end
+      ws_to_close&.close
     end
 
     def default_ws_factory

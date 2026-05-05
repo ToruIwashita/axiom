@@ -5,7 +5,7 @@ RSpec.describe Infrastructure::BitgetPublicWsClient do
   let(:clock) { -> { current_time[0] } }
   let(:ws) { instance_double("WebSocket::Client::Simple::Client") }
   let(:ws_factory) { instance_double(Proc) }
-  let(:logger) { instance_double(Logger, warn: nil, info: nil, error: nil) }
+  let(:logger) { instance_double(Logger, warn: nil, info: nil, error: nil, debug: nil) }
   let(:registered_callbacks) { {} }
   let(:paptrading_enabled) { true }
   let(:url_override) { nil }
@@ -13,7 +13,7 @@ RSpec.describe Infrastructure::BitgetPublicWsClient do
   let(:heartbeat_timeout) { 60.0 }
   let(:reconnect_initial_interval) { 1.0 }
   let(:reconnect_max_interval) { 30.0 }
-  let(:fake_thread) { instance_double(Thread, kill: nil, join: nil) }
+  let(:fake_thread) { instance_double(Thread, kill: nil, join: nil, alive?: false) }
   let(:client) do
     described_class.new(
       paptrading_enabled: paptrading_enabled,
@@ -84,6 +84,19 @@ RSpec.describe Infrastructure::BitgetPublicWsClient do
         expect { subject }.to raise_error(described_class::ConnectionError, /already connected/)
       end
     end
+
+    context "wait_until_open が ConnectionError を raise した場合(レビュー obs-6 反映: @ws クリーンアップ)" do
+      before do
+        allow(client).to receive(:wait_until_open)
+          .and_raise(described_class::ConnectionError, "WebSocket open timeout (5.0s)")
+      end
+
+      it "ws.close が呼ばれて @ws が nil クリアされた上で例外が再 raise される" do
+        expect { subject }.to raise_error(described_class::ConnectionError)
+        expect(ws).to have_received(:close)
+        expect(client.connected?).to be false
+      end
+    end
   end
 
   describe "#disconnect" do
@@ -115,6 +128,39 @@ RSpec.describe Infrastructure::BitgetPublicWsClient do
 
       it "thread.join を呼ばずに正常完了する(@heartbeat_thread が nil のため)" do
         expect { subject }.not_to raise_error
+      end
+    end
+
+    context "thread.join(timeout) 後も heartbeat_thread が alive な場合(レビュー obs-7 反映: 最終救済)" do
+      let(:zombie_thread) { instance_double(Thread, join: nil, alive?: true, kill: nil) }
+
+      before do
+        # connect でセットされる @heartbeat_thread を zombie に差し替え
+        client.connect
+        client.instance_variable_set(:@heartbeat_thread, zombie_thread)
+      end
+
+      it "thread.kill が呼ばれて最終救済される" do
+        subject
+        expect(zombie_thread).to have_received(:join).with(0.01)
+        expect(zombie_thread).to have_received(:alive?)
+        expect(zombie_thread).to have_received(:kill)
+      end
+    end
+
+    context "thread.join(timeout) 後に heartbeat_thread が既に死んでいる場合(レビュー obs-7 反映)" do
+      let(:dead_thread) { instance_double(Thread, join: nil, alive?: false, kill: nil) }
+
+      before do
+        client.connect
+        client.instance_variable_set(:@heartbeat_thread, dead_thread)
+      end
+
+      it "thread.kill は呼ばれない(既に終了済のため)" do
+        subject
+        expect(dead_thread).to have_received(:join).with(0.01)
+        expect(dead_thread).to have_received(:alive?)
+        expect(dead_thread).not_to have_received(:kill)
       end
     end
   end
@@ -309,7 +355,7 @@ RSpec.describe Infrastructure::BitgetPublicWsClient do
           current_time[0] = heartbeat_timeout + 1.0
         end
 
-        it "trigger_reconnect(:heartbeat_timeout) が呼ばれる" do
+        it "trigger_reconnect(:heartbeat_timeout) が呼ばれる(error 情報なし,引数省略)" do
           allow(client).to receive(:trigger_reconnect)
           subject
           expect(client).to have_received(:trigger_reconnect).with(:heartbeat_timeout)
@@ -330,20 +376,22 @@ RSpec.describe Infrastructure::BitgetPublicWsClient do
       context "ws.on(:close) callback が発火した場合" do
         subject { registered_callbacks[:close].call }
 
-        it "trigger_reconnect が呼ばれる(reason=:close)" do
+        it "trigger_reconnect が呼ばれる(reason=:close, error=nil)" do
           allow(client).to receive(:trigger_reconnect)
           subject
-          expect(client).to have_received(:trigger_reconnect).with(:close)
+          expect(client).to have_received(:trigger_reconnect).with(:close, nil)
         end
       end
 
       context "ws.on(:error) callback が発火した場合" do
-        subject { registered_callbacks[:error].call(StandardError.new("ws error")) }
+        let(:ws_error) { StandardError.new("ws error") }
 
-        it "trigger_reconnect が呼ばれる(reason=:error)" do
+        subject { registered_callbacks[:error].call(ws_error) }
+
+        it "trigger_reconnect が呼ばれる(reason=:error, error=ws_error)" do
           allow(client).to receive(:trigger_reconnect)
           subject
-          expect(client).to have_received(:trigger_reconnect).with(:error)
+          expect(client).to have_received(:trigger_reconnect).with(:error, ws_error)
         end
       end
 
@@ -358,6 +406,33 @@ RSpec.describe Infrastructure::BitgetPublicWsClient do
           allow(client).to receive(:trigger_reconnect)
           subject
           expect(client).not_to have_received(:trigger_reconnect)
+        end
+      end
+    end
+
+    describe "#trigger_reconnect(レビュー obs-5 反映: error 引数を logger.warn に含める)" do
+      before do
+        allow(client).to receive(:reconnect_with_backoff)
+      end
+
+      context "error 引数なし(nil)の場合" do
+        subject { client.send(:trigger_reconnect, :close) }
+
+        it "logger.warn メッセージに reason のみが含まれる" do
+          subject
+          expect(logger).to have_received(:warn).with("[BitgetPublicWsClient] reconnect triggered: close")
+        end
+      end
+
+      context "error 引数ありの場合" do
+        let(:ws_error) { StandardError.new("connection reset by peer") }
+
+        subject { client.send(:trigger_reconnect, :error, ws_error) }
+
+        it "logger.warn メッセージに reason と error.message の両方が含まれる" do
+          subject
+          expect(logger).to have_received(:warn)
+            .with(a_string_including("reconnect triggered: error", "connection reset by peer"))
         end
       end
     end
@@ -441,6 +516,26 @@ RSpec.describe Infrastructure::BitgetPublicWsClient do
           expect(sleep_calls).to be_empty
           # connect 時の 1 回のみ
           expect(ws_factory).to have_received(:call).once
+        end
+      end
+
+      context "reconnect 内の wait_until_open が ConnectionError を raise した場合(レビュー obs-6 反映: @ws クリーンアップ)" do
+        before do
+          # 外側 before の client.connect は完了済(その時の wait_until_open は outer before で stub 済)
+          # subject 実行(reconnect_with_backoff)時: 1 回目 wait_until_open で raise → 2 回目で成功
+          wait_call_count = 0
+          allow(client).to receive(:wait_until_open) do
+            wait_call_count += 1
+            raise described_class::ConnectionError, "open timeout" if wait_call_count == 1
+          end
+        end
+
+        it "失敗回の @ws が close + nil クリアされた上で次回 reconnect で再 establish される" do
+          subject
+          # connect 時 1 回 + reconnect 失敗 1 回 + reconnect 成功 1 回 = 3 回
+          expect(ws_factory).to have_received(:call).at_least(3).times
+          # wait_until_open 失敗時に ws.close が呼ばれる(cleanup_ws_after_open_failure 経由)
+          expect(ws).to have_received(:close).at_least(:once)
         end
       end
     end
@@ -531,6 +626,17 @@ RSpec.describe Infrastructure::BitgetPublicWsClient do
       it "logger.warn が呼ばれて Client が例外で落ちない" do
         expect { deliver_raw(raw) }.not_to raise_error
         expect(logger).to have_received(:warn).with(/parse error/)
+      end
+    end
+
+    # Phase 1.3 obs-8 反映: Decoder Unknown 型(event/push/parse_error のいずれにも該当しない構造)を
+    # サイレント無視せず logger.debug で出力 → Bitget 仕様変更時の早期検知を改善
+    context "Decoder の Unknown Result が返された場合(レビュー obs-8 反映)" do
+      let(:raw) { '{"unexpected_top_level_key":"value"}' }
+
+      it "logger.debug が unknown frame メッセージで呼ばれる(Client は例外で落ちない)" do
+        expect { deliver_raw(raw) }.not_to raise_error
+        expect(logger).to have_received(:debug).with(/unknown frame/)
       end
     end
 
