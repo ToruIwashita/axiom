@@ -1,8 +1,8 @@
 module ApplicationServices
-  # Strategy::Revision の CRUD + 承認ユースケースを提供するアプリケーション層サービス
+  # Strategy::Revision の CRUD + 状態遷移ユースケースを提供するアプリケーション層サービス
   #
   # トランザクション境界は各メソッド = 1 トランザクション(AR 暗黙 transaction)。
-  # 02_§4.3 に準拠。promote / deprecate / archive は Phase 3 担当のため本タスクスコープ外。
+  # promote / deprecate / archive は Phase 3.0 で追加(本ファイルでは薄い Model ラッパー)。
   class StrategyRevisionService
     class ApprovalError < StandardError; end
 
@@ -64,6 +64,17 @@ module ApplicationServices
 
       revision.approve!
       revision
+    end
+
+    # Revision を本番昇格する(approved → promoted 遷移)
+    # Phase 3.0 追加: ApplicationServices レベルの薄い Model ラッパー(整合検証は呼出側責務)
+    #
+    # @param revision_id [Integer]
+    # @return [Strategy::Revision] status: :promoted に遷移済の Revision
+    # @raise [ActiveRecord::RecordNotFound] revision_id の Revision が存在しない場合
+    # @raise [Strategy::Revision::LiveForbiddenInputError] uses_live_forbidden_input == true の場合
+    def promote(revision_id:)
+      Strategy::Revision.find(revision_id).tap(&:promote!)
     end
 
     # Revision を取得する
