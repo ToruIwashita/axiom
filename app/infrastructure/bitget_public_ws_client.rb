@@ -100,6 +100,8 @@ module Infrastructure
     end
 
     # WebSocket 接続を切断する。stop_requested フラグを立てて heartbeat スレッドを停止し,ws を close する。
+    # Phase 1.3 obs-7 反映: thread.join(timeout) 後も alive な場合は Thread#kill で最終救済する
+    # (heartbeat sleep 中で stop_requested チェックが届かずゾンビ化するケースの safety net)
     #
     # @param thread_join_timeout [Float] heartbeat スレッドの join タイムアウト(秒)
     # @return [void]
@@ -109,6 +111,7 @@ module Infrastructure
         [ @heartbeat_thread, @ws ]
       end
       thread_to_join&.join(thread_join_timeout)
+      thread_to_join.kill if thread_to_join&.alive?
       ws_to_close&.close
       mutex.synchronize do
         @heartbeat_thread = nil

@@ -13,7 +13,7 @@ RSpec.describe Infrastructure::BitgetPublicWsClient do
   let(:heartbeat_timeout) { 60.0 }
   let(:reconnect_initial_interval) { 1.0 }
   let(:reconnect_max_interval) { 30.0 }
-  let(:fake_thread) { instance_double(Thread, kill: nil, join: nil) }
+  let(:fake_thread) { instance_double(Thread, kill: nil, join: nil, alive?: false) }
   let(:client) do
     described_class.new(
       paptrading_enabled: paptrading_enabled,
@@ -128,6 +128,39 @@ RSpec.describe Infrastructure::BitgetPublicWsClient do
 
       it "thread.join を呼ばずに正常完了する(@heartbeat_thread が nil のため)" do
         expect { subject }.not_to raise_error
+      end
+    end
+
+    context "thread.join(timeout) 後も heartbeat_thread が alive な場合(レビュー obs-7 反映: 最終救済)" do
+      let(:zombie_thread) { instance_double(Thread, join: nil, alive?: true, kill: nil) }
+
+      before do
+        # connect でセットされる @heartbeat_thread を zombie に差し替え
+        client.connect
+        client.instance_variable_set(:@heartbeat_thread, zombie_thread)
+      end
+
+      it "thread.kill が呼ばれて最終救済される" do
+        subject
+        expect(zombie_thread).to have_received(:join).with(0.01)
+        expect(zombie_thread).to have_received(:alive?)
+        expect(zombie_thread).to have_received(:kill)
+      end
+    end
+
+    context "thread.join(timeout) 後に heartbeat_thread が既に死んでいる場合(レビュー obs-7 反映)" do
+      let(:dead_thread) { instance_double(Thread, join: nil, alive?: false, kill: nil) }
+
+      before do
+        client.connect
+        client.instance_variable_set(:@heartbeat_thread, dead_thread)
+      end
+
+      it "thread.kill は呼ばれない(既に終了済のため)" do
+        subject
+        expect(dead_thread).to have_received(:join).with(0.01)
+        expect(dead_thread).to have_received(:alive?)
+        expect(dead_thread).not_to have_received(:kill)
       end
     end
   end
