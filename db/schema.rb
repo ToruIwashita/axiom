@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_05_05_140001) do
+ActiveRecord::Schema[8.1].define(version: 2026_05_05_140002) do
   create_table "backtesting_equity_curve_points", charset: "utf8mb4", collation: "utf8mb4_0900_ai_ci", force: :cascade do |t|
     t.bigint "backtesting_run_id", null: false
     t.datetime "created_at", null: false
@@ -76,6 +76,21 @@ ActiveRecord::Schema[8.1].define(version: 2026_05_05_140001) do
     t.string "side", limit: 8, null: false
     t.datetime "updated_at", null: false
     t.index ["backtesting_run_id"], name: "index_backtesting_trades_on_backtesting_run_id"
+  end
+
+  create_table "live_trading_session_leases", charset: "utf8mb4", collation: "utf8mb4_0900_ai_ci", force: :cascade do |t|
+    t.datetime "acquired_at", null: false
+    t.datetime "created_at", null: false
+    t.datetime "expires_at", null: false
+    t.string "lease_token", limit: 64, null: false
+    t.bigint "live_trading_session_id", null: false
+    t.datetime "renewed_at"
+    t.string "status", limit: 16, null: false
+    t.datetime "updated_at", null: false
+    t.string "worker_instance_id", limit: 64, null: false
+    t.index ["lease_token"], name: "index_live_trading_session_leases_on_lease_token", unique: true
+    t.index ["live_trading_session_id"], name: "index_live_trading_session_leases_on_live_trading_session_id", unique: true
+    t.index ["status"], name: "index_live_trading_session_leases_on_status"
   end
 
   create_table "live_trading_sessions", charset: "utf8mb4", collation: "utf8mb4_0900_ai_ci", force: :cascade do |t|
@@ -238,6 +253,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_05_05_140001) do
   add_foreign_key "backtesting_runs", "strategy_definitions"
   add_foreign_key "backtesting_runs", "strategy_revisions"
   add_foreign_key "backtesting_trades", "backtesting_runs"
+  add_foreign_key "live_trading_session_leases", "live_trading_sessions"
   add_foreign_key "live_trading_sessions", "risk_policies"
   add_foreign_key "live_trading_sessions", "strategy_definitions"
   add_foreign_key "live_trading_sessions", "strategy_revisions"
