@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_05_05_140000) do
+ActiveRecord::Schema[8.1].define(version: 2026_05_05_140001) do
   create_table "backtesting_equity_curve_points", charset: "utf8mb4", collation: "utf8mb4_0900_ai_ci", force: :cascade do |t|
     t.bigint "backtesting_run_id", null: false
     t.datetime "created_at", null: false
@@ -101,6 +101,26 @@ ActiveRecord::Schema[8.1].define(version: 2026_05_05_140000) do
     t.index ["strategy_definition_id"], name: "index_live_trading_sessions_on_strategy_definition_id"
     t.index ["strategy_revision_id"], name: "index_live_trading_sessions_on_strategy_revision_id"
     t.index ["symbol"], name: "index_live_trading_sessions_on_symbol"
+  end
+
+  create_table "live_trading_trades", charset: "utf8mb4", collation: "utf8mb4_0900_ai_ci", force: :cascade do |t|
+    t.datetime "created_at", null: false
+    t.datetime "entry_at"
+    t.decimal "entry_price", precision: 30, scale: 12
+    t.datetime "exit_at"
+    t.decimal "exit_price", precision: 30, scale: 12
+    t.text "failure_reason"
+    t.bigint "live_trading_session_id", null: false
+    t.decimal "quantity", precision: 30, scale: 12, null: false
+    t.decimal "realized_pnl", precision: 30, scale: 12
+    t.string "side", limit: 8, null: false
+    t.string "status", limit: 16, null: false
+    t.bigint "strategy_revision_id", null: false
+    t.string "symbol", limit: 32, null: false
+    t.datetime "updated_at", null: false
+    t.index ["live_trading_session_id"], name: "index_live_trading_trades_on_live_trading_session_id"
+    t.index ["status"], name: "index_live_trading_trades_on_status"
+    t.index ["strategy_revision_id"], name: "index_live_trading_trades_on_strategy_revision_id"
   end
 
   create_table "market_data_funding_rate_histories", charset: "utf8mb4", collation: "utf8mb4_0900_ai_ci", force: :cascade do |t|
@@ -221,5 +241,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_05_05_140000) do
   add_foreign_key "live_trading_sessions", "risk_policies"
   add_foreign_key "live_trading_sessions", "strategy_definitions"
   add_foreign_key "live_trading_sessions", "strategy_revisions"
+  add_foreign_key "live_trading_trades", "live_trading_sessions"
+  add_foreign_key "live_trading_trades", "strategy_revisions"
   add_foreign_key "strategy_revisions", "strategy_definitions"
 end
