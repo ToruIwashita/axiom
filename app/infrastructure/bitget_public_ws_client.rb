@@ -294,14 +294,16 @@ module Infrastructure
 
     # ws.on(:close) / ws.on(:error) callback または heartbeat タイムアウトから呼ばれる切断検知ハンドラ。
     # disconnect 中(stop_requested=true)は再接続しない。
-    def handle_disconnection(reason, _error = nil)
+    def handle_disconnection(reason, error = nil)
       return if stop_requested
 
-      trigger_reconnect(reason)
+      trigger_reconnect(reason, error)
     end
 
-    def trigger_reconnect(reason)
-      logger.warn("[BitgetPublicWsClient] reconnect triggered: #{reason}")
+    def trigger_reconnect(reason, error = nil)
+      message = "[BitgetPublicWsClient] reconnect triggered: #{reason}"
+      message += " (#{error.message})" if error
+      logger.warn(message)
       reconnect_with_backoff
     end
 

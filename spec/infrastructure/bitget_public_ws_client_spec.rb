@@ -309,7 +309,7 @@ RSpec.describe Infrastructure::BitgetPublicWsClient do
           current_time[0] = heartbeat_timeout + 1.0
         end
 
-        it "trigger_reconnect(:heartbeat_timeout) が呼ばれる" do
+        it "trigger_reconnect(:heartbeat_timeout) が呼ばれる(error 情報なし,引数省略)" do
           allow(client).to receive(:trigger_reconnect)
           subject
           expect(client).to have_received(:trigger_reconnect).with(:heartbeat_timeout)
@@ -330,20 +330,22 @@ RSpec.describe Infrastructure::BitgetPublicWsClient do
       context "ws.on(:close) callback が発火した場合" do
         subject { registered_callbacks[:close].call }
 
-        it "trigger_reconnect が呼ばれる(reason=:close)" do
+        it "trigger_reconnect が呼ばれる(reason=:close, error=nil)" do
           allow(client).to receive(:trigger_reconnect)
           subject
-          expect(client).to have_received(:trigger_reconnect).with(:close)
+          expect(client).to have_received(:trigger_reconnect).with(:close, nil)
         end
       end
 
       context "ws.on(:error) callback が発火した場合" do
-        subject { registered_callbacks[:error].call(StandardError.new("ws error")) }
+        let(:ws_error) { StandardError.new("ws error") }
 
-        it "trigger_reconnect が呼ばれる(reason=:error)" do
+        subject { registered_callbacks[:error].call(ws_error) }
+
+        it "trigger_reconnect が呼ばれる(reason=:error, error=ws_error)" do
           allow(client).to receive(:trigger_reconnect)
           subject
-          expect(client).to have_received(:trigger_reconnect).with(:error)
+          expect(client).to have_received(:trigger_reconnect).with(:error, ws_error)
         end
       end
 
@@ -358,6 +360,33 @@ RSpec.describe Infrastructure::BitgetPublicWsClient do
           allow(client).to receive(:trigger_reconnect)
           subject
           expect(client).not_to have_received(:trigger_reconnect)
+        end
+      end
+    end
+
+    describe "#trigger_reconnect(レビュー obs-5 反映: error 引数を logger.warn に含める)" do
+      before do
+        allow(client).to receive(:reconnect_with_backoff)
+      end
+
+      context "error 引数なし(nil)の場合" do
+        subject { client.send(:trigger_reconnect, :close) }
+
+        it "logger.warn メッセージに reason のみが含まれる" do
+          subject
+          expect(logger).to have_received(:warn).with("[BitgetPublicWsClient] reconnect triggered: close")
+        end
+      end
+
+      context "error 引数ありの場合" do
+        let(:ws_error) { StandardError.new("connection reset by peer") }
+
+        subject { client.send(:trigger_reconnect, :error, ws_error) }
+
+        it "logger.warn メッセージに reason と error.message の両方が含まれる" do
+          subject
+          expect(logger).to have_received(:warn)
+            .with(a_string_including("reconnect triggered: error", "connection reset by peer"))
         end
       end
     end
