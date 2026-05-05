@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_05_05_140008) do
+ActiveRecord::Schema[8.1].define(version: 2026_05_05_140009) do
   create_table "backtesting_equity_curve_points", charset: "utf8mb4", collation: "utf8mb4_0900_ai_ci", force: :cascade do |t|
     t.bigint "backtesting_run_id", null: false
     t.datetime "created_at", null: false
@@ -163,6 +163,18 @@ ActiveRecord::Schema[8.1].define(version: 2026_05_05_140008) do
     t.datetime "updated_at", null: false
     t.index ["live_trading_session_id", "snapshot_at"], name: "idx_exchange_pos_snapshots_session_snapshot_at"
     t.index ["live_trading_session_id"], name: "index_exchange_position_snapshots_on_live_trading_session_id"
+  end
+
+  create_table "integration_ai_invocation_logs", charset: "utf8mb4", collation: "utf8mb4_0900_ai_ci", force: :cascade do |t|
+    t.string "context_type", limit: 32, null: false
+    t.datetime "created_at", null: false
+    t.integer "latency_ms", null: false
+    t.text "prompt"
+    t.text "response"
+    t.string "status", limit: 32, null: false
+    t.datetime "updated_at", null: false
+    t.index ["context_type"], name: "index_integration_ai_invocation_logs_on_context_type"
+    t.index ["status"], name: "index_integration_ai_invocation_logs_on_status"
   end
 
   create_table "live_trading_session_heartbeats", charset: "utf8mb4", collation: "utf8mb4_0900_ai_ci", force: :cascade do |t|
