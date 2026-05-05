@@ -214,6 +214,79 @@ RSpec.describe ApplicationServices::StrategyRevisionService do
     end
   end
 
+  describe "#deprecate" do
+    subject { service.deprecate(revision_id: revision.id) }
+
+    context "promoted 状態の Revision の場合" do
+      let(:revision) do
+        Strategy::Revision.create!(
+          strategy_definition: definition,
+          revision_number: 1,
+          script_content: script_body,
+          script_entrypoint: "Sample",
+          status: "promoted",
+          ast_validation_status: "passed",
+          uses_live_forbidden_input: false,
+          ai_filter_enabled: false,
+          ai_sizing_enabled: false,
+          approved_at: Time.current,
+          promoted_at: Time.current
+        )
+      end
+
+      it "deprecated 状態に遷移し deprecated_at が設定される" do
+        result = subject
+        expect(result).to be_state_deprecated
+        expect(result.deprecated_at).to be_present
+      end
+    end
+
+    context "存在しない revision_id を渡した場合" do
+      subject { service.deprecate(revision_id: 0) }
+
+      it "ActiveRecord::RecordNotFound を raise する" do
+        expect { subject }.to raise_error(ActiveRecord::RecordNotFound)
+      end
+    end
+  end
+
+  describe "#archive" do
+    subject { service.archive(revision_id: revision.id) }
+
+    context "deprecated 状態の Revision の場合" do
+      let(:revision) do
+        Strategy::Revision.create!(
+          strategy_definition: definition,
+          revision_number: 1,
+          script_content: script_body,
+          script_entrypoint: "Sample",
+          status: "deprecated",
+          ast_validation_status: "passed",
+          uses_live_forbidden_input: false,
+          ai_filter_enabled: false,
+          ai_sizing_enabled: false,
+          approved_at: Time.current,
+          promoted_at: Time.current,
+          deprecated_at: Time.current
+        )
+      end
+
+      it "archived 状態に遷移し archived_at が設定される" do
+        result = subject
+        expect(result).to be_state_archived
+        expect(result.archived_at).to be_present
+      end
+    end
+
+    context "存在しない revision_id を渡した場合" do
+      subject { service.archive(revision_id: 0) }
+
+      it "ActiveRecord::RecordNotFound を raise する" do
+        expect { subject }.to raise_error(ActiveRecord::RecordNotFound)
+      end
+    end
+  end
+
   describe "#get" do
     let!(:revision) do
       Strategy::Revision.create!(

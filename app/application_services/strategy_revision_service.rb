@@ -77,6 +77,26 @@ module ApplicationServices
       Strategy::Revision.find(revision_id).tap(&:promote!)
     end
 
+    # Revision を非推奨化する(promoted → deprecated 遷移)
+    # Phase 3.0 追加: 後続 Revision が promoted 化された時の自動 / 手動操作両用
+    #
+    # @param revision_id [Integer]
+    # @return [Strategy::Revision] status: :deprecated に遷移済の Revision
+    # @raise [ActiveRecord::RecordNotFound] revision_id の Revision が存在しない場合
+    def deprecate(revision_id:)
+      Strategy::Revision.find(revision_id).tap(&:deprecate!)
+    end
+
+    # Revision を完全廃止する(任意 status → archived 遷移)
+    # Phase 3.0 追加: 一度 archive されると Live 起動 / Backtest どちらも不可
+    #
+    # @param revision_id [Integer]
+    # @return [Strategy::Revision] status: :archived に遷移済の Revision
+    # @raise [ActiveRecord::RecordNotFound] revision_id の Revision が存在しない場合
+    def archive(revision_id:)
+      Strategy::Revision.find(revision_id).tap(&:archive!)
+    end
+
     # Revision を取得する
     #
     # @param revision_id [Integer]
