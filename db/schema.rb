@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_05_05_140006) do
+ActiveRecord::Schema[8.1].define(version: 2026_05_05_140007) do
   create_table "backtesting_equity_curve_points", charset: "utf8mb4", collation: "utf8mb4_0900_ai_ci", force: :cascade do |t|
     t.bigint "backtesting_run_id", null: false
     t.datetime "created_at", null: false
@@ -76,6 +76,23 @@ ActiveRecord::Schema[8.1].define(version: 2026_05_05_140006) do
     t.string "side", limit: 8, null: false
     t.datetime "updated_at", null: false
     t.index ["backtesting_run_id"], name: "index_backtesting_trades_on_backtesting_run_id"
+  end
+
+  create_table "exchange_algo_orders", charset: "utf8mb4", collation: "utf8mb4_0900_ai_ci", force: :cascade do |t|
+    t.string "algo_type", limit: 16, null: false
+    t.string "bitget_algo_id", limit: 64, null: false
+    t.decimal "callback_ratio", precision: 8, scale: 6
+    t.datetime "created_at", null: false
+    t.decimal "execute_price", precision: 30, scale: 12
+    t.bigint "live_trading_trade_id", null: false
+    t.string "status", limit: 16, null: false
+    t.bigint "strategy_revision_id", null: false
+    t.decimal "trigger_price", precision: 30, scale: 12, null: false
+    t.datetime "updated_at", null: false
+    t.index ["bitget_algo_id"], name: "index_exchange_algo_orders_on_bitget_algo_id", unique: true
+    t.index ["live_trading_trade_id"], name: "index_exchange_algo_orders_on_live_trading_trade_id"
+    t.index ["status"], name: "index_exchange_algo_orders_on_status"
+    t.index ["strategy_revision_id"], name: "index_exchange_algo_orders_on_strategy_revision_id"
   end
 
   create_table "exchange_fills", charset: "utf8mb4", collation: "utf8mb4_0900_ai_ci", force: :cascade do |t|
@@ -311,6 +328,8 @@ ActiveRecord::Schema[8.1].define(version: 2026_05_05_140006) do
   add_foreign_key "backtesting_runs", "strategy_definitions"
   add_foreign_key "backtesting_runs", "strategy_revisions"
   add_foreign_key "backtesting_trades", "backtesting_runs"
+  add_foreign_key "exchange_algo_orders", "live_trading_trades"
+  add_foreign_key "exchange_algo_orders", "strategy_revisions"
   add_foreign_key "exchange_fills", "exchange_orders"
   add_foreign_key "exchange_orders", "live_trading_trades"
   add_foreign_key "exchange_orders", "strategy_revisions"
