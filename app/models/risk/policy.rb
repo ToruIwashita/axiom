@@ -9,6 +9,11 @@ module Risk
     # 銘柄別上限との照合は Phase 2/3 の Domain::RiskGuardService で行う。
     BITGET_USDT_FUTURES_MAX_LEVERAGE = 125
 
+    has_many :live_trading_sessions,
+             class_name: "LiveTrading::Session",
+             foreign_key: :risk_policy_id,
+             dependent: :restrict_with_error
+
     # name の uniqueness: 設計書 §6.3 で大文字小文字区別の指定なし。
     # 運用合意が取れるまで case_sensitive はデフォルト(true)とし,
     # case-insensitive uniqueness が必要となった時点で `case_sensitive: false` に変更する判断ポイントを残す。

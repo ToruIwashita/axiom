@@ -11,6 +11,10 @@ module Strategy
              foreign_key: :strategy_definition_id,
              inverse_of: :strategy_definition,
              dependent: :restrict_with_error
+    has_many :live_trading_sessions,
+             class_name: "LiveTrading::Session",
+             foreign_key: :strategy_definition_id,
+             dependent: :restrict_with_error
 
     validates :name, presence: true
     validates :market_type, presence: true
