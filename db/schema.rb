@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_05_05_140007) do
+ActiveRecord::Schema[8.1].define(version: 2026_05_05_140008) do
   create_table "backtesting_equity_curve_points", charset: "utf8mb4", collation: "utf8mb4_0900_ai_ci", force: :cascade do |t|
     t.bigint "backtesting_run_id", null: false
     t.datetime "created_at", null: false
@@ -132,6 +132,37 @@ ActiveRecord::Schema[8.1].define(version: 2026_05_05_140007) do
     t.index ["live_trading_trade_id"], name: "index_exchange_orders_on_live_trading_trade_id"
     t.index ["status"], name: "index_exchange_orders_on_status"
     t.index ["strategy_revision_id"], name: "index_exchange_orders_on_strategy_revision_id"
+  end
+
+  create_table "exchange_position_snapshots", charset: "utf8mb4", collation: "utf8mb4_0900_ai_ci", force: :cascade do |t|
+    t.string "asset_mode", limit: 16
+    t.boolean "auto_margin", default: false, null: false
+    t.decimal "available", precision: 30, scale: 12
+    t.decimal "break_even_price", precision: 30, scale: 12
+    t.datetime "created_at", null: false
+    t.decimal "deducted_fee", precision: 30, scale: 12
+    t.decimal "frozen_size", precision: 30, scale: 12
+    t.string "hold_side", limit: 8, null: false
+    t.decimal "keep_margin_rate", precision: 30, scale: 12
+    t.integer "leverage"
+    t.decimal "liquidation_price", precision: 30, scale: 12
+    t.bigint "live_trading_session_id", null: false
+    t.string "margin_coin", limit: 16, null: false
+    t.string "margin_mode", limit: 16
+    t.decimal "margin_rate", precision: 30, scale: 12
+    t.decimal "margin_size", precision: 30, scale: 12
+    t.decimal "mark_price", precision: 30, scale: 12
+    t.decimal "open_price_avg", precision: 30, scale: 12
+    t.string "pos_mode", limit: 16
+    t.datetime "snapshot_at", null: false
+    t.string "symbol", limit: 32, null: false
+    t.decimal "total", precision: 30, scale: 12, null: false
+    t.decimal "total_fee", precision: 30, scale: 12
+    t.decimal "unrealized_pl", precision: 30, scale: 12
+    t.decimal "unrealized_plr", precision: 30, scale: 12
+    t.datetime "updated_at", null: false
+    t.index ["live_trading_session_id", "snapshot_at"], name: "idx_exchange_pos_snapshots_session_snapshot_at"
+    t.index ["live_trading_session_id"], name: "index_exchange_position_snapshots_on_live_trading_session_id"
   end
 
   create_table "live_trading_session_heartbeats", charset: "utf8mb4", collation: "utf8mb4_0900_ai_ci", force: :cascade do |t|
@@ -333,6 +364,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_05_05_140007) do
   add_foreign_key "exchange_fills", "exchange_orders"
   add_foreign_key "exchange_orders", "live_trading_trades"
   add_foreign_key "exchange_orders", "strategy_revisions"
+  add_foreign_key "exchange_position_snapshots", "live_trading_sessions"
   add_foreign_key "live_trading_session_heartbeats", "live_trading_sessions"
   add_foreign_key "live_trading_session_leases", "live_trading_sessions"
   add_foreign_key "live_trading_session_states", "live_trading_sessions"
