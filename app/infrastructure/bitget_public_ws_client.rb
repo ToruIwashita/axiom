@@ -276,6 +276,8 @@ module Infrastructure
 
     # Decoder の Result 型を述語メソッドで分岐(設計時レビュー重要3 対応:
     # private_constant の Decoder::Result::* を case/when で参照しない)
+    # Phase 1.3 obs-8 反映: Unknown 型をサイレント無視せず logger.debug で出力
+    # (Bitget 仕様変更時の早期検知,本番では DEBUG レベルなので運用ノイズなし)
     def dispatch(result)
       if result.push?
         callback = lookup_callback(result.arg)
@@ -284,6 +286,8 @@ module Infrastructure
         logger.warn("[BitgetPublicWsClient] event error: #{result.message}") if result.error?
       elsif result.parse_error?
         logger.warn("[BitgetPublicWsClient] parse error: #{result.error.message}")
+      elsif result.unknown?
+        logger.debug("[BitgetPublicWsClient] unknown frame: #{result.inspect}")
       end
     end
 

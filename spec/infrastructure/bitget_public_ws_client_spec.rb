@@ -5,7 +5,7 @@ RSpec.describe Infrastructure::BitgetPublicWsClient do
   let(:clock) { -> { current_time[0] } }
   let(:ws) { instance_double("WebSocket::Client::Simple::Client") }
   let(:ws_factory) { instance_double(Proc) }
-  let(:logger) { instance_double(Logger, warn: nil, info: nil, error: nil) }
+  let(:logger) { instance_double(Logger, warn: nil, info: nil, error: nil, debug: nil) }
   let(:registered_callbacks) { {} }
   let(:paptrading_enabled) { true }
   let(:url_override) { nil }
@@ -626,6 +626,17 @@ RSpec.describe Infrastructure::BitgetPublicWsClient do
       it "logger.warn が呼ばれて Client が例外で落ちない" do
         expect { deliver_raw(raw) }.not_to raise_error
         expect(logger).to have_received(:warn).with(/parse error/)
+      end
+    end
+
+    # Phase 1.3 obs-8 反映: Decoder Unknown 型(event/push/parse_error のいずれにも該当しない構造)を
+    # サイレント無視せず logger.debug で出力 → Bitget 仕様変更時の早期検知を改善
+    context "Decoder の Unknown Result が返された場合(レビュー obs-8 反映)" do
+      let(:raw) { '{"unexpected_top_level_key":"value"}' }
+
+      it "logger.debug が unknown frame メッセージで呼ばれる(Client は例外で落ちない)" do
+        expect { deliver_raw(raw) }.not_to raise_error
+        expect(logger).to have_received(:debug).with(/unknown frame/)
       end
     end
 
