@@ -201,4 +201,38 @@ RSpec.describe LiveTrading::Trade, type: :model do
       expect(trade.strategy_revision).to eq(revision)
     end
   end
+
+  describe "#loss?" do
+    let(:trade) { described_class.create!(base_attributes) }
+
+    context "realized_pnl が nil の場合(未確定)" do
+      it "false を返す" do
+        expect(trade.loss?).to be false
+      end
+    end
+
+    context "realized_pnl が正の場合(利益)" do
+      before { trade.update_columns(realized_pnl: BigDecimal("10")) }
+
+      it "false を返す" do
+        expect(trade.reload.loss?).to be false
+      end
+    end
+
+    context "realized_pnl が負の場合(損失)" do
+      before { trade.update_columns(realized_pnl: BigDecimal("-10")) }
+
+      it "true を返す" do
+        expect(trade.reload.loss?).to be true
+      end
+    end
+
+    context "realized_pnl が 0 の場合(損益分岐)" do
+      before { trade.update_columns(realized_pnl: BigDecimal("0")) }
+
+      it "false を返す(0 は損失ではない)" do
+        expect(trade.reload.loss?).to be false
+      end
+    end
+  end
 end

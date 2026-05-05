@@ -73,5 +73,13 @@ module LiveTrading
         failure_reason: reason.to_s.truncate(FAILURE_REASON_MAX_LENGTH)
       )
     end
+
+    # realized_pnl が負(損失)か判定する
+    # Domain::RiskGuardService#should_cooldown? の連続損失判定で使用される
+    #
+    # @return [Boolean] realized_pnl が存在し負の値なら true,それ以外 false
+    def loss?
+      realized_pnl.present? && realized_pnl.negative?
+    end
   end
 end
