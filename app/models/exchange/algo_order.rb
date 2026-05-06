@@ -20,6 +20,9 @@ module Exchange
     validates :bitget_algo_id, presence: true, uniqueness: true, length: { maximum: 64 }
     validates :trigger_price, presence: true, numericality: { greater_than: 0 }
     validates :status, presence: true
+    # Phase 3.1 レビュー R-11 反映: trailing 時のみ callback_ratio 必須
+    # (Bitget 仕様: presetTrailingPriceRatio は trailing オーダー必須)
+    validates :callback_ratio, presence: true, if: :algo_type_trailing?
 
     # pending → triggered 遷移(WS orders-algo: トリガー到達)
     #

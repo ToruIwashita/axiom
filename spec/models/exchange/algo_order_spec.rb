@@ -107,6 +107,50 @@ RSpec.describe Exchange::AlgoOrder, type: :model do
         expect(subject.errors[:bitget_algo_id]).to be_present
       end
     end
+
+    # Phase 3.1 レビュー R-11 反映: trailing 時のみ callback_ratio 必須
+    context "algo_type=trailing で callback_ratio が nil の場合" do
+      let(:attributes) do
+        base_attributes.merge(
+          algo_type: "trailing",
+          bitget_algo_id: "algo-trailing",
+          callback_ratio: nil
+        )
+      end
+
+      it "valid? が false を返し callback_ratio にエラー" do
+        expect(subject).not_to be_valid
+        expect(subject.errors[:callback_ratio]).to be_present
+      end
+    end
+
+    context "algo_type=trailing で callback_ratio が指定されている場合" do
+      let(:attributes) do
+        base_attributes.merge(
+          algo_type: "trailing",
+          bitget_algo_id: "algo-trailing-2",
+          callback_ratio: BigDecimal("0.01")
+        )
+      end
+
+      it "valid? が true を返す" do
+        expect(subject).to be_valid
+      end
+    end
+
+    context "algo_type=tp で callback_ratio が nil の場合(trailing 以外は不要)" do
+      let(:attributes) do
+        base_attributes.merge(
+          algo_type: "tp",
+          bitget_algo_id: "algo-tp-x",
+          callback_ratio: nil
+        )
+      end
+
+      it "valid? が true を返す(trailing 以外では callback_ratio 不要)" do
+        expect(subject).to be_valid
+      end
+    end
   end
 
   describe "enums" do
