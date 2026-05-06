@@ -166,6 +166,19 @@ RSpec.describe Domain::BacktestContext do
         expect(subject).to be_nil
       end
     end
+
+    # Phase 3.1 レビュー R-6 反映(LiveContext と一貫修正): period=0 / 負値ゼロ除算防衛
+    context "period が 0 の場合" do
+      it "ArgumentError raise" do
+        expect { ctx.sma(0) }.to raise_error(ArgumentError, /period must be >= 1/)
+      end
+    end
+
+    context "period が負値の場合" do
+      it "ArgumentError raise" do
+        expect { ctx.sma(-1) }.to raise_error(ArgumentError, /period must be >= 1/)
+      end
+    end
   end
 
   describe "#rsi" do
@@ -212,6 +225,33 @@ RSpec.describe Domain::BacktestContext do
 
       it "100 を返す(avg_loss=0 ハンドリング)" do
         expect(subject).to eq(BigDecimal("100"))
+      end
+    end
+
+    # Phase 3.1 レビュー R-6 反映(LiveContext と一貫修正): period=0 / 負値ゼロ除算防衛
+    context "period が 0 の場合" do
+      subject do
+        ctx = described_class.new(
+          candle: candle, position: position, balance: balance, state: state, last_candles: rising_candles
+        )
+        ctx.rsi(0)
+      end
+
+      it "ArgumentError raise" do
+        expect { subject }.to raise_error(ArgumentError, /period must be >= 1/)
+      end
+    end
+
+    context "period が負値の場合" do
+      subject do
+        ctx = described_class.new(
+          candle: candle, position: position, balance: balance, state: state, last_candles: rising_candles
+        )
+        ctx.rsi(-1)
+      end
+
+      it "ArgumentError raise" do
+        expect { subject }.to raise_error(ArgumentError, /period must be >= 1/)
       end
     end
   end

@@ -1,31 +1,37 @@
 require "bigdecimal"
 
 module Domain
-  # バックテスト時に戦略コードから参照される ctx adapter
+  # ライブトレード時に戦略コードから参照される ctx adapter
   #
-  # 親プロセス側では .build_ctx_input で ctx_input Hash を生成し、
-  # 子プロセス(lib/backtest_runner_child.rb)側では .from_ctx_input で
-  # インスタンスを再構築する。
+  # BacktestContext の Phase 3 兄弟クラス。入力 API は同一だが,以下が本質的に異なる:
+  # - 動的・非決定論的(WS push 受信が随時)
+  # - state 永続性(LiveTrading::SessionState への永続化を Phase 3.3 で連携)
+  # - async API 呼び出し(REST endpoint 経由)
   #
-  # @note Rails 非依存実装(子プロセスから require_relative で
-  #   読込可能とするため)。BigDecimal は標準ライブラリで使用可能。
-  class BacktestContext
+  # MVP 禁止入力(設計書 05_§2.6.1 / レビュー重要 1 反映):
+  # - ctx.mark_basis / ctx.spot_basis の 2 メソッドのみ(Mark/Index/Spot
+  #   データストリーム取得は MVP で運用コスト過大のため非対応)
+  #
+  # @note Rails 非依存実装(子プロセスから require_relative で読込可能とするため)
+  class LiveContext
+    # MVP で live 環境では使用禁止の入力呼出時に raise される例外
+    class NotSupportedInLiveError < StandardError; end
+
     attr_reader :candle, :position, :balance, :state, :funding_rate,
-                :mark_basis, :spot_basis, :last_candles, :order, :order_intents
+                :last_candles, :order, :order_intents
 
     # 親プロセス用: 子に渡す ctx_input Hash を生成する
+    # BacktestContext と同じキー構造だが mark_basis / spot_basis は含めない
     #
-    # @param candle [Hash] 現在 tick の candle({ "ts", "open", "high", "low", "close", ... })
-    # @param position [Domain::PositionValueObject] 仮想ポジション
-    # @param balance [BigDecimal] 仮想残高
+    # @param candle [Hash] 現在 tick の candle
+    # @param position [Domain::PositionValueObject] 現実ポジション
+    # @param balance [BigDecimal] 現実残高
     # @param state [Hash] 戦略内部状態(JSON serializable)
     # @param funding_rate [BigDecimal, nil]
-    # @param mark_basis [BigDecimal, nil]
-    # @param spot_basis [BigDecimal, nil]
     # @param last_candles [Array<Hash>] 直近 N 本の candle
     # @return [Hash] ctx_input(子プロセス IPC payload)
     def self.build_ctx_input(candle:, position:, balance:, state:, funding_rate: nil,
-                             mark_basis: nil, spot_basis: nil, last_candles: [])
+                             last_candles: [])
       {
         "candle" => candle,
         "position" => {
@@ -36,16 +42,14 @@ module Domain
         "balance" => balance.to_s,
         "state" => state,
         "funding_rate" => funding_rate&.to_s,
-        "mark_basis" => mark_basis&.to_s,
-        "spot_basis" => spot_basis&.to_s,
         "last_candles" => last_candles
       }
     end
 
-    # 子プロセス用: ctx_input から BacktestContext を再構築する
+    # 子プロセス用: ctx_input から LiveContext を再構築する
     #
     # @param ctx_input [Hash] 親から受信した ctx_input
-    # @return [Domain::BacktestContext]
+    # @return [Domain::LiveContext]
     def self.from_ctx_input(ctx_input)
       pos = ctx_input["position"]
       new(
@@ -58,44 +62,52 @@ module Domain
         balance: BigDecimal(ctx_input["balance"]),
         state: ctx_input["state"] || {},
         funding_rate: ctx_input["funding_rate"] && BigDecimal(ctx_input["funding_rate"]),
-        mark_basis: ctx_input["mark_basis"] && BigDecimal(ctx_input["mark_basis"]),
-        spot_basis: ctx_input["spot_basis"] && BigDecimal(ctx_input["spot_basis"]),
         last_candles: ctx_input["last_candles"] || []
       )
     end
 
-    # 軽微追加 C: order_intents は initializer で空配列で初期化し、
-    # public attr_reader 単独で公開する(private def との重複定義を回避)。
-    #
     # @param candle [Hash] 現在 tick の candle
     # @param position [Domain::PositionValueObject]
     # @param balance [BigDecimal]
     # @param state [Hash]
     # @param funding_rate [BigDecimal, nil]
-    # @param mark_basis [BigDecimal, nil]
-    # @param spot_basis [BigDecimal, nil]
     # @param last_candles [Array<Hash>]
-    def initialize(candle:, position:, balance:, state:, funding_rate: nil,
-                   mark_basis: nil, spot_basis: nil, last_candles: [])
+    def initialize(candle:, position:, balance:, state:, funding_rate: nil, last_candles: [])
       @candle = candle
       @position = position
       @balance = balance
       @state = state
       @funding_rate = funding_rate
-      @mark_basis = mark_basis
-      @spot_basis = spot_basis
       @last_candles = last_candles
       @order_intents = []
       @order = OrderProxy.new(intents: @order_intents)
     end
 
-    # AI フィルタスタブ(常時許可)
+    # MVP 禁止入力(設計書 05_§2.6.1)
+    #
+    # @raise [NotSupportedInLiveError] 必ず raise(MVP では Mark/Index データ取得非対応)
+    def mark_basis
+      raise NotSupportedInLiveError,
+            "ctx.mark_basis is not supported in live environment (MVP). " \
+            "See design doc 05_§2.6.1 for details."
+    end
+
+    # MVP 禁止入力(設計書 05_§2.6.1)
+    #
+    # @raise [NotSupportedInLiveError] 必ず raise(MVP では Spot データ取得非対応)
+    def spot_basis
+      raise NotSupportedInLiveError,
+            "ctx.spot_basis is not supported in live environment (MVP). " \
+            "See design doc 05_§2.6.1 for details."
+    end
+
+    # AI フィルタスタブ(Phase 3.3 で Domain::AiFilterService 経由置換予定)
     #
     # @param template [Symbol, String] テンプレート名(無視される)
     # @param context [Hash] 文脈情報(無視される)
-    # @return [Hash] { enter: true, reason: "backtest stub" }
+    # @return [Hash] { enter: true, reason: "live stub" }
     def ai_filter(template:, context:)
-      { enter: true, reason: "backtest stub" }
+      { enter: true, reason: "live stub" }
     end
 
     # 直近 N 本の candle を取得する
@@ -106,10 +118,10 @@ module Domain
       last_candles.last(n)
     end
 
-    # 単純移動平均を計算する
+    # 単純移動平均を計算する(BacktestContext と同じロジック)
     #
     # @param period [Integer] 期間(1 以上)
-    # @return [BigDecimal, nil] 計算可能なら BigDecimal、データ不足なら nil
+    # @return [BigDecimal, nil] 計算可能なら BigDecimal,データ不足なら nil
     # @raise [ArgumentError] period が 0 以下の場合(Phase 3.1 レビュー R-6 反映)
     def sma(period)
       raise ArgumentError, "period must be >= 1" if period <= 0
@@ -119,10 +131,10 @@ module Domain
       sum / BigDecimal(period)
     end
 
-    # RSI を計算する(Wilder の単純平均版)
+    # RSI を計算する(Wilder の単純平均版,BacktestContext と同じロジック)
     #
     # @param period [Integer] 期間(1 以上)
-    # @return [BigDecimal, nil] period+1 本未満は nil、avg_loss=0 なら 100
+    # @return [BigDecimal, nil] period+1 本未満は nil,avg_loss=0 なら 100
     # @raise [ArgumentError] period が 0 以下の場合(Phase 3.1 レビュー R-6 反映)
     def rsi(period)
       raise ArgumentError, "period must be >= 1" if period <= 0
@@ -147,6 +159,7 @@ module Domain
     private
 
     # 戦略コードから ctx.order.entry(...) / ctx.order.close を呼ぶための proxy
+    # BacktestContext::OrderProxy と同等のインターフェース
     class OrderProxy
       def initialize(intents:)
         @intents = intents

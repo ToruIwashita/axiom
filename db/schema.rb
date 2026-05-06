@@ -10,8 +10,8 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_05_01_223924) do
-  create_table "backtesting_equity_curve_points", charset: "utf8mb4", collation: "utf8mb4_general_ci", force: :cascade do |t|
+ActiveRecord::Schema[8.1].define(version: 2026_05_05_140009) do
+  create_table "backtesting_equity_curve_points", charset: "utf8mb4", collation: "utf8mb4_0900_ai_ci", force: :cascade do |t|
     t.bigint "backtesting_run_id", null: false
     t.datetime "created_at", null: false
     t.decimal "drawdown", precision: 24, scale: 8
@@ -23,7 +23,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_05_01_223924) do
     t.index ["backtesting_run_id"], name: "index_backtesting_equity_curve_points_on_backtesting_run_id"
   end
 
-  create_table "backtesting_metrics", charset: "utf8mb4", collation: "utf8mb4_general_ci", force: :cascade do |t|
+  create_table "backtesting_metrics", charset: "utf8mb4", collation: "utf8mb4_0900_ai_ci", force: :cascade do |t|
     t.integer "avg_holding_seconds", null: false
     t.bigint "backtesting_run_id", null: false
     t.datetime "created_at", null: false
@@ -39,7 +39,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_05_01_223924) do
     t.index ["backtesting_run_id"], name: "index_backtesting_metrics_on_backtesting_run_id", unique: true
   end
 
-  create_table "backtesting_runs", charset: "utf8mb4", collation: "utf8mb4_general_ci", force: :cascade do |t|
+  create_table "backtesting_runs", charset: "utf8mb4", collation: "utf8mb4_0900_ai_ci", force: :cascade do |t|
     t.datetime "created_at", null: false
     t.text "failure_reason"
     t.decimal "fee_rate", precision: 8, scale: 6, null: false
@@ -64,7 +64,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_05_01_223924) do
     t.index ["strategy_revision_id"], name: "index_backtesting_runs_on_strategy_revision_id"
   end
 
-  create_table "backtesting_trades", charset: "utf8mb4", collation: "utf8mb4_general_ci", force: :cascade do |t|
+  create_table "backtesting_trades", charset: "utf8mb4", collation: "utf8mb4_0900_ai_ci", force: :cascade do |t|
     t.bigint "backtesting_run_id", null: false
     t.datetime "created_at", null: false
     t.datetime "entry_at", null: false
@@ -76,6 +76,184 @@ ActiveRecord::Schema[8.1].define(version: 2026_05_01_223924) do
     t.string "side", limit: 8, null: false
     t.datetime "updated_at", null: false
     t.index ["backtesting_run_id"], name: "index_backtesting_trades_on_backtesting_run_id"
+  end
+
+  create_table "exchange_algo_orders", charset: "utf8mb4", collation: "utf8mb4_0900_ai_ci", force: :cascade do |t|
+    t.string "algo_type", limit: 16, null: false
+    t.string "bitget_algo_id", limit: 64, null: false
+    t.decimal "callback_ratio", precision: 8, scale: 6
+    t.datetime "created_at", null: false
+    t.decimal "execute_price", precision: 30, scale: 12
+    t.bigint "live_trading_trade_id", null: false
+    t.string "status", limit: 16, null: false
+    t.bigint "strategy_revision_id", null: false
+    t.decimal "trigger_price", precision: 30, scale: 12, null: false
+    t.datetime "updated_at", null: false
+    t.index ["bitget_algo_id"], name: "index_exchange_algo_orders_on_bitget_algo_id", unique: true
+    t.index ["live_trading_trade_id"], name: "index_exchange_algo_orders_on_live_trading_trade_id"
+    t.index ["status"], name: "index_exchange_algo_orders_on_status"
+    t.index ["strategy_revision_id"], name: "index_exchange_algo_orders_on_strategy_revision_id"
+  end
+
+  create_table "exchange_fills", charset: "utf8mb4", collation: "utf8mb4_0900_ai_ci", force: :cascade do |t|
+    t.string "bitget_fill_id", limit: 64, null: false
+    t.datetime "created_at", null: false
+    t.bigint "exchange_order_id", null: false
+    t.decimal "fee", precision: 30, scale: 12, null: false
+    t.string "fee_coin", limit: 16, null: false
+    t.datetime "filled_at", null: false
+    t.decimal "price", precision: 30, scale: 12, null: false
+    t.decimal "size", precision: 30, scale: 12, null: false
+    t.datetime "updated_at", null: false
+    t.index ["bitget_fill_id"], name: "index_exchange_fills_on_bitget_fill_id", unique: true
+    t.index ["exchange_order_id"], name: "index_exchange_fills_on_exchange_order_id"
+  end
+
+  create_table "exchange_orders", charset: "utf8mb4", collation: "utf8mb4_0900_ai_ci", force: :cascade do |t|
+    t.string "bitget_order_id", limit: 64
+    t.string "client_oid", limit: 64, null: false
+    t.datetime "created_at", null: false
+    t.datetime "finished_at"
+    t.string "force", limit: 16, null: false
+    t.bigint "live_trading_trade_id", null: false
+    t.string "order_type", limit: 8, null: false
+    t.datetime "placed_at"
+    t.decimal "price", precision: 30, scale: 12
+    t.boolean "reduce_only", default: false, null: false
+    t.string "side", limit: 8, null: false
+    t.decimal "size", precision: 30, scale: 12, null: false
+    t.string "status", limit: 32, null: false
+    t.bigint "strategy_revision_id", null: false
+    t.string "symbol", limit: 32, null: false
+    t.string "trade_side", limit: 8, null: false
+    t.datetime "updated_at", null: false
+    t.index ["bitget_order_id"], name: "index_exchange_orders_on_bitget_order_id", unique: true
+    t.index ["client_oid"], name: "index_exchange_orders_on_client_oid", unique: true
+    t.index ["live_trading_trade_id"], name: "index_exchange_orders_on_live_trading_trade_id"
+    t.index ["status"], name: "index_exchange_orders_on_status"
+    t.index ["strategy_revision_id"], name: "index_exchange_orders_on_strategy_revision_id"
+  end
+
+  create_table "exchange_position_snapshots", charset: "utf8mb4", collation: "utf8mb4_0900_ai_ci", force: :cascade do |t|
+    t.string "asset_mode", limit: 16
+    t.boolean "auto_margin", default: false, null: false
+    t.decimal "available", precision: 30, scale: 12
+    t.decimal "break_even_price", precision: 30, scale: 12
+    t.datetime "created_at", null: false
+    t.decimal "deducted_fee", precision: 30, scale: 12
+    t.decimal "frozen_size", precision: 30, scale: 12
+    t.string "hold_side", limit: 8, null: false
+    t.decimal "keep_margin_rate", precision: 30, scale: 12
+    t.integer "leverage"
+    t.decimal "liquidation_price", precision: 30, scale: 12
+    t.bigint "live_trading_session_id", null: false
+    t.string "margin_coin", limit: 16, null: false
+    t.string "margin_mode", limit: 16
+    t.decimal "margin_rate", precision: 30, scale: 12
+    t.decimal "margin_size", precision: 30, scale: 12
+    t.decimal "mark_price", precision: 30, scale: 12
+    t.decimal "open_price_avg", precision: 30, scale: 12
+    t.string "pos_mode", limit: 16
+    t.datetime "snapshot_at", null: false
+    t.string "symbol", limit: 32, null: false
+    t.decimal "total", precision: 30, scale: 12, null: false
+    t.decimal "total_fee", precision: 30, scale: 12
+    t.decimal "unrealized_pl", precision: 30, scale: 12
+    t.decimal "unrealized_plr", precision: 30, scale: 12
+    t.datetime "updated_at", null: false
+    t.index ["live_trading_session_id", "snapshot_at"], name: "idx_exchange_pos_snapshots_session_snapshot_at"
+    t.index ["live_trading_session_id"], name: "index_exchange_position_snapshots_on_live_trading_session_id"
+  end
+
+  create_table "integration_ai_invocation_logs", charset: "utf8mb4", collation: "utf8mb4_0900_ai_ci", force: :cascade do |t|
+    t.string "context_type", limit: 32, null: false
+    t.datetime "created_at", null: false
+    t.integer "latency_ms", null: false
+    t.text "prompt"
+    t.text "response"
+    t.string "status", limit: 32, null: false
+    t.datetime "updated_at", null: false
+    t.index ["context_type"], name: "index_integration_ai_invocation_logs_on_context_type"
+    t.index ["status"], name: "index_integration_ai_invocation_logs_on_status"
+  end
+
+  create_table "live_trading_session_heartbeats", charset: "utf8mb4", collation: "utf8mb4_0900_ai_ci", force: :cascade do |t|
+    t.datetime "created_at", null: false
+    t.bigint "live_trading_session_id", null: false
+    t.datetime "pulsed_at", null: false
+    t.datetime "updated_at", null: false
+    t.string "worker_instance_id", limit: 64, null: false
+    t.index ["live_trading_session_id", "pulsed_at"], name: "idx_lt_heartbeats_session_pulsed_at"
+    t.index ["live_trading_session_id"], name: "idx_on_live_trading_session_id_92c820e151"
+  end
+
+  create_table "live_trading_session_leases", charset: "utf8mb4", collation: "utf8mb4_0900_ai_ci", force: :cascade do |t|
+    t.datetime "acquired_at", null: false
+    t.datetime "created_at", null: false
+    t.datetime "expires_at", null: false
+    t.string "lease_token", limit: 64, null: false
+    t.bigint "live_trading_session_id", null: false
+    t.datetime "renewed_at"
+    t.string "status", limit: 16, null: false
+    t.datetime "updated_at", null: false
+    t.string "worker_instance_id", limit: 64, null: false
+    t.index ["lease_token"], name: "index_live_trading_session_leases_on_lease_token", unique: true
+    t.index ["live_trading_session_id"], name: "index_live_trading_session_leases_on_live_trading_session_id", unique: true
+    t.index ["status"], name: "index_live_trading_session_leases_on_status"
+  end
+
+  create_table "live_trading_session_states", charset: "utf8mb4", collation: "utf8mb4_0900_ai_ci", force: :cascade do |t|
+    t.datetime "created_at", null: false
+    t.bigint "live_trading_session_id", null: false
+    t.integer "lock_version", default: 0, null: false
+    t.json "state_data", null: false
+    t.datetime "updated_at", null: false
+    t.index ["live_trading_session_id"], name: "index_live_trading_session_states_on_live_trading_session_id", unique: true
+  end
+
+  create_table "live_trading_sessions", charset: "utf8mb4", collation: "utf8mb4_0900_ai_ci", force: :cascade do |t|
+    t.string "asset_mode", limit: 16, null: false
+    t.datetime "created_at", null: false
+    t.string "emergency_stop_mode", limit: 32, null: false
+    t.text "failure_reason"
+    t.integer "leverage", null: false
+    t.string "margin_coin", limit: 16, null: false
+    t.string "margin_mode", limit: 16, null: false
+    t.string "position_mode", limit: 16, null: false
+    t.bigint "risk_policy_id", null: false
+    t.datetime "started_at"
+    t.string "status", limit: 32, null: false
+    t.datetime "stopped_at"
+    t.bigint "strategy_definition_id", null: false
+    t.bigint "strategy_revision_id", null: false
+    t.string "symbol", limit: 32, null: false
+    t.datetime "updated_at", null: false
+    t.string "worker_instance_id", limit: 64
+    t.index ["risk_policy_id"], name: "index_live_trading_sessions_on_risk_policy_id"
+    t.index ["status"], name: "index_live_trading_sessions_on_status"
+    t.index ["strategy_definition_id"], name: "index_live_trading_sessions_on_strategy_definition_id"
+    t.index ["strategy_revision_id"], name: "index_live_trading_sessions_on_strategy_revision_id"
+    t.index ["symbol"], name: "index_live_trading_sessions_on_symbol"
+  end
+
+  create_table "live_trading_trades", charset: "utf8mb4", collation: "utf8mb4_0900_ai_ci", force: :cascade do |t|
+    t.datetime "created_at", null: false
+    t.datetime "entry_at"
+    t.decimal "entry_price", precision: 30, scale: 12
+    t.datetime "exit_at"
+    t.decimal "exit_price", precision: 30, scale: 12
+    t.text "failure_reason"
+    t.bigint "live_trading_session_id", null: false
+    t.decimal "quantity", precision: 30, scale: 12, null: false
+    t.decimal "realized_pnl", precision: 30, scale: 12
+    t.string "side", limit: 8, null: false
+    t.string "status", limit: 16, null: false
+    t.bigint "strategy_revision_id", null: false
+    t.string "symbol", limit: 32, null: false
+    t.datetime "updated_at", null: false
+    t.index ["live_trading_session_id"], name: "index_live_trading_trades_on_live_trading_session_id"
+    t.index ["status"], name: "index_live_trading_trades_on_status"
+    t.index ["strategy_revision_id"], name: "index_live_trading_trades_on_strategy_revision_id"
   end
 
   create_table "market_data_funding_rate_histories", charset: "utf8mb4", collation: "utf8mb4_0900_ai_ci", force: :cascade do |t|
@@ -193,5 +371,19 @@ ActiveRecord::Schema[8.1].define(version: 2026_05_01_223924) do
   add_foreign_key "backtesting_runs", "strategy_definitions"
   add_foreign_key "backtesting_runs", "strategy_revisions"
   add_foreign_key "backtesting_trades", "backtesting_runs"
+  add_foreign_key "exchange_algo_orders", "live_trading_trades"
+  add_foreign_key "exchange_algo_orders", "strategy_revisions"
+  add_foreign_key "exchange_fills", "exchange_orders"
+  add_foreign_key "exchange_orders", "live_trading_trades"
+  add_foreign_key "exchange_orders", "strategy_revisions"
+  add_foreign_key "exchange_position_snapshots", "live_trading_sessions"
+  add_foreign_key "live_trading_session_heartbeats", "live_trading_sessions"
+  add_foreign_key "live_trading_session_leases", "live_trading_sessions"
+  add_foreign_key "live_trading_session_states", "live_trading_sessions"
+  add_foreign_key "live_trading_sessions", "risk_policies"
+  add_foreign_key "live_trading_sessions", "strategy_definitions"
+  add_foreign_key "live_trading_sessions", "strategy_revisions"
+  add_foreign_key "live_trading_trades", "live_trading_sessions"
+  add_foreign_key "live_trading_trades", "strategy_revisions"
   add_foreign_key "strategy_revisions", "strategy_definitions"
 end

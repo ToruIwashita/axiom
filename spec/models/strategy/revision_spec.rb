@@ -142,6 +142,25 @@ RSpec.describe Strategy::Revision, type: :model do
         expect(subject.options[:class_name]).to eq("Strategy::Definition")
       end
     end
+
+    # Phase 3.1 追加 / レビュー R-2 反映: 4 件の has_many 逆参照を検証
+    {
+      live_trading_sessions: { class_name: "LiveTrading::Session" },
+      live_trading_trades: { class_name: "LiveTrading::Trade" },
+      exchange_orders: { class_name: "Exchange::Order" },
+      exchange_algo_orders: { class_name: "Exchange::AlgoOrder" }
+    }.each do |assoc, opts|
+      context "has_many :#{assoc} の場合" do
+        subject { described_class.reflect_on_association(assoc) }
+
+        it "#{opts[:class_name]} を class_name + strategy_revision_id を foreign_key + restrict_with_error" do
+          expect(subject.macro).to eq(:has_many)
+          expect(subject.options[:class_name]).to eq(opts[:class_name])
+          expect(subject.options[:foreign_key]).to eq(:strategy_revision_id)
+          expect(subject.options[:dependent]).to eq(:restrict_with_error)
+        end
+      end
+    end
   end
 
   describe "#approve!" do

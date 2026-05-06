@@ -19,6 +19,22 @@ module Strategy
     belongs_to :strategy_definition,
                class_name: "Strategy::Definition",
                inverse_of: :revisions
+    has_many :live_trading_sessions,
+             class_name: "LiveTrading::Session",
+             foreign_key: :strategy_revision_id,
+             dependent: :restrict_with_error
+    has_many :live_trading_trades,
+             class_name: "LiveTrading::Trade",
+             foreign_key: :strategy_revision_id,
+             dependent: :restrict_with_error
+    has_many :exchange_orders,
+             class_name: "Exchange::Order",
+             foreign_key: :strategy_revision_id,
+             dependent: :restrict_with_error
+    has_many :exchange_algo_orders,
+             class_name: "Exchange::AlgoOrder",
+             foreign_key: :strategy_revision_id,
+             dependent: :restrict_with_error
 
     validates :revision_number, presence: true,
                                 uniqueness: { scope: :strategy_definition_id }

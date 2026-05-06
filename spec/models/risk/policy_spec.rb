@@ -132,4 +132,18 @@ RSpec.describe Risk::Policy, type: :model do
       end
     end
   end
+
+  # Phase 3.1 追加 / レビュー R-2 反映
+  describe "associations" do
+    context "has_many :live_trading_sessions の場合" do
+      subject { described_class.reflect_on_association(:live_trading_sessions) }
+
+      it "LiveTrading::Session を class_name + risk_policy_id を foreign_key + restrict_with_error" do
+        expect(subject.macro).to eq(:has_many)
+        expect(subject.options[:class_name]).to eq("LiveTrading::Session")
+        expect(subject.options[:foreign_key]).to eq(:risk_policy_id)
+        expect(subject.options[:dependent]).to eq(:restrict_with_error)
+      end
+    end
+  end
 end
