@@ -21,6 +21,9 @@ module LiveTrading
     validates :side, presence: true
     validates :quantity, presence: true, numericality: { greater_than: 0 }
     validates :status, presence: true
+    # Phase 3.1 レビュー R-5 反映: 価格は正値のみ(Bitget 応答 parsing バグでの負値混入防衛)
+    validates :entry_price, numericality: { greater_than: 0 }, allow_nil: true
+    validates :exit_price, numericality: { greater_than: 0 }, allow_nil: true
 
     # pending → entering 遷移(エントリー発注時)
     #

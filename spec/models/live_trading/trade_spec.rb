@@ -93,6 +93,59 @@ RSpec.describe LiveTrading::Trade, type: :model do
         expect(subject.errors[:quantity]).to be_present
       end
     end
+
+    # Phase 3.1 レビュー R-5 反映: entry_price / exit_price は正値のみ受理
+    context "entry_price が 0 以下の場合" do
+      let(:attributes) { base_attributes.merge(entry_price: BigDecimal("0")) }
+
+      it "valid? が false を返す" do
+        expect(subject).not_to be_valid
+        expect(subject.errors[:entry_price]).to be_present
+      end
+    end
+
+    context "entry_price が負の場合" do
+      let(:attributes) { base_attributes.merge(entry_price: BigDecimal("-1")) }
+
+      it "valid? が false を返す" do
+        expect(subject).not_to be_valid
+        expect(subject.errors[:entry_price]).to be_present
+      end
+    end
+
+    context "entry_price が nil の場合(pending 状態想定)" do
+      let(:attributes) { base_attributes.merge(entry_price: nil) }
+
+      it "valid? が true(allow_nil)" do
+        expect(subject).to be_valid
+      end
+    end
+
+    context "exit_price が 0 以下の場合" do
+      let(:attributes) { base_attributes.merge(exit_price: BigDecimal("0")) }
+
+      it "valid? が false を返す" do
+        expect(subject).not_to be_valid
+        expect(subject.errors[:exit_price]).to be_present
+      end
+    end
+
+    context "exit_price が負の場合" do
+      let(:attributes) { base_attributes.merge(exit_price: BigDecimal("-1")) }
+
+      it "valid? が false を返す" do
+        expect(subject).not_to be_valid
+        expect(subject.errors[:exit_price]).to be_present
+      end
+    end
+
+    context "exit_price が nil の場合(closed 前想定)" do
+      let(:attributes) { base_attributes.merge(exit_price: nil) }
+
+      it "valid? が true(allow_nil)" do
+        expect(subject).to be_valid
+      end
+    end
   end
 
   describe "enums" do
