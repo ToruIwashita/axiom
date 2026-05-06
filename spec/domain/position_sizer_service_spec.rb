@@ -36,6 +36,51 @@ RSpec.describe Domain::PositionSizerService do
       end
     end
 
+    # Phase 3.1 レビュー R-7 反映: 負値防衛
+    context "atr が負値の場合" do
+      let(:balance) { BigDecimal("10000") }
+      let(:atr) { BigDecimal("-1") }
+      let(:risk_pct) { BigDecimal("0.01") }
+      let(:leverage) { 10 }
+
+      it "nil を返す(ATR は理論上常に非負,負値は不正データ)" do
+        expect(subject).to be_nil
+      end
+    end
+
+    context "balance が負値の場合" do
+      let(:balance) { BigDecimal("-1") }
+      let(:atr) { BigDecimal("100") }
+      let(:risk_pct) { BigDecimal("0.01") }
+      let(:leverage) { 10 }
+
+      it "ArgumentError raise(残高は非負前提)" do
+        expect { subject }.to raise_error(ArgumentError, /balance must be >= 0/)
+      end
+    end
+
+    context "risk_pct が負値の場合" do
+      let(:balance) { BigDecimal("10000") }
+      let(:atr) { BigDecimal("100") }
+      let(:risk_pct) { BigDecimal("-0.01") }
+      let(:leverage) { 10 }
+
+      it "ArgumentError raise" do
+        expect { subject }.to raise_error(ArgumentError, /risk_pct must be >= 0/)
+      end
+    end
+
+    context "leverage が 0 以下の場合" do
+      let(:balance) { BigDecimal("10000") }
+      let(:atr) { BigDecimal("100") }
+      let(:risk_pct) { BigDecimal("0.01") }
+      let(:leverage) { 0 }
+
+      it "ArgumentError raise(レバレッジは 1 以上)" do
+        expect { subject }.to raise_error(ArgumentError, /leverage must be >= 1/)
+      end
+    end
+
     context "balance が 0 の場合" do
       let(:balance) { BigDecimal("0") }
       let(:atr) { BigDecimal("100") }
@@ -78,6 +123,15 @@ RSpec.describe Domain::PositionSizerService do
         expect(subject).to eq(BigDecimal("0"))
       end
     end
+
+    # Phase 3.1 レビュー R-7 反映
+    context "負値が指定された場合" do
+      let(:size) { BigDecimal("-1") }
+
+      it "ArgumentError raise" do
+        expect { subject }.to raise_error(ArgumentError, /size must be >= 0/)
+      end
+    end
   end
 
   describe "#calculate_proportional" do
@@ -113,6 +167,37 @@ RSpec.describe Domain::PositionSizerService do
 
       it "balance * ratio を返す" do
         expect(subject).to eq(BigDecimal("1000"))
+      end
+    end
+
+    # Phase 3.1 レビュー R-7 反映: 負値防衛
+    context "balance が負値の場合" do
+      let(:balance) { BigDecimal("-1") }
+      let(:ratio) { BigDecimal("0.1") }
+      let(:leverage) { 5 }
+
+      it "ArgumentError raise" do
+        expect { subject }.to raise_error(ArgumentError, /balance must be >= 0/)
+      end
+    end
+
+    context "ratio が負値の場合" do
+      let(:balance) { BigDecimal("10000") }
+      let(:ratio) { BigDecimal("-0.1") }
+      let(:leverage) { 5 }
+
+      it "ArgumentError raise" do
+        expect { subject }.to raise_error(ArgumentError, /ratio must be >= 0/)
+      end
+    end
+
+    context "leverage が 0 以下の場合" do
+      let(:balance) { BigDecimal("10000") }
+      let(:ratio) { BigDecimal("0.1") }
+      let(:leverage) { 0 }
+
+      it "ArgumentError raise" do
+        expect { subject }.to raise_error(ArgumentError, /leverage must be >= 1/)
       end
     end
   end
