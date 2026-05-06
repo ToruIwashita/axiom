@@ -154,6 +154,27 @@ RSpec.describe Exchange::AlgoOrder, type: :model do
         expect(algo_order).to be_state_cancelled
       end
     end
+
+    describe "状態遷移ガード(レビュー Step R-1: 不正パス)" do
+      describe "#mark_triggered! は pending 以外から呼ぶと InvalidTransitionError" do
+        %w[triggered cancelled].each do |bad_status|
+          it "from #{bad_status}: raise" do
+            algo_order.update_columns(status: bad_status)
+            expect { algo_order.mark_triggered!(execute_price: BigDecimal("51000")) }
+              .to raise_error(described_class::InvalidTransitionError)
+          end
+        end
+      end
+
+      describe "#mark_cancelled! は終端状態(triggered/cancelled)から呼ぶと InvalidTransitionError" do
+        %w[triggered cancelled].each do |bad_status|
+          it "from #{bad_status}: raise(冪等性ガード)" do
+            algo_order.update_columns(status: bad_status)
+            expect { algo_order.mark_cancelled! }.to raise_error(described_class::InvalidTransitionError)
+          end
+        end
+      end
+    end
   end
 
   describe "関連" do

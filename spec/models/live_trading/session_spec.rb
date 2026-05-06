@@ -185,6 +185,12 @@ RSpec.describe LiveTrading::Session, type: :model do
         session.start_stopping!
         expect(session).to be_state_stopping
       end
+
+      it "cooling_down → stopping に遷移する" do
+        session.update!(status: "cooling_down")
+        session.start_stopping!
+        expect(session).to be_state_stopping
+      end
     end
 
     describe "#mark_stopped!" do
@@ -218,6 +224,72 @@ RSpec.describe LiveTrading::Session, type: :model do
         session.mark_halted!(reason: "max_drawdown exceeded")
         expect(session).to be_state_halted
         expect(session.failure_reason).to eq("max_drawdown exceeded")
+      end
+    end
+
+    describe "状態遷移ガード(レビュー Step R-1: 不正パス)" do
+      describe "#start_reconciling! は starting 以外から呼ぶと InvalidTransitionError" do
+        %w[reconciling running cooling_down stopping stopped failed_to_start halted].each do |bad_status|
+          it "from #{bad_status}: raise" do
+            session.update_columns(status: bad_status)
+            expect { session.start_reconciling! }.to raise_error(described_class::InvalidTransitionError)
+          end
+        end
+      end
+
+      describe "#start_running! は reconciling / cooling_down 以外から呼ぶと InvalidTransitionError" do
+        it "reconciling → running は OK" do
+          session.update_columns(status: "reconciling")
+          expect { session.start_running! }.not_to raise_error
+        end
+
+        it "cooling_down → running も OK(resume 経路)" do
+          session.update_columns(status: "cooling_down")
+          expect { session.start_running! }.not_to raise_error
+        end
+
+        %w[starting running stopping stopped failed_to_start halted].each do |bad_status|
+          it "from #{bad_status}: raise" do
+            session.update_columns(status: bad_status)
+            expect { session.start_running! }.to raise_error(described_class::InvalidTransitionError)
+          end
+        end
+      end
+
+      describe "#start_stopping! は running / cooling_down 以外から呼ぶと InvalidTransitionError" do
+        %w[starting reconciling stopping stopped failed_to_start halted].each do |bad_status|
+          it "from #{bad_status}: raise" do
+            session.update_columns(status: bad_status)
+            expect { session.start_stopping! }.to raise_error(described_class::InvalidTransitionError)
+          end
+        end
+      end
+
+      describe "#mark_stopped! は stopping 以外から呼ぶと InvalidTransitionError" do
+        %w[starting reconciling running cooling_down stopped failed_to_start halted].each do |bad_status|
+          it "from #{bad_status}: raise" do
+            session.update_columns(status: bad_status)
+            expect { session.mark_stopped! }.to raise_error(described_class::InvalidTransitionError)
+          end
+        end
+      end
+
+      describe "#mark_failed_to_start! は終端状態(stopped/failed_to_start/halted)から呼ぶと InvalidTransitionError" do
+        %w[stopped failed_to_start halted].each do |bad_status|
+          it "from #{bad_status}: raise(冪等性ガード)" do
+            session.update_columns(status: bad_status)
+            expect { session.mark_failed_to_start!(reason: "x") }.to raise_error(described_class::InvalidTransitionError)
+          end
+        end
+      end
+
+      describe "#mark_halted! は終端状態(stopped/failed_to_start/halted)から呼ぶと InvalidTransitionError" do
+        %w[stopped failed_to_start halted].each do |bad_status|
+          it "from #{bad_status}: raise(冪等性ガード)" do
+            session.update_columns(status: bad_status)
+            expect { session.mark_halted!(reason: "x") }.to raise_error(described_class::InvalidTransitionError)
+          end
+        end
       end
     end
   end

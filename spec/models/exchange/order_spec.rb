@@ -225,6 +225,12 @@ RSpec.describe Exchange::Order, type: :model do
         expect(order).to be_state_filled
         expect(order.finished_at).to eq(finished_at)
       end
+
+      it "partially_filled → filled に遷移する" do
+        order.update!(status: "partially_filled")
+        order.mark_filled!(finished_at: finished_at)
+        expect(order).to be_state_filled
+      end
     end
 
     describe "#mark_cancelled!" do
@@ -236,6 +242,12 @@ RSpec.describe Exchange::Order, type: :model do
         expect(order).to be_state_cancelled
         expect(order.finished_at).to eq(finished_at)
       end
+
+      it "partially_filled → cancelled に遷移する" do
+        order.update!(status: "partially_filled")
+        order.mark_cancelled!(finished_at: finished_at)
+        expect(order).to be_state_cancelled
+      end
     end
 
     describe "#mark_rejected!" do
@@ -245,6 +257,57 @@ RSpec.describe Exchange::Order, type: :model do
         order.mark_rejected!(finished_at: finished_at)
         expect(order).to be_state_rejected
         expect(order.finished_at).to eq(finished_at)
+      end
+    end
+
+    describe "状態遷移ガード(レビュー Step R-1: 不正パス)" do
+      describe "#mark_placed! は pending 以外から呼ぶと InvalidTransitionError" do
+        %w[placed partially_filled filled cancelled rejected].each do |bad_status|
+          it "from #{bad_status}: raise" do
+            order.update_columns(status: bad_status)
+            expect { order.mark_placed!(bitget_order_id: "bgt-x", placed_at: Time.current) }
+              .to raise_error(described_class::InvalidTransitionError)
+          end
+        end
+      end
+
+      describe "#mark_partially_filled! は placed 以外から呼ぶと InvalidTransitionError" do
+        %w[pending partially_filled filled cancelled rejected].each do |bad_status|
+          it "from #{bad_status}: raise" do
+            order.update_columns(status: bad_status)
+            expect { order.mark_partially_filled! }.to raise_error(described_class::InvalidTransitionError)
+          end
+        end
+      end
+
+      describe "#mark_filled! は placed / partially_filled 以外から呼ぶと InvalidTransitionError" do
+        %w[pending filled cancelled rejected].each do |bad_status|
+          it "from #{bad_status}: raise" do
+            order.update_columns(status: bad_status)
+            expect { order.mark_filled!(finished_at: Time.current) }
+              .to raise_error(described_class::InvalidTransitionError)
+          end
+        end
+      end
+
+      describe "#mark_cancelled! は終端状態(filled/cancelled/rejected)から呼ぶと InvalidTransitionError" do
+        %w[filled cancelled rejected].each do |bad_status|
+          it "from #{bad_status}: raise(冪等性ガード)" do
+            order.update_columns(status: bad_status)
+            expect { order.mark_cancelled!(finished_at: Time.current) }
+              .to raise_error(described_class::InvalidTransitionError)
+          end
+        end
+      end
+
+      describe "#mark_rejected! は pending / placed 以外から呼ぶと InvalidTransitionError" do
+        %w[partially_filled filled cancelled rejected].each do |bad_status|
+          it "from #{bad_status}: raise" do
+            order.update_columns(status: bad_status)
+            expect { order.mark_rejected!(finished_at: Time.current) }
+              .to raise_error(described_class::InvalidTransitionError)
+          end
+        end
       end
     end
   end

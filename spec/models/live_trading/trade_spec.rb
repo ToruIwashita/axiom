@@ -188,6 +188,69 @@ RSpec.describe LiveTrading::Trade, type: :model do
         expect(trade.failure_reason.length).to eq(10_000)
       end
     end
+
+    describe "状態遷移ガード(レビュー Step R-1: 不正パス)" do
+      describe "#start_entering! は pending 以外から呼ぶと InvalidTransitionError" do
+        %w[entering open closing closed cancelled failed].each do |bad_status|
+          it "from #{bad_status}: raise" do
+            trade.update_columns(status: bad_status)
+            expect { trade.start_entering! }.to raise_error(described_class::InvalidTransitionError)
+          end
+        end
+      end
+
+      describe "#mark_open! は entering 以外から呼ぶと InvalidTransitionError" do
+        %w[pending open closing closed cancelled failed].each do |bad_status|
+          it "from #{bad_status}: raise" do
+            trade.update_columns(status: bad_status)
+            expect { trade.mark_open!(entry_price: BigDecimal("50000"), entry_at: Time.current) }
+              .to raise_error(described_class::InvalidTransitionError)
+          end
+        end
+      end
+
+      describe "#start_closing! は open 以外から呼ぶと InvalidTransitionError" do
+        %w[pending entering closing closed cancelled failed].each do |bad_status|
+          it "from #{bad_status}: raise" do
+            trade.update_columns(status: bad_status)
+            expect { trade.start_closing! }.to raise_error(described_class::InvalidTransitionError)
+          end
+        end
+      end
+
+      describe "#mark_closed! は closing 以外から呼ぶと InvalidTransitionError" do
+        %w[pending entering open closed cancelled failed].each do |bad_status|
+          it "from #{bad_status}: raise" do
+            trade.update_columns(status: bad_status)
+            expect do
+              trade.mark_closed!(
+                exit_price: BigDecimal("51000"),
+                exit_at: Time.current,
+                realized_pnl: BigDecimal("10")
+              )
+            end.to raise_error(described_class::InvalidTransitionError)
+          end
+        end
+      end
+
+      describe "#mark_cancelled! は終端状態(closed/cancelled/failed)から呼ぶと InvalidTransitionError" do
+        %w[closed cancelled failed].each do |bad_status|
+          it "from #{bad_status}: raise(冪等性ガード)" do
+            trade.update_columns(status: bad_status)
+            expect { trade.mark_cancelled!(reason: "x") }.to raise_error(described_class::InvalidTransitionError)
+          end
+        end
+      end
+
+      describe "#mark_failed! は終端状態(closed/cancelled/failed)から呼ぶと InvalidTransitionError" do
+        %w[closed cancelled failed].each do |bad_status|
+          it "from #{bad_status}: raise(冪等性ガード)" do
+            trade.update_columns(status: bad_status)
+            expect { trade.mark_failed!(reason: "x") }.to raise_error(described_class::InvalidTransitionError)
+          end
+        end
+      end
+    end
   end
 
   describe "関連" do

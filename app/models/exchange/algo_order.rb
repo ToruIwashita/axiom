@@ -2,8 +2,13 @@ module Exchange
   class AlgoOrder < ApplicationRecord
     self.table_name = "exchange_algo_orders"
 
+    class InvalidTransitionError < StandardError; end
+
     ALGO_TYPES = %w[tp sl trailing trigger].freeze
     STATUSES = %w[pending triggered cancelled].freeze
+    TERMINAL_STATUSES = %w[triggered cancelled].freeze
+
+    private_constant :TERMINAL_STATUSES
 
     enum :algo_type, ALGO_TYPES.index_with(&:itself), prefix: :algo_type
     enum :status, STATUSES.index_with(&:itself), prefix: :state
@@ -20,15 +25,29 @@ module Exchange
     #
     # @param execute_price [BigDecimal] 約定価格
     # @return [Boolean] update! の結果
+    # @raise [InvalidTransitionError] pending 以外から呼ばれた場合
     def mark_triggered!(execute_price:)
+      raise InvalidTransitionError, "cannot mark_triggered! from status=#{status}" unless state_pending?
+
       update!(status: "triggered", execute_price:)
     end
 
     # pending → cancelled 遷移(キャンセル成功)
+    # 終端状態(triggered/cancelled)からの再遷移は冪等性ガードで block
     #
     # @return [Boolean] update! の結果
+    # @raise [InvalidTransitionError] 終端状態から呼ばれた場合
     def mark_cancelled!
+      raise InvalidTransitionError, "cannot mark_cancelled! from terminal status=#{status}" if terminal?
+
       update!(status: "cancelled")
+    end
+
+    # 終端状態(triggered/cancelled)か判定する
+    #
+    # @return [Boolean]
+    def terminal?
+      TERMINAL_STATUSES.include?(status)
     end
   end
 end

@@ -2,11 +2,14 @@ module LiveTrading
   class Trade < ApplicationRecord
     self.table_name = "live_trading_trades"
 
+    class InvalidTransitionError < StandardError; end
+
     STATUSES = %w[pending entering open closing closed cancelled failed].freeze
+    TERMINAL_STATUSES = %w[closed cancelled failed].freeze
     SIDES = %w[long short].freeze
     FAILURE_REASON_MAX_LENGTH = 10_000
 
-    private_constant :FAILURE_REASON_MAX_LENGTH
+    private_constant :TERMINAL_STATUSES, :FAILURE_REASON_MAX_LENGTH
 
     enum :status, STATUSES.index_with(&:itself), prefix: :state
     enum :side, SIDES.index_with(&:itself), prefix: :side
@@ -22,7 +25,10 @@ module LiveTrading
     # pending → entering 遷移(エントリー発注時)
     #
     # @return [Boolean] update! の結果
+    # @raise [InvalidTransitionError] pending 以外から呼ばれた場合
     def start_entering!
+      raise InvalidTransitionError, "cannot start_entering! from status=#{status}" unless state_pending?
+
       update!(status: "entering")
     end
 
@@ -31,14 +37,20 @@ module LiveTrading
     # @param entry_price [BigDecimal] 約定価格
     # @param entry_at [Time] 約定時刻
     # @return [Boolean] update! の結果
+    # @raise [InvalidTransitionError] entering 以外から呼ばれた場合
     def mark_open!(entry_price:, entry_at:)
+      raise InvalidTransitionError, "cannot mark_open! from status=#{status}" unless state_entering?
+
       update!(status: "open", entry_price:, entry_at:)
     end
 
     # open → closing 遷移(クローズ発注時)
     #
     # @return [Boolean] update! の結果
+    # @raise [InvalidTransitionError] open 以外から呼ばれた場合
     def start_closing!
+      raise InvalidTransitionError, "cannot start_closing! from status=#{status}" unless state_open?
+
       update!(status: "closing")
     end
 
@@ -48,30 +60,48 @@ module LiveTrading
     # @param exit_at [Time] 約定時刻
     # @param realized_pnl [BigDecimal] 確定損益(fee/slippage 反映後)
     # @return [Boolean] update! の結果
+    # @raise [InvalidTransitionError] closing 以外から呼ばれた場合
     def mark_closed!(exit_price:, exit_at:, realized_pnl:)
+      raise InvalidTransitionError, "cannot mark_closed! from status=#{status}" unless state_closing?
+
       update!(status: "closed", exit_price:, exit_at:, realized_pnl:)
     end
 
-    # 任意状態 → cancelled 遷移(注文キャンセル時)
+    # 非終端状態 → cancelled 遷移(注文キャンセル時)
+    # 終端状態(closed/cancelled/failed)からの再遷移は冪等性ガードで block
     #
     # @param reason [String] キャンセル理由
     # @return [Boolean] update! の結果
+    # @raise [InvalidTransitionError] 終端状態から呼ばれた場合
     def mark_cancelled!(reason:)
+      raise InvalidTransitionError, "cannot mark_cancelled! from terminal status=#{status}" if terminal?
+
       update!(
         status: "cancelled",
         failure_reason: reason.to_s.truncate(FAILURE_REASON_MAX_LENGTH)
       )
     end
 
-    # 任意状態 → failed 遷移(取引所拒否 / 致命エラー時)
+    # 非終端状態 → failed 遷移(取引所拒否 / 致命エラー時)
+    # 終端状態(closed/cancelled/failed)からの再遷移は冪等性ガードで block
     #
     # @param reason [String] 失敗理由(10_000 文字を超える場合は truncate)
     # @return [Boolean] update! の結果
+    # @raise [InvalidTransitionError] 終端状態から呼ばれた場合
     def mark_failed!(reason:)
+      raise InvalidTransitionError, "cannot mark_failed! from terminal status=#{status}" if terminal?
+
       update!(
         status: "failed",
         failure_reason: reason.to_s.truncate(FAILURE_REASON_MAX_LENGTH)
       )
+    end
+
+    # 終端状態(closed/cancelled/failed)か判定する
+    #
+    # @return [Boolean]
+    def terminal?
+      TERMINAL_STATUSES.include?(status)
     end
 
     # realized_pnl が負(損失)か判定する
