@@ -2,6 +2,8 @@ module LiveTrading
   class SessionLease < ApplicationRecord
     self.table_name = "live_trading_session_leases"
 
+    class ActiveLeaseError < StandardError; end
+
     STATUSES = %w[active released expired].freeze
     DEFAULT_TTL_SECONDS = 300
 
@@ -17,22 +19,39 @@ module LiveTrading
     validates :live_trading_session_id, uniqueness: true
 
     # Lease を取得する(設計書 05_§7.2: lease TTL 5 分推奨)
+    # Phase 3.1 レビュー R-4 反映: idempotent 化
+    # - 既存 released / expired レコード,または期限切れ active があれば update! で再利用
+    # - 既存 active かつ期限内なら ActiveLeaseError raise(二重起動防止)
+    # - 既存レコードがなければ新規 create!
     #
     # @param session_id [Integer] LiveTrading::Session の ID
     # @param worker_instance_id [String] Worker プロセス識別子
     # @param ttl_seconds [Integer] TTL 秒数(デフォルト 300 秒)
     # @param acquired_at [Time] 取得時刻
     # @return [LiveTrading::SessionLease] 取得済の Lease
-    # @raise [ActiveRecord::RecordInvalid] 既に lease が存在する場合等
+    # @raise [ActiveLeaseError] 既存の active かつ期限内 lease が存在する場合
     def self.acquire!(session_id:, worker_instance_id:, ttl_seconds: DEFAULT_TTL_SECONDS, acquired_at: Time.current)
-      create!(
-        live_trading_session_id: session_id,
+      attrs = {
         lease_token: SecureRandom.uuid,
         worker_instance_id: worker_instance_id,
         acquired_at: acquired_at,
+        renewed_at: nil,
         expires_at: acquired_at + ttl_seconds,
         status: "active"
-      )
+      }
+
+      existing = find_by(live_trading_session_id: session_id)
+      if existing
+        if existing.state_active? && !existing.expired?(now: acquired_at)
+          raise ActiveLeaseError,
+                "session #{session_id} already has active lease (worker=#{existing.worker_instance_id})"
+        end
+
+        existing.update!(attrs)
+        return existing
+      end
+
+      create!(attrs.merge(live_trading_session_id: session_id))
     end
 
     # active かつ有効期限内の Lease を返すスコープ

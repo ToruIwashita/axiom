@@ -190,6 +190,85 @@ RSpec.describe LiveTrading::SessionLease, type: :model do
         expect(subject.expires_at).to eq(now + 60)
       end
     end
+
+    # Phase 3.1 レビュー R-4 反映: idempotent 化(release 後 / expired 後の再 acquire)
+    context "release 後の再 acquire(idempotent 動作)" do
+      before do
+        first = described_class.acquire!(
+          session_id: session.id,
+          worker_instance_id: "worker-old",
+          acquired_at: now - 600
+        )
+        first.release!
+      end
+
+      subject do
+        described_class.acquire!(
+          session_id: session.id,
+          worker_instance_id: "worker-new",
+          acquired_at: now
+        )
+      end
+
+      it "既存 released レコードを再利用して active 状態に戻し,新しい lease_token / worker_instance_id を設定する" do
+        result = subject
+        expect(described_class.where(live_trading_session_id: session.id).count).to eq(1)
+        expect(result).to be_state_active
+        expect(result.worker_instance_id).to eq("worker-new")
+        expect(result.acquired_at).to eq(now)
+        expect(result.expires_at).to eq(now + 300)
+      end
+    end
+
+    context "期限切れ active の再 acquire(idempotent 動作)" do
+      before do
+        described_class.create!(
+          live_trading_session: session,
+          lease_token: SecureRandom.uuid,
+          worker_instance_id: "worker-stale",
+          acquired_at: now - 1_000,
+          expires_at: now - 60,
+          status: "active"
+        )
+      end
+
+      subject do
+        described_class.acquire!(
+          session_id: session.id,
+          worker_instance_id: "worker-new",
+          acquired_at: now
+        )
+      end
+
+      it "既存の期限切れ active レコードを再利用する(stuck worker からの救済)" do
+        result = subject
+        expect(described_class.where(live_trading_session_id: session.id).count).to eq(1)
+        expect(result.worker_instance_id).to eq("worker-new")
+        expect(result.expires_at).to eq(now + 300)
+      end
+    end
+
+    context "既存 active かつ期限内の場合(二重起動防止)" do
+      before do
+        described_class.acquire!(
+          session_id: session.id,
+          worker_instance_id: "worker-active",
+          acquired_at: now
+        )
+      end
+
+      subject do
+        described_class.acquire!(
+          session_id: session.id,
+          worker_instance_id: "worker-intruder",
+          acquired_at: now + 60
+        )
+      end
+
+      it "ActiveLeaseError raise(他プロセスが acquire 試行できない)" do
+        expect { subject }.to raise_error(described_class::ActiveLeaseError)
+      end
+    end
   end
 
   describe "#renew!" do
