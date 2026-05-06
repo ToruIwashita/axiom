@@ -56,14 +56,25 @@ RSpec.describe Strategy::Definition, type: :model do
   end
 
   describe "associations" do
-    subject { described_class.reflect_on_association(:revisions) }
-
     context "has_many :revisions の場合" do
+      subject { described_class.reflect_on_association(:revisions) }
+
       it "Strategy::Revision を class_name に持ち strategy_definition_id を foreign_key に持つ" do
         expect(subject.macro).to eq(:has_many)
         expect(subject.options[:class_name]).to eq("Strategy::Revision")
         expect(subject.options[:foreign_key]).to eq(:strategy_definition_id)
         expect(subject.options[:inverse_of]).to eq(:strategy_definition)
+      end
+    end
+
+    context "has_many :live_trading_sessions の場合(Phase 3.1 追加 / レビュー R-2 反映)" do
+      subject { described_class.reflect_on_association(:live_trading_sessions) }
+
+      it "LiveTrading::Session を class_name + strategy_definition_id を foreign_key + restrict_with_error" do
+        expect(subject.macro).to eq(:has_many)
+        expect(subject.options[:class_name]).to eq("LiveTrading::Session")
+        expect(subject.options[:foreign_key]).to eq(:strategy_definition_id)
+        expect(subject.options[:dependent]).to eq(:restrict_with_error)
       end
     end
   end
