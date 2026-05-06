@@ -47,6 +47,27 @@ RSpec.describe Domain::StopLossCalculatorService do
         expect { subject }.to raise_error(ArgumentError, /unsupported side/)
       end
     end
+
+    # Phase 3.1 レビュー R-8 反映: tp_pct の範囲チェック [0, 1)
+    context "tp_pct が 1 以上の場合(short で負価格を生成する範囲)" do
+      let(:entry_price) { BigDecimal("50000") }
+      let(:side) { :long }
+      let(:tp_pct) { BigDecimal("1.5") }
+
+      it "ArgumentError raise" do
+        expect { subject }.to raise_error(ArgumentError, /tp_pct must be in/)
+      end
+    end
+
+    context "tp_pct が負値の場合" do
+      let(:entry_price) { BigDecimal("50000") }
+      let(:side) { :long }
+      let(:tp_pct) { BigDecimal("-0.01") }
+
+      it "ArgumentError raise" do
+        expect { subject }.to raise_error(ArgumentError, /tp_pct must be in/)
+      end
+    end
   end
 
   describe "#calculate_sl" do
@@ -91,6 +112,27 @@ RSpec.describe Domain::StopLossCalculatorService do
 
       it "ArgumentError raise(fail-fast)" do
         expect { subject }.to raise_error(ArgumentError, /unsupported side/)
+      end
+    end
+
+    # Phase 3.1 レビュー R-8 反映: sl_pct の範囲チェック [0, 1)
+    context "sl_pct が 1 以上の場合(long で負価格を生成する範囲)" do
+      let(:entry_price) { BigDecimal("50000") }
+      let(:side) { :long }
+      let(:sl_pct) { BigDecimal("1.5") }
+
+      it "ArgumentError raise" do
+        expect { subject }.to raise_error(ArgumentError, /sl_pct must be in/)
+      end
+    end
+
+    context "sl_pct が負値の場合" do
+      let(:entry_price) { BigDecimal("50000") }
+      let(:side) { :long }
+      let(:sl_pct) { BigDecimal("-0.01") }
+
+      it "ArgumentError raise" do
+        expect { subject }.to raise_error(ArgumentError, /sl_pct must be in/)
       end
     end
   end
