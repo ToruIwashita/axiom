@@ -294,6 +294,61 @@ RSpec.describe LiveTrading::Session, type: :model do
     end
   end
 
+  # Phase 3.1 追加 / レビュー R-3 反映: Session 起点の has_one / has_many 関連 5 件
+  describe "associations" do
+    {
+      session_lease: { macro: :has_one, class_name: "LiveTrading::SessionLease", dependent: :destroy },
+      session_state: { macro: :has_one, class_name: "LiveTrading::SessionState", dependent: :destroy },
+      session_heartbeats: { macro: :has_many, class_name: "LiveTrading::SessionHeartbeat", dependent: :delete_all },
+      trades: { macro: :has_many, class_name: "LiveTrading::Trade", dependent: :restrict_with_error },
+      position_snapshots: { macro: :has_many, class_name: "Exchange::PositionSnapshot", dependent: :delete_all }
+    }.each do |assoc, opts|
+      context "#{opts[:macro]} :#{assoc} の場合" do
+        subject { described_class.reflect_on_association(assoc) }
+
+        it "#{opts[:class_name]} を class_name に持ち live_trading_session_id を foreign_key + dependent: #{opts[:dependent]}" do
+          expect(subject.macro).to eq(opts[:macro])
+          expect(subject.options[:class_name]).to eq(opts[:class_name])
+          expect(subject.options[:foreign_key]).to eq(:live_trading_session_id)
+          expect(subject.options[:dependent]).to eq(opts[:dependent])
+        end
+      end
+    end
+
+    context "session.session_lease を経由した取得" do
+      let(:session) { described_class.create!(base_attributes) }
+      let!(:lease) do
+        LiveTrading::SessionLease.acquire!(
+          session_id: session.id,
+          worker_instance_id: "worker-001",
+          acquired_at: Time.current
+        )
+      end
+
+      it "1 対 1 で SessionLease が返却される" do
+        expect(session.session_lease).to eq(lease)
+      end
+    end
+
+    context "session.trades を経由した取得" do
+      let(:session) { described_class.create!(base_attributes) }
+      let!(:trade) do
+        LiveTrading::Trade.create!(
+          live_trading_session: session,
+          strategy_revision: revision,
+          symbol: "BTCUSDT",
+          side: "long",
+          quantity: BigDecimal("0.01"),
+          status: "pending"
+        )
+      end
+
+      it "has_many で Trade が返却される" do
+        expect(session.trades).to include(trade)
+      end
+    end
+  end
+
   describe "FK 不変参照" do
     let(:session) { described_class.create!(base_attributes) }
     let(:other_definition) do

@@ -25,6 +25,30 @@ module LiveTrading
     belongs_to :strategy_revision, class_name: "Strategy::Revision"
     belongs_to :risk_policy, class_name: "Risk::Policy"
 
+    # Phase 3.1 レビュー R-3 反映: 02_§3.2.1 通りの has_one / has_many 関連 5 件
+    has_one :session_lease,
+            class_name: "LiveTrading::SessionLease",
+            foreign_key: :live_trading_session_id,
+            dependent: :destroy
+    has_one :session_state,
+            class_name: "LiveTrading::SessionState",
+            foreign_key: :live_trading_session_id,
+            dependent: :destroy
+    # 履歴系は delete_all で高速削除(高頻度蓄積のため callback 不要)
+    has_many :session_heartbeats,
+             class_name: "LiveTrading::SessionHeartbeat",
+             foreign_key: :live_trading_session_id,
+             dependent: :delete_all
+    # Trade は監査追跡性確保のため restrict_with_error
+    has_many :trades,
+             class_name: "LiveTrading::Trade",
+             foreign_key: :live_trading_session_id,
+             dependent: :restrict_with_error
+    has_many :position_snapshots,
+             class_name: "Exchange::PositionSnapshot",
+             foreign_key: :live_trading_session_id,
+             dependent: :delete_all
+
     validates :symbol, presence: true, length: { maximum: 32 }
     validates :leverage, presence: true,
                          numericality: { only_integer: true, greater_than: 0, less_than_or_equal_to: 125 }
