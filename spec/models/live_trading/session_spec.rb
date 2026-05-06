@@ -84,6 +84,22 @@ RSpec.describe LiveTrading::Session, type: :model do
       end
     end
 
+    context "leverage が 1 の場合(下限境界値)" do
+      let(:attributes) { base_attributes.merge(leverage: 1) }
+
+      it "valid? が true を返す" do
+        expect(subject).to be_valid
+      end
+    end
+
+    context "leverage が 125 の場合(上限境界値 / Bitget USDT-M 先物上限)" do
+      let(:attributes) { base_attributes.merge(leverage: 125) }
+
+      it "valid? が true を返す" do
+        expect(subject).to be_valid
+      end
+    end
+
     context "leverage が 125 を超える場合" do
       let(:attributes) { base_attributes.merge(leverage: 126) }
 

@@ -97,6 +97,35 @@ RSpec.describe Integration::AiInvocationLog, type: :model do
       end
     end
 
+    # Phase 3.1 レビュー R-10 反映: 境界値の片側欠落補完(9_999 / 10_000 / 10_001 文字)
+    # ActiveSupport の String#truncate(N) は N 文字以下なら無変更,N+1 以上なら N 文字に truncate
+    context "prompt が 9_999 文字の場合(境界 - 1)" do
+      let(:attributes) { base_attributes.merge(prompt: "x" * 9_999) }
+      let(:log) { described_class.create!(attributes) }
+
+      it "truncate されず 9_999 文字のまま" do
+        expect(log.prompt.length).to eq(9_999)
+      end
+    end
+
+    context "prompt が 10_000 文字ちょうどの場合(境界値)" do
+      let(:attributes) { base_attributes.merge(prompt: "x" * 10_000) }
+      let(:log) { described_class.create!(attributes) }
+
+      it "truncate されず 10_000 文字のまま" do
+        expect(log.prompt.length).to eq(10_000)
+      end
+    end
+
+    context "prompt が 10_001 文字の場合(境界 + 1)" do
+      let(:attributes) { base_attributes.merge(prompt: "x" * 10_001) }
+      let(:log) { described_class.create!(attributes) }
+
+      it "10_000 文字に truncate される" do
+        expect(log.prompt.length).to eq(10_000)
+      end
+    end
+
     context "prompt / response が nil の場合" do
       let(:attributes) { base_attributes.merge(prompt: nil, response: nil) }
       let(:log) { described_class.new(attributes) }
