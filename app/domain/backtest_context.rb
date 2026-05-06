@@ -108,9 +108,11 @@ module Domain
 
     # 単純移動平均を計算する
     #
-    # @param period [Integer] 期間
+    # @param period [Integer] 期間(1 以上)
     # @return [BigDecimal, nil] 計算可能なら BigDecimal、データ不足なら nil
+    # @raise [ArgumentError] period が 0 以下の場合(Phase 3.1 レビュー R-6 反映)
     def sma(period)
+      raise ArgumentError, "period must be >= 1" if period <= 0
       return nil if last_candles.size < period
 
       sum = last_candles.last(period).sum(BigDecimal("0")) { |c| BigDecimal(c["close"].to_s) }
@@ -119,9 +121,11 @@ module Domain
 
     # RSI を計算する(Wilder の単純平均版)
     #
-    # @param period [Integer] 期間
+    # @param period [Integer] 期間(1 以上)
     # @return [BigDecimal, nil] period+1 本未満は nil、avg_loss=0 なら 100
+    # @raise [ArgumentError] period が 0 以下の場合(Phase 3.1 レビュー R-6 反映)
     def rsi(period)
+      raise ArgumentError, "period must be >= 1" if period <= 0
       return nil if last_candles.size < period + 1
 
       closes = last_candles.last(period + 1).map { |c| BigDecimal(c["close"].to_s) }

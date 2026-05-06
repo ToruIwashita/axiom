@@ -135,6 +135,15 @@ RSpec.describe Domain::LiveContext do
     it "データ不足時は nil を返す" do
       expect(ctx.sma(10)).to be_nil
     end
+
+    # Phase 3.1 レビュー R-6 反映: period=0 / 負値ゼロ除算防衛
+    it "period が 0 の場合 ArgumentError raise" do
+      expect { ctx.sma(0) }.to raise_error(ArgumentError, /period must be >= 1/)
+    end
+
+    it "period が負値の場合 ArgumentError raise" do
+      expect { ctx.sma(-1) }.to raise_error(ArgumentError, /period must be >= 1/)
+    end
   end
 
   describe "#rsi" do
@@ -152,6 +161,15 @@ RSpec.describe Domain::LiveContext do
     it "データ不足時は nil を返す" do
       ctx_short = described_class.new(**base_attributes)
       expect(ctx_short.rsi(14)).to be_nil
+    end
+
+    # Phase 3.1 レビュー R-6 反映: period=0 / 負値ゼロ除算防衛
+    it "period が 0 の場合 ArgumentError raise" do
+      expect { ctx.rsi(0) }.to raise_error(ArgumentError, /period must be >= 1/)
+    end
+
+    it "period が負値の場合 ArgumentError raise" do
+      expect { ctx.rsi(-1) }.to raise_error(ArgumentError, /period must be >= 1/)
     end
   end
 
