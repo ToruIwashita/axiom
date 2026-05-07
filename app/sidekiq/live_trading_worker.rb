@@ -27,12 +27,18 @@ class LiveTradingWorker
   include Sidekiq::Job
   sidekiq_options retry: false, queue: :live_trading
 
+  # メインループ poll 間隔(設計書 02_§5.2.6).
+  DEFAULT_MAIN_LOOP_POLL_INTERVAL = 1.0
+
+  private_constant :DEFAULT_MAIN_LOOP_POLL_INTERVAL
+
   # @param process_manager [Domain::LiveTradingProcessManager]
   # @param clock_sync [Infrastructure::BitgetClockSync, nil] step 5 で server_time 同期に利用
   # @param market_endpoint [Infrastructure::BitgetMarketEndpoint, nil] step 6 (contract_metadata) / step 8 (history_candles)
   # @param position_endpoint [Infrastructure::BitgetPositionEndpoint, nil] step 7 (margin/position/asset/leverage settings)
   # @param public_ws_factory [Proc, nil] Public WS Client 生成 Proc(step 9 で `.call` 遅延生成)
   # @param private_ws_factory [Proc, nil] Private WS Client 生成 Proc(step 10 で `.call` 遅延生成)
+  # @param main_loop_poll_interval [Float] メインループ kill-switch / 状態 poll 間隔(秒). spec で 0 を渡して即時 break.
   # @param logger [Logger] release! 例外等の警告出力先
   def initialize(
     process_manager: Domain::LiveTradingProcessManager.new,
@@ -41,6 +47,7 @@ class LiveTradingWorker
     position_endpoint: nil,
     public_ws_factory: nil,
     private_ws_factory: nil,
+    main_loop_poll_interval: DEFAULT_MAIN_LOOP_POLL_INTERVAL,
     logger: Rails.logger
   )
     @process_manager = process_manager
@@ -49,6 +56,7 @@ class LiveTradingWorker
     @position_endpoint = position_endpoint
     @public_ws_factory = public_ws_factory
     @private_ws_factory = private_ws_factory
+    @main_loop_poll_interval = main_loop_poll_interval
     @logger = logger
   end
 
@@ -61,7 +69,13 @@ class LiveTradingWorker
   # @raise [LiveTrading::SessionLease::ActiveLeaseError] step 4 で既に active な lease がある場合
   def perform(session_id)
     @worker_instance_id = jid.presence || "manual-#{Socket.gethostname}-#{Process.pid}-#{SecureRandom.hex(4)}"
+    @session = nil
+    @lease = nil
+    @public_ws = nil
+    @private_ws = nil
+
     bootstrap_session(session_id)
+    enter_main_loop
   end
 
   # warmup MVP デフォルト(設計書 05_§3.3 step 8 / 3.3-9b 引き継ぎ事項として
@@ -76,29 +90,91 @@ class LiveTradingWorker
   attr_reader :process_manager, :logger
 
   def bootstrap_session(session_id)
-    session = nil
-    lease = nil
-    public_ws = nil
-    private_ws = nil
+    @session = LiveTrading::Session.find(session_id)
+    load_revision_with_consistency(@session)
+    Risk::Policy.find(@session.risk_policy_id)
+    @lease = process_manager.acquire_lease!(session: @session, worker_instance_id: @worker_instance_id)
+    sync_clock_or_raise!
+    fetch_contract_metadata(@session)
+    apply_account_settings(@session)
+    fetch_warmup_candles(@session)
+    @public_ws = connect_public_ws(@session)
+    @private_ws = connect_private_ws(@session)
+    run_reconciliation(@session)
+    load_session_state(@session)
+    mark_running(@session)
+  rescue StandardError => e
+    cleanup_on_failure(session: @session, lease: @lease, public_ws: @public_ws, private_ws: @private_ws, error: e)
+    raise
+  end
 
-    begin
-      session = LiveTrading::Session.find(session_id)
-      load_revision_with_consistency(session)
-      Risk::Policy.find(session.risk_policy_id)
-      lease = process_manager.acquire_lease!(session: session, worker_instance_id: @worker_instance_id)
-      sync_clock_or_raise!
-      fetch_contract_metadata(session)
-      apply_account_settings(session)
-      fetch_warmup_candles(session)
-      public_ws = connect_public_ws(session)
-      private_ws = connect_private_ws(session)
-      run_reconciliation(session)
-      load_session_state(session)
-      mark_running(session)
-    rescue StandardError => e
-      cleanup_on_failure(session: session, lease: lease, public_ws: public_ws, private_ws: private_ws, error: e)
-      raise
+  # bootstrap 完了後に呼ばれるメインループ.
+  # 設計書 02_§5.2.6: WS push 受信は別 thread で callback 経由(3.3-10b/c で実装),
+  # 本 main loop は kill-switch / session terminal / WS health を一定間隔でポーリングする.
+  # heartbeat / lease renew は 3.3-12 で追加予定.
+  #
+  # 終了経路:
+  #   - kill-switch 検出(session.status == :stopping): mark_stopped! へ遷移
+  #   - session terminal(他プロセスが状態確定済み): 何もしない
+  #   - WS 切断検知: mark_halted!(reason: ws_disconnected)
+  def enter_main_loop
+    exit_reason = nil
+    loop do
+      exit_reason = check_loop_exit_condition
+      break if exit_reason
+
+      sleep(@main_loop_poll_interval)
     end
+
+    finalize_main_loop(exit_reason: exit_reason)
+  end
+
+  def check_loop_exit_condition
+    return :terminal if @session.reload.terminal?
+    return :kill_switch if process_manager.signal_kill_switch?(session: @session)
+    return :ws_disconnected unless ws_healthy?
+
+    nil
+  end
+
+  def ws_healthy?
+    @public_ws && @public_ws.connected? && @private_ws && @private_ws.connected?
+  end
+
+  # main loop 終了時の状態遷移 + リソース解放.
+  # session 状態遷移後 → WS disconnect → lease release の順で安全に解放する.
+  def finalize_main_loop(exit_reason:)
+    transition_session_for_exit(exit_reason)
+    safe_disconnect(@private_ws, name: "private_ws")
+    safe_disconnect(@public_ws, name: "public_ws")
+    safe_release_lease(@lease)
+  end
+
+  def transition_session_for_exit(exit_reason)
+    return unless @session
+
+    @session.reload
+    case exit_reason
+    when :kill_switch
+      # signal_kill_switch? は session.state_stopping? を意味するため stopping → stopped に遷移
+      @session.mark_stopped! if @session.state_stopping?
+    when :ws_disconnected
+      @session.mark_halted!(reason: "ws_disconnected") unless @session.terminal?
+    when :terminal
+      # 他プロセスが既に状態確定済み. 何もしない.
+    end
+  end
+
+  def safe_release_lease(lease)
+    return unless lease
+    return if lease.state_released?
+
+    lease.release!
+  rescue StandardError => release_error
+    logger.warn(
+      "[LiveTradingWorker] lease.release! failed during finalize_main_loop: " \
+      "#{release_error.class.name}: #{release_error.message}"
+    )
   end
 
   def load_revision_with_consistency(session)

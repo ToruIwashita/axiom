@@ -32,6 +32,7 @@ RSpec.describe LiveTradingWorker do
       position_endpoint: position_endpoint,
       public_ws_factory: public_ws_factory,
       private_ws_factory: private_ws_factory,
+      main_loop_poll_interval: 0, # spec ではループを sleep させない
       logger: logger
     )
   end
@@ -107,6 +108,8 @@ RSpec.describe LiveTradingWorker do
     allow(private_ws).to receive(:subscribe)
     allow(private_ws).to receive(:disconnect)
     allow(private_ws).to receive(:connected?).and_return(true)
+    # main loop は default で 1 iteration で抜ける(spec hang 回避)
+    allow(process_manager).to receive(:signal_kill_switch?).and_return(true)
   end
 
   describe "Sidekiq options" do
@@ -586,6 +589,103 @@ RSpec.describe LiveTradingWorker do
           /lease.release! failed during cleanup_on_failure.*release timeout/
         )
         expect(session.reload.state_failed_to_start?).to be true
+      end
+    end
+
+    describe "メインループ終了パス" do
+      context "kill-switch 検出 + session が stopping 状態" do
+        before do
+          # bootstrap で running になった後, 即時 stopping → kill-switch true 返却
+          allow(process_manager).to receive(:signal_kill_switch?) do
+            session.update_column(:status, "stopping") if session.persisted? && !session.reload.state_stopping?
+            true
+          end
+        end
+
+        it "session が stopping → stopped に遷移する" do
+          worker.perform(session.id)
+          expect(session.reload.state_stopped?).to be true
+        end
+
+        it "WS disconnect + lease.release! が呼ばれる" do
+          worker.perform(session.id)
+          expect(public_ws).to have_received(:disconnect)
+          expect(private_ws).to have_received(:disconnect)
+          expect(lease).to have_received(:release!)
+        end
+      end
+
+      context "kill-switch 検出だが session が running のまま(防御)" do
+        # default before で signal_kill_switch? = true / session は bootstrap で running のまま
+        it "session の status は running のままで mark_stopped! は呼ばれない" do
+          worker.perform(session.id)
+          expect(session.reload.state_running?).to be true
+        end
+
+        it "WS disconnect + lease.release! は呼ばれる(リソース解放は実行)" do
+          worker.perform(session.id)
+          expect(public_ws).to have_received(:disconnect)
+          expect(private_ws).to have_received(:disconnect)
+          expect(lease).to have_received(:release!)
+        end
+      end
+
+      context "他プロセスが session を halted に直接変更(terminal 検出)" do
+        before do
+          # main loop 1 iteration 目の signal_kill_switch? 呼出時に session を halted に外部更新
+          first_call = true
+          allow(process_manager).to receive(:signal_kill_switch?) do |**_|
+            if first_call
+              first_call = false
+              LiveTrading::Session.where(id: session.id).update_all(status: "halted")
+            end
+            false
+          end
+        end
+
+        it "exit_reason: terminal で main loop を抜け session を halted のまま維持" do
+          worker.perform(session.id)
+          expect(session.reload.state_halted?).to be true
+        end
+
+        it "WS disconnect + lease.release! は呼ばれる" do
+          worker.perform(session.id)
+          expect(public_ws).to have_received(:disconnect)
+          expect(lease).to have_received(:release!)
+        end
+      end
+
+      context "WS 切断検知(public_ws.connected? が false)" do
+        before do
+          allow(process_manager).to receive(:signal_kill_switch?).and_return(false)
+          allow(public_ws).to receive(:connected?).and_return(false)
+        end
+
+        it "session を mark_halted!(reason: ws_disconnected)に遷移させる" do
+          worker.perform(session.id)
+          expect(session.reload.state_halted?).to be true
+          expect(session.failure_reason).to include("ws_disconnected")
+        end
+
+        it "public_ws.disconnect は呼ばれない(connected? false でスキップ) + lease.release! は呼ばれる" do
+          worker.perform(session.id)
+          expect(public_ws).not_to have_received(:disconnect)
+          expect(lease).to have_received(:release!)
+        end
+      end
+
+      context "finalize_main_loop で lease.release! が raise した場合(連鎖失敗対策)" do
+        before do
+          allow(lease).to receive(:release!).and_raise(StandardError, "release timeout in finalize")
+        end
+
+        it "logger.warn 落とし + 例外を再 raise しない" do
+          expect { worker.perform(session.id) }.not_to raise_error
+
+          expect(logger).to have_received(:warn).with(
+            /lease.release! failed during finalize_main_loop.*release timeout in finalize/
+          )
+        end
       end
     end
 
