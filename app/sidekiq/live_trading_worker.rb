@@ -590,14 +590,80 @@ class LiveTradingWorker
     end
   end
 
-  # step 11: reconciliation(6 件 REST 突合 / starting → reconciling 遷移 + REST 突合).
-  # 6 件の REST 突合(orders-pending / orders-plan-pending / orders-plan-history /
-  # plan-sub-order / position-all / fill-history)の内部実装は 3.3-11 で対応予定.
-  # 本 step では `start_reconciling!` 遷移と method skeleton のみを確立する.
+  # step 11: reconciliation(starting → reconciling 遷移 + 6 件 REST 突合).
+  # 各 REST 呼出は失敗時に logger.warn に落として後続 reconcile を継続する(部分復旧志向).
+  # 各結果からの DB upsert は後続 phase で実装(現状は呼出構造のみ確立).
+  #
+  # MVP 範囲(5 件):
+  # - orders_pending: 未約定通常注文
+  # - orders_plan_pending: 未起動 plan order
+  # - orders_plan_history: 履歴 plan order(直近 24h)
+  # - position_all: 全 position
+  # - plan_sub_order: orders_plan_pending 取得後に各 plan_id について(現状 skeleton)
+  # 範囲外(将来 phase):
+  # - fill_history: BitgetOrderEndpoint に対応 endpoint 未実装のため将来追加候補
   def run_reconciliation(session)
     session.start_reconciling!
-    # TODO(3.3-11): 6 件 REST 突合実装(orders-pending, orders-plan-pending, orders-plan-history,
-    #               plan-sub-order, position-all, fill-history)
+
+    reconcile_orders_pending(session)
+    reconcile_orders_plan_pending(session)
+    reconcile_orders_plan_history(session)
+    reconcile_position_all(session)
+    # TODO(将来 phase): reconcile_fill_history(BitgetOrderEndpoint#fill_history 追加後)
+  end
+
+  def reconcile_orders_pending(session)
+    response = order_endpoint.orders_pending(symbol: session.symbol)
+    # TODO(後続 phase): response["data"] から Exchange::Order upsert
+    response
+  rescue StandardError => e
+    logger.warn(
+      "[LiveTradingWorker] reconcile_orders_pending failed: #{e.class.name}: #{e.message}"
+    )
+    nil
+  end
+
+  def reconcile_orders_plan_pending(session)
+    response = order_endpoint.orders_plan_pending(symbol: session.symbol)
+    # TODO(後続 phase): response["data"] から Exchange::AlgoOrder upsert
+    #   + 各 plan_id について order_endpoint.plan_sub_order(plan_id:) を呼んで sub-order を反映
+    response
+  rescue StandardError => e
+    logger.warn(
+      "[LiveTradingWorker] reconcile_orders_plan_pending failed: #{e.class.name}: #{e.message}"
+    )
+    nil
+  end
+
+  # 直近 24h の履歴 plan order を取得する(MVP デフォルト範囲 / 設計書明示なしのため固定値).
+  RECONCILE_PLAN_HISTORY_LOOKBACK_MS = 24 * 60 * 60 * 1000
+  private_constant :RECONCILE_PLAN_HISTORY_LOOKBACK_MS
+
+  def reconcile_orders_plan_history(session)
+    end_time = (Time.current.to_f * 1000).to_i
+    start_time = end_time - RECONCILE_PLAN_HISTORY_LOOKBACK_MS
+
+    response = order_endpoint.orders_plan_history(
+      symbol: session.symbol, start_time: start_time, end_time: end_time
+    )
+    # TODO(後続 phase): response["data"] から AlgoOrder 履歴 upsert
+    response
+  rescue StandardError => e
+    logger.warn(
+      "[LiveTradingWorker] reconcile_orders_plan_history failed: #{e.class.name}: #{e.message}"
+    )
+    nil
+  end
+
+  def reconcile_position_all(session)
+    response = position_endpoint.position_all(margin_coin: session.margin_coin, symbol: session.symbol)
+    # TODO(後続 phase): response["data"] から Exchange::PositionSnapshot upsert
+    response
+  rescue StandardError => e
+    logger.warn(
+      "[LiveTradingWorker] reconcile_position_all failed: #{e.class.name}: #{e.message}"
+    )
+    nil
   end
 
   # step 12: SessionState 復元(初回起動時は空 state_data で create, 再起動時は既存をロード).

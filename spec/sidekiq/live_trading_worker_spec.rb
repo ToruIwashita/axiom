@@ -7,6 +7,7 @@ RSpec.describe LiveTradingWorker do
   let(:clock_sync) { instance_double(Infrastructure::BitgetClockSync) }
   let(:market_endpoint) { instance_double(Infrastructure::BitgetMarketEndpoint) }
   let(:position_endpoint) { instance_double(Infrastructure::BitgetPositionEndpoint) }
+  let(:order_endpoint_di) { instance_double(Infrastructure::BitgetOrderEndpoint) }
   let(:contract_metadata_response) do
     {
       symbol: "BTCUSDT", price_place: 1, price_end_step: 1, tick_size: BigDecimal("0.1"),
@@ -32,6 +33,7 @@ RSpec.describe LiveTradingWorker do
       position_endpoint: position_endpoint,
       public_ws_factory: public_ws_factory,
       private_ws_factory: private_ws_factory,
+      order_endpoint: order_endpoint_di,
       main_loop_poll_interval: 0, # spec ではループを sleep させない
       logger: logger
     )
@@ -110,6 +112,11 @@ RSpec.describe LiveTradingWorker do
     allow(private_ws).to receive(:connected?).and_return(true)
     # main loop は default で 1 iteration で抜ける(spec hang 回避)
     allow(process_manager).to receive(:signal_kill_switch?).and_return(true)
+    # reconciliation 6 件 REST(3.3-11): default で空 data 返却
+    allow(order_endpoint_di).to receive(:orders_pending).and_return("data" => [])
+    allow(order_endpoint_di).to receive(:orders_plan_pending).and_return("data" => [])
+    allow(order_endpoint_di).to receive(:orders_plan_history).and_return("data" => [])
+    allow(position_endpoint).to receive(:position_all).and_return("data" => [])
   end
 
   describe "Sidekiq options" do
@@ -1165,6 +1172,112 @@ RSpec.describe LiveTradingWorker do
 
           expect(logger).to have_received(:warn).with(/process_order_intent failed.*API error/).twice
           expect(order_endpoint_di).to have_received(:place_order).twice
+        end
+      end
+    end
+
+    describe "reconciliation(3.3-11 / bootstrap step 11)" do
+      before do
+        worker.send(:instance_variable_set, :@session, session)
+        session.update_column(:status, "starting")
+      end
+
+      describe "#run_reconciliation" do
+        it "session を starting → reconciling に遷移させる" do
+          worker.send(:run_reconciliation, session)
+          expect(session.reload.state_reconciling?).to be true
+        end
+
+        it "5 件の reconcile 系 method を順次呼び出す" do
+          expect(worker).to receive(:reconcile_orders_pending).with(session).ordered
+          expect(worker).to receive(:reconcile_orders_plan_pending).with(session).ordered
+          expect(worker).to receive(:reconcile_orders_plan_history).with(session).ordered
+          expect(worker).to receive(:reconcile_position_all).with(session).ordered
+
+          worker.send(:run_reconciliation, session)
+        end
+      end
+
+      describe "#reconcile_orders_pending" do
+        it "order_endpoint.orders_pending を session.symbol で呼ぶ" do
+          worker.send(:reconcile_orders_pending, session)
+          expect(order_endpoint_di).to have_received(:orders_pending).with(symbol: "BTCUSDT")
+        end
+
+        context "REST 呼出が失敗した場合" do
+          before do
+            allow(order_endpoint_di).to receive(:orders_pending).and_raise(StandardError, "API down")
+          end
+
+          it "logger.warn 落とし + nil 返却(後続 reconcile 継続)" do
+            result = worker.send(:reconcile_orders_pending, session)
+            expect(result).to be_nil
+            expect(logger).to have_received(:warn).with(/reconcile_orders_pending failed.*API down/)
+          end
+        end
+      end
+
+      describe "#reconcile_orders_plan_pending" do
+        it "order_endpoint.orders_plan_pending を symbol で呼ぶ" do
+          worker.send(:reconcile_orders_plan_pending, session)
+          expect(order_endpoint_di).to have_received(:orders_plan_pending).with(symbol: "BTCUSDT")
+        end
+
+        context "REST 失敗時" do
+          before do
+            allow(order_endpoint_di).to receive(:orders_plan_pending).and_raise(StandardError, "boom")
+          end
+
+          it "logger.warn + nil 返却" do
+            expect(worker.send(:reconcile_orders_plan_pending, session)).to be_nil
+            expect(logger).to have_received(:warn).with(/reconcile_orders_plan_pending failed/)
+          end
+        end
+      end
+
+      describe "#reconcile_orders_plan_history" do
+        it "直近 24h 範囲(start_time / end_time)で symbol を指定して呼ぶ" do
+          fixed_now = Time.utc(2026, 5, 7, 12, 0, 0)
+          allow(Time).to receive(:current).and_return(fixed_now)
+          end_time_ms = (fixed_now.to_f * 1000).to_i
+          start_time_ms = end_time_ms - (24 * 60 * 60 * 1000)
+
+          worker.send(:reconcile_orders_plan_history, session)
+
+          expect(order_endpoint_di).to have_received(:orders_plan_history).with(
+            symbol: "BTCUSDT", start_time: start_time_ms, end_time: end_time_ms
+          )
+        end
+
+        context "REST 失敗時" do
+          before do
+            allow(order_endpoint_di).to receive(:orders_plan_history).and_raise(StandardError, "boom")
+          end
+
+          it "logger.warn + nil 返却" do
+            expect(worker.send(:reconcile_orders_plan_history, session)).to be_nil
+            expect(logger).to have_received(:warn).with(/reconcile_orders_plan_history failed/)
+          end
+        end
+      end
+
+      describe "#reconcile_position_all" do
+        it "position_endpoint.position_all を margin_coin + symbol で呼ぶ" do
+          worker.send(:reconcile_position_all, session)
+          expect(position_endpoint).to have_received(:position_all).with(
+            margin_coin: "USDT", symbol: "BTCUSDT"
+          )
+        end
+
+        context "REST 失敗時" do
+          before do
+            allow(position_endpoint).to receive(:position_all).and_raise(StandardError, "boom")
+          end
+
+          it "logger.warn + nil 返却" do
+            expect(worker.send(:reconcile_position_all, session)).to be_nil
+            expect(logger).to have_received(:warn).with(/reconcile_position_all failed/)
+          end
         end
       end
     end
