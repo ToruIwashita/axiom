@@ -29,8 +29,12 @@ class LiveTradingWorker
 
   # メインループ poll 間隔(設計書 02_§5.2.6).
   DEFAULT_MAIN_LOOP_POLL_INTERVAL = 1.0
+  # heartbeat 周期(設計書 02_§5.2.6 / 05_§7.2: 60 秒推奨).
+  HEARTBEAT_INTERVAL_SECONDS = 60
+  # lease renew 周期(設計書 02_§5.2.6 / 05_§7.2: 2 分推奨 / TTL 5 分の余裕を持たせた更新).
+  LEASE_RENEW_INTERVAL_SECONDS = 120
 
-  private_constant :DEFAULT_MAIN_LOOP_POLL_INTERVAL
+  private_constant :DEFAULT_MAIN_LOOP_POLL_INTERVAL, :HEARTBEAT_INTERVAL_SECONDS, :LEASE_RENEW_INTERVAL_SECONDS
 
   # @param process_manager [Domain::LiveTradingProcessManager]
   # @param clock_sync [Infrastructure::BitgetClockSync, nil] step 5 で server_time 同期に利用
@@ -131,14 +135,50 @@ class LiveTradingWorker
   #   - WS 切断検知: mark_halted!(reason: ws_disconnected)
   def enter_main_loop
     exit_reason = nil
+    @last_heartbeat_at = nil
+    @last_lease_renew_at = nil
+
     loop do
       exit_reason = check_loop_exit_condition
       break if exit_reason
 
+      pulse_heartbeat_if_due
+      renew_lease_if_due
       sleep(@main_loop_poll_interval)
     end
 
     finalize_main_loop(exit_reason: exit_reason)
+  end
+
+  # heartbeat 周期到達時に process_manager.pulse_heartbeat! を呼ぶ.
+  # 初回は @last_heartbeat_at が nil のため即時実行.
+  # 失敗時は logger.warn 落とし(main loop を止めない).
+  def pulse_heartbeat_if_due
+    now = Time.current
+    return if @last_heartbeat_at && (now - @last_heartbeat_at) < HEARTBEAT_INTERVAL_SECONDS
+
+    process_manager.pulse_heartbeat!(session: @session, worker_instance_id: @worker_instance_id)
+    @last_heartbeat_at = now
+  rescue StandardError => e
+    logger.warn(
+      "[LiveTradingWorker] pulse_heartbeat! failed: #{e.class.name}: #{e.message}"
+    )
+  end
+
+  # lease renew 周期到達時に process_manager.renew_lease! を呼ぶ.
+  # 初回は @last_lease_renew_at が nil のため即時実行.
+  # 失敗時は logger.warn 落とし.
+  def renew_lease_if_due
+    now = Time.current
+    return if @last_lease_renew_at && (now - @last_lease_renew_at) < LEASE_RENEW_INTERVAL_SECONDS
+    return unless @lease
+
+    process_manager.renew_lease!(lease: @lease)
+    @last_lease_renew_at = now
+  rescue StandardError => e
+    logger.warn(
+      "[LiveTradingWorker] renew_lease! failed: #{e.class.name}: #{e.message}"
+    )
   end
 
   def check_loop_exit_condition

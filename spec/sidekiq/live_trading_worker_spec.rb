@@ -112,6 +112,9 @@ RSpec.describe LiveTradingWorker do
     allow(private_ws).to receive(:connected?).and_return(true)
     # main loop は default で 1 iteration で抜ける(spec hang 回避)
     allow(process_manager).to receive(:signal_kill_switch?).and_return(true)
+    # heartbeat / lease renew(3.3-12)default stub
+    allow(process_manager).to receive(:pulse_heartbeat!)
+    allow(process_manager).to receive(:renew_lease!)
     # reconciliation 6 件 REST(3.3-11): default で空 data 返却
     allow(order_endpoint_di).to receive(:orders_pending).and_return("data" => [])
     allow(order_endpoint_di).to receive(:orders_plan_pending).and_return("data" => [])
@@ -1278,6 +1281,163 @@ RSpec.describe LiveTradingWorker do
             expect(worker.send(:reconcile_position_all, session)).to be_nil
             expect(logger).to have_received(:warn).with(/reconcile_position_all failed/)
           end
+        end
+      end
+    end
+
+    describe "heartbeat / lease renew(3.3-12)" do
+      before do
+        worker.send(:instance_variable_set, :@session, session)
+        worker.send(:instance_variable_set, :@lease, lease)
+        worker.send(:instance_variable_set, :@worker_instance_id, "worker-test-001")
+      end
+
+      describe "#pulse_heartbeat_if_due" do
+        context "初回呼出(@last_heartbeat_at が nil)" do
+          it "process_manager.pulse_heartbeat! を session + worker_instance_id で呼ぶ" do
+            worker.send(:pulse_heartbeat_if_due)
+            expect(process_manager).to have_received(:pulse_heartbeat!).with(
+              session: session, worker_instance_id: "worker-test-001"
+            )
+          end
+
+          it "@last_heartbeat_at に現在時刻が記録される" do
+            fixed_now = Time.utc(2026, 5, 7, 12, 0, 0)
+            allow(Time).to receive(:current).and_return(fixed_now)
+
+            worker.send(:pulse_heartbeat_if_due)
+            expect(worker.instance_variable_get(:@last_heartbeat_at)).to eq(fixed_now)
+          end
+        end
+
+        context "前回 heartbeat から 60 秒未経過" do
+          let(:fixed_now) { Time.utc(2026, 5, 7, 12, 0, 0) }
+
+          before do
+            worker.send(:instance_variable_set, :@last_heartbeat_at, fixed_now)
+            allow(Time).to receive(:current).and_return(fixed_now + 30) # 30 秒経過
+          end
+
+          it "pulse_heartbeat! を呼ばない" do
+            worker.send(:pulse_heartbeat_if_due)
+            expect(process_manager).not_to have_received(:pulse_heartbeat!)
+          end
+        end
+
+        context "前回 heartbeat から 60 秒以上経過" do
+          let(:fixed_now) { Time.utc(2026, 5, 7, 12, 0, 0) }
+
+          before do
+            worker.send(:instance_variable_set, :@last_heartbeat_at, fixed_now)
+            allow(Time).to receive(:current).and_return(fixed_now + 61) # 61 秒経過
+          end
+
+          it "pulse_heartbeat! を呼ぶ" do
+            worker.send(:pulse_heartbeat_if_due)
+            expect(process_manager).to have_received(:pulse_heartbeat!)
+          end
+        end
+
+        context "pulse_heartbeat! が raise した場合" do
+          before do
+            allow(process_manager).to receive(:pulse_heartbeat!)
+              .and_raise(StandardError, "DB connection lost")
+          end
+
+          it "logger.warn 落とし + 例外を再 raise しない" do
+            expect { worker.send(:pulse_heartbeat_if_due) }.not_to raise_error
+            expect(logger).to have_received(:warn).with(
+              /pulse_heartbeat! failed.*DB connection lost/
+            )
+          end
+        end
+      end
+
+      describe "#renew_lease_if_due" do
+        context "初回呼出(@last_lease_renew_at が nil)" do
+          it "process_manager.renew_lease! を lease で呼ぶ" do
+            worker.send(:renew_lease_if_due)
+            expect(process_manager).to have_received(:renew_lease!).with(lease: lease)
+          end
+
+          it "@last_lease_renew_at に現在時刻が記録される" do
+            fixed_now = Time.utc(2026, 5, 7, 12, 0, 0)
+            allow(Time).to receive(:current).and_return(fixed_now)
+
+            worker.send(:renew_lease_if_due)
+            expect(worker.instance_variable_get(:@last_lease_renew_at)).to eq(fixed_now)
+          end
+        end
+
+        context "前回 lease renew から 120 秒未経過" do
+          let(:fixed_now) { Time.utc(2026, 5, 7, 12, 0, 0) }
+
+          before do
+            worker.send(:instance_variable_set, :@last_lease_renew_at, fixed_now)
+            allow(Time).to receive(:current).and_return(fixed_now + 60) # 60 秒経過
+          end
+
+          it "renew_lease! を呼ばない" do
+            worker.send(:renew_lease_if_due)
+            expect(process_manager).not_to have_received(:renew_lease!)
+          end
+        end
+
+        context "前回 lease renew から 120 秒以上経過" do
+          let(:fixed_now) { Time.utc(2026, 5, 7, 12, 0, 0) }
+
+          before do
+            worker.send(:instance_variable_set, :@last_lease_renew_at, fixed_now)
+            allow(Time).to receive(:current).and_return(fixed_now + 121) # 121 秒経過
+          end
+
+          it "renew_lease! を呼ぶ" do
+            worker.send(:renew_lease_if_due)
+            expect(process_manager).to have_received(:renew_lease!)
+          end
+        end
+
+        context "@lease が nil の場合(防御)" do
+          before do
+            worker.send(:instance_variable_set, :@lease, nil)
+          end
+
+          it "renew_lease! を呼ばない" do
+            worker.send(:renew_lease_if_due)
+            expect(process_manager).not_to have_received(:renew_lease!)
+          end
+        end
+
+        context "renew_lease! が raise した場合" do
+          before do
+            allow(process_manager).to receive(:renew_lease!)
+              .and_raise(StandardError, "lease lost")
+          end
+
+          it "logger.warn 落とし + 例外を再 raise しない" do
+            expect { worker.send(:renew_lease_if_due) }.not_to raise_error
+            expect(logger).to have_received(:warn).with(/renew_lease! failed.*lease lost/)
+          end
+        end
+      end
+
+      describe "main loop 統合: 1 iteration で heartbeat / renew_lease が呼ばれる" do
+        before do
+          first_call = true
+          allow(process_manager).to receive(:signal_kill_switch?) do
+            if first_call
+              first_call = false
+              false # 1 回目は false → 1 iteration 通過
+            else
+              true # 2 回目以降は true → break
+            end
+          end
+        end
+
+        it "1 iteration の中で pulse_heartbeat! と renew_lease! が呼ばれる" do
+          worker.perform(session.id)
+          expect(process_manager).to have_received(:pulse_heartbeat!).at_least(:once)
+          expect(process_manager).to have_received(:renew_lease!).at_least(:once)
         end
       end
     end
