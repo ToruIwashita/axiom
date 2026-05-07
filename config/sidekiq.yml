@@ -1,4 +1,10 @@
 ---
-:concurrency: 5
+:concurrency: 10
 :queues:
-  - default
+  # LiveTradingWorker(Phase 3.3 で実装予定 / retry: false / 24h 長時間稼働)を
+  # 専用 queue に分離することで他 Job との干渉を防ぐ(Phase 1.3 引き継ぎ #9)
+  # priority weight: 高=2(LiveTrading)/ 既存=1(default)
+  # 同時セッション数 N に対し WS 2 thread/session 想定 → concurrency=10 で
+  # 5 セッション同時稼働を許容(必要に応じて Phase 3.3 の Worker 実装後に再調整)
+  - [ live_trading, 2 ]
+  - [ default, 1 ]
