@@ -28,8 +28,10 @@ class LiveTradingWorker
   sidekiq_options retry: false, queue: :live_trading
 
   # @param process_manager [Domain::LiveTradingProcessManager]
-  def initialize(process_manager: Domain::LiveTradingProcessManager.new)
+  # @param logger [Logger] release! 例外等の警告出力先
+  def initialize(process_manager: Domain::LiveTradingProcessManager.new, logger: Rails.logger)
     @process_manager = process_manager
+    @logger = logger
   end
 
   # Worker のエントリポイント.
@@ -40,14 +42,13 @@ class LiveTradingWorker
   # @raise [ArgumentError] step 2 整合 / 受入条件不合格の場合
   # @raise [LiveTrading::SessionLease::ActiveLeaseError] step 4 で既に active な lease がある場合
   def perform(session_id)
-    @worker_instance_id = (jid if respond_to?(:jid)) ||
-                          "manual-#{Socket.gethostname}-#{Process.pid}-#{SecureRandom.hex(4)}"
+    @worker_instance_id = jid.presence || "manual-#{Socket.gethostname}-#{Process.pid}-#{SecureRandom.hex(4)}"
     bootstrap_session(session_id)
   end
 
   private
 
-  attr_reader :process_manager
+  attr_reader :process_manager, :logger
 
   def bootstrap_session(session_id)
     session = nil
@@ -83,11 +84,28 @@ class LiveTradingWorker
   end
 
   # bootstrap 失敗時のクリーンアップ.責務分担は class doc コメント参照.
+  #
+  # 重要 obs 1(Phase 2 重要 5 race パターン踏襲): session.reload で DB 最新状態確認.
+  # 別プロセス(管理画面 / kill-switch API)が status を更新している race window で
+  # mark_failed_to_start! が halted/stopped 履歴を上書きするのを防ぐ.
+  #
+  # 軽微 obs 1(release! 例外連鎖失敗対策): lease.release! が raise しても
+  # session 状態確定(failed_to_start 遷移)を保証する. release_error は logger.warn に落とし.
   def cleanup_on_failure(session:, lease:, error:)
     return if session.nil?
-    return if session.terminal?
+    return if session.reload.terminal?
 
-    lease.release! if lease && !lease.state_released?
+    if lease && !lease.state_released?
+      begin
+        lease.release!
+      rescue StandardError => release_error
+        logger.warn(
+          "[LiveTradingWorker] lease.release! failed during cleanup_on_failure: " \
+          "#{release_error.class.name}: #{release_error.message}"
+        )
+      end
+    end
+
     session.mark_failed_to_start!(reason: "#{error.class.name}: #{error.message}")
   end
 end
