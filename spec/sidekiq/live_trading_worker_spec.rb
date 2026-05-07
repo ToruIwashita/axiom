@@ -4,7 +4,31 @@ RSpec.describe LiveTradingWorker do
   let(:process_manager) { instance_double(Domain::LiveTradingProcessManager) }
   let(:lease) { instance_double(LiveTrading::SessionLease) }
   let(:logger) { instance_double(Logger, warn: nil, info: nil, error: nil, debug: nil) }
-  let(:worker) { described_class.new(process_manager: process_manager, logger: logger) }
+  let(:clock_sync) { instance_double(Infrastructure::BitgetClockSync) }
+  let(:market_endpoint) { instance_double(Infrastructure::BitgetMarketEndpoint) }
+  let(:position_endpoint) { instance_double(Infrastructure::BitgetPositionEndpoint) }
+  let(:contract_metadata_response) do
+    {
+      symbol: "BTCUSDT", price_place: 1, price_end_step: 1, tick_size: BigDecimal("0.1"),
+      volume_place: 3, size_multiplier: BigDecimal("0.001"), min_trade_num: BigDecimal("0.001"),
+      base_coin: "BTC", quote_coin: "USDT"
+    }
+  end
+  let(:warmup_candles_response) do
+    [
+      { ts: 1_234_567_890_123, open: "50000", high: "50500", low: "49500", close: "50200",
+        base_volume: "100", quote_volume: "5020000", usdt_volume: "5020000" }
+    ]
+  end
+  let(:worker) do
+    described_class.new(
+      process_manager: process_manager,
+      clock_sync: clock_sync,
+      market_endpoint: market_endpoint,
+      position_endpoint: position_endpoint,
+      logger: logger
+    )
+  end
 
   let(:definition) do
     Strategy::Definition.create!(name: "Worker Strat", market_type: "futures", status: "active")
@@ -62,6 +86,13 @@ RSpec.describe LiveTradingWorker do
     allow(process_manager).to receive(:acquire_lease!).and_return(lease)
     allow(lease).to receive(:release!)
     allow(lease).to receive(:state_released?).and_return(false)
+    allow(clock_sync).to receive(:sync!).and_return(0.123)
+    allow(market_endpoint).to receive(:contract_metadata).and_return(contract_metadata_response)
+    allow(market_endpoint).to receive(:history_futures_candles).and_return(warmup_candles_response)
+    allow(position_endpoint).to receive(:set_margin_mode)
+    allow(position_endpoint).to receive(:set_position_mode)
+    allow(position_endpoint).to receive(:set_asset_mode)
+    allow(position_endpoint).to receive(:set_leverage)
   end
 
   describe "Sidekiq options" do
@@ -75,7 +106,7 @@ RSpec.describe LiveTradingWorker do
   end
 
   describe "#perform(session_id)" do
-    context "step 1-4 全成功(現時点 3.3-9a で実装済の範囲)" do
+    context "step 1-8 全成功(現時点 3.3-9b で実装済の範囲)" do
       it "process_manager.acquire_lease! を session + worker_instance_id で呼ぶ" do
         worker.perform(session.id)
 
@@ -89,6 +120,92 @@ RSpec.describe LiveTradingWorker do
         worker.perform(session.id)
         expect(session.reload.state_starting?).to be true
       end
+
+      it "step 5: clock_sync.sync! を呼ぶ" do
+        worker.perform(session.id)
+        expect(clock_sync).to have_received(:sync!)
+      end
+
+      it "step 6: market_endpoint.contract_metadata を symbol で呼ぶ" do
+        worker.perform(session.id)
+        expect(market_endpoint).to have_received(:contract_metadata).with(symbol: "BTCUSDT")
+      end
+
+      it "step 7: position_endpoint で margin/position/asset/leverage を session 値で適用する" do
+        worker.perform(session.id)
+
+        expect(position_endpoint).to have_received(:set_margin_mode).with(
+          symbol: "BTCUSDT", margin_coin: "USDT", margin_mode: "isolated"
+        )
+        expect(position_endpoint).to have_received(:set_position_mode).with(position_mode: "one_way_mode")
+        expect(position_endpoint).to have_received(:set_asset_mode).with(asset_mode: "single")
+        expect(position_endpoint).to have_received(:set_leverage).with(
+          symbol: "BTCUSDT", margin_coin: "USDT", leverage: 10
+        )
+      end
+
+      it "step 8: market_endpoint.history_futures_candles を warmup default(1m / 200)で呼ぶ" do
+        worker.perform(session.id)
+        expect(market_endpoint).to have_received(:history_futures_candles).with(
+          symbol: "BTCUSDT", granularity: "1m", limit: 200
+        )
+      end
+    end
+
+    # step 5-8 の失敗パス: lease 取得済み → cleanup_on_failure で release! + mark_failed_to_start!
+    shared_examples "step 5+ failure cleanup" do |error_class:, error_pattern:|
+      it "#{error_class} を raise + failed_to_start 遷移" do
+        expect { worker.perform(session.id) }.to raise_error(error_class, error_pattern)
+        expect(session.reload.state_failed_to_start?).to be true
+      end
+
+      it "lease.release! を呼ぶ(step 5+ で lease 取得済みのため)" do
+        expect { worker.perform(session.id) }.to raise_error(error_class)
+        expect(lease).to have_received(:release!)
+      end
+    end
+
+    context "step 5 失敗(clock_sync.sync! が nil 返却)" do
+      before do
+        allow(clock_sync).to receive(:sync!).and_return(nil)
+      end
+
+      include_examples "step 5+ failure cleanup",
+                       error_class: StandardError,
+                       error_pattern: /clock sync failed/
+    end
+
+    context "step 6 失敗(market_endpoint.contract_metadata raise)" do
+      before do
+        allow(market_endpoint).to receive(:contract_metadata)
+          .and_raise(ArgumentError, "symbol not found (symbol=BTCUSDT)")
+      end
+
+      include_examples "step 5+ failure cleanup",
+                       error_class: ArgumentError,
+                       error_pattern: /symbol not found/
+    end
+
+    context "step 7 失敗(position_endpoint.set_margin_mode raise)" do
+      before do
+        allow(position_endpoint).to receive(:set_margin_mode)
+          .and_raise(StandardError, "set_margin_mode API error")
+      end
+
+      include_examples "step 5+ failure cleanup",
+                       error_class: StandardError,
+                       error_pattern: /set_margin_mode API error/
+    end
+
+    context "step 8 失敗(market_endpoint.history_futures_candles raise)" do
+      before do
+        allow(market_endpoint).to receive(:history_futures_candles)
+          .and_raise(StandardError, "history candles API error")
+      end
+
+      include_examples "step 5+ failure cleanup",
+                       error_class: StandardError,
+                       error_pattern: /history candles API error/
     end
 
     context "step 1 失敗(session_id 不在)" do

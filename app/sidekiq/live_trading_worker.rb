@@ -8,10 +8,10 @@
 #   2. Revision.find + 整合検証 + 受入条件チェック
 #   3. Risk::Policy.find
 #   4. SessionLease.acquire!(TTL 5 分)
-#   5. server_time(clock sync)         ← 3.3-9b で実装予定
-#   6. contract_metadata(symbol)        ← 3.3-9b で実装予定
-#   7. set_margin_mode + set_position_mode + set_asset_mode + set_leverage  ← 3.3-9b
-#   8. history_candles(warmup_range)    ← 3.3-9b で実装予定
+#   5. server_time(clock sync)         ← 3.3-9b 実装済
+#   6. contract_metadata(symbol)        ← 3.3-9b 実装済
+#   7. set_margin_mode + set_position_mode + set_asset_mode + set_leverage  ← 3.3-9b 実装済
+#   8. history_candles(warmup_range)    ← 3.3-9b 実装済
 #   9. Public WS connect + subscribe    ← 3.3-9c で実装予定
 #  10. Private WS connect + login + subscribe ← 3.3-9c で実装予定
 #  11. reconciliation(6 件 REST 突合)  ← 3.3-9d / 3.3-11
@@ -28,9 +28,21 @@ class LiveTradingWorker
   sidekiq_options retry: false, queue: :live_trading
 
   # @param process_manager [Domain::LiveTradingProcessManager]
+  # @param clock_sync [Infrastructure::BitgetClockSync, nil] step 5 で server_time 同期に利用
+  # @param market_endpoint [Infrastructure::BitgetMarketEndpoint, nil] step 6 (contract_metadata) / step 8 (history_candles)
+  # @param position_endpoint [Infrastructure::BitgetPositionEndpoint, nil] step 7 (margin/position/asset/leverage settings)
   # @param logger [Logger] release! 例外等の警告出力先
-  def initialize(process_manager: Domain::LiveTradingProcessManager.new, logger: Rails.logger)
+  def initialize(
+    process_manager: Domain::LiveTradingProcessManager.new,
+    clock_sync: nil,
+    market_endpoint: nil,
+    position_endpoint: nil,
+    logger: Rails.logger
+  )
     @process_manager = process_manager
+    @clock_sync = clock_sync
+    @market_endpoint = market_endpoint
+    @position_endpoint = position_endpoint
     @logger = logger
   end
 
@@ -46,6 +58,13 @@ class LiveTradingWorker
     bootstrap_session(session_id)
   end
 
+  # warmup MVP デフォルト(設計書 05_§3.3 step 8 / 3.3-9b 引き継ぎ事項として
+  # strategy ごとの granularity / warmup_period 切替は将来 phase で対応予定)
+  WARMUP_GRANULARITY = "1m".freeze
+  WARMUP_LIMIT = 200
+
+  private_constant :WARMUP_GRANULARITY, :WARMUP_LIMIT
+
   private
 
   attr_reader :process_manager, :logger
@@ -59,7 +78,11 @@ class LiveTradingWorker
       load_revision_with_consistency(session)
       Risk::Policy.find(session.risk_policy_id)
       lease = process_manager.acquire_lease!(session: session, worker_instance_id: @worker_instance_id)
-      # step 5-13 は 3.3-9b/c/d で実装予定
+      sync_clock_or_raise!
+      fetch_contract_metadata(session)
+      apply_account_settings(session)
+      fetch_warmup_candles(session)
+      # step 9-13 は 3.3-9c/d で実装予定
     rescue StandardError => e
       cleanup_on_failure(session: session, lease: lease, error: e)
       raise
@@ -81,6 +104,62 @@ class LiveTradingWorker
     end
 
     revision
+  end
+
+  # step 5: server_time 同期. clock_sync.sync! は失敗時 nil を返すため raise に昇格させる.
+  def sync_clock_or_raise!
+    raise StandardError, "clock sync failed (server_time API)" if clock_sync.sync!.nil?
+  end
+
+  # step 6: contract_metadata 取得(tick_size 等). 戻り値は 3.3-10 メインループで使用予定.
+  def fetch_contract_metadata(session)
+    market_endpoint.contract_metadata(symbol: session.symbol)
+  end
+
+  # step 7: account settings(margin_mode / position_mode / asset_mode / leverage)を Bitget API で適用.
+  def apply_account_settings(session)
+    position_endpoint.set_margin_mode(
+      symbol: session.symbol,
+      margin_coin: session.margin_coin,
+      margin_mode: session.margin_mode
+    )
+    position_endpoint.set_position_mode(position_mode: session.position_mode)
+    position_endpoint.set_asset_mode(asset_mode: session.asset_mode)
+    position_endpoint.set_leverage(
+      symbol: session.symbol,
+      margin_coin: session.margin_coin,
+      leverage: session.leverage
+    )
+  end
+
+  # step 8: warmup candles 取得. 戻り値は 3.3-10 メインループで indicator 初期化に使用予定.
+  def fetch_warmup_candles(session)
+    market_endpoint.history_futures_candles(
+      symbol: session.symbol,
+      granularity: WARMUP_GRANULARITY,
+      limit: WARMUP_LIMIT
+    )
+  end
+
+  # 遅延初期化: spec では DI で mock を渡し, production では Rails.application.credentials から生成.
+  def clock_sync
+    @clock_sync ||= Infrastructure::BitgetClockSync.new(rest_client: build_rest_client, logger: logger)
+  end
+
+  def market_endpoint
+    @market_endpoint ||= Infrastructure::BitgetMarketEndpoint.new(rest_client: build_rest_client)
+  end
+
+  def position_endpoint
+    @position_endpoint ||= Infrastructure::BitgetPositionEndpoint.new(rest_client: build_rest_client)
+  end
+
+  def build_rest_client
+    @rest_client ||= Infrastructure::BitgetRestClient.new(
+      api_key: Rails.application.credentials.dig(:bitget, :api_key),
+      secret_key: Rails.application.credentials.dig(:bitget, :secret_key),
+      passphrase: Rails.application.credentials.dig(:bitget, :passphrase)
+    )
   end
 
   # bootstrap 失敗時のクリーンアップ.責務分担は class doc コメント参照.
