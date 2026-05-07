@@ -667,10 +667,42 @@ RSpec.describe LiveTradingWorker do
           expect(session.failure_reason).to include("ws_disconnected")
         end
 
+        it "failure_reason に public_ws / private_ws の状態を含める(軽微 obs 3)" do
+          worker.perform(session.id)
+          expect(session.reload.failure_reason).to match(/public_ws=false/)
+          expect(session.reload.failure_reason).to match(/private_ws=true/)
+        end
+
         it "public_ws.disconnect は呼ばれない(connected? false でスキップ) + lease.release! は呼ばれる" do
           worker.perform(session.id)
           expect(public_ws).not_to have_received(:disconnect)
           expect(lease).to have_received(:release!)
+        end
+      end
+
+      # 軽微 obs 5 反映: private_ws 単独切断シナリオの独立検証
+      context "WS 切断検知(private_ws.connected? が false / public_ws は true)" do
+        before do
+          allow(process_manager).to receive(:signal_kill_switch?).and_return(false)
+          allow(public_ws).to receive(:connected?).and_return(true)
+          allow(private_ws).to receive(:connected?).and_return(false)
+        end
+
+        it "ws_healthy? の && 短絡評価で ws_disconnected と判定される" do
+          worker.perform(session.id)
+          expect(session.reload.state_halted?).to be true
+        end
+
+        it "failure_reason に private_ws=false が含まれる" do
+          worker.perform(session.id)
+          expect(session.reload.failure_reason).to match(/private_ws=false/)
+          expect(session.reload.failure_reason).to match(/public_ws=true/)
+        end
+
+        it "public_ws.disconnect は呼ばれる(connected? true) + private_ws.disconnect はスキップ" do
+          worker.perform(session.id)
+          expect(public_ws).to have_received(:disconnect)
+          expect(private_ws).not_to have_received(:disconnect)
         end
       end
 

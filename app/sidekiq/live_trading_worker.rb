@@ -145,9 +145,9 @@ class LiveTradingWorker
   # session 状態遷移後 → WS disconnect → lease release の順で安全に解放する.
   def finalize_main_loop(exit_reason:)
     transition_session_for_exit(exit_reason)
-    safe_disconnect(@private_ws, name: "private_ws")
-    safe_disconnect(@public_ws, name: "public_ws")
-    safe_release_lease(@lease)
+    safe_disconnect(@private_ws, name: "private_ws", context: "finalize_main_loop")
+    safe_disconnect(@public_ws, name: "public_ws", context: "finalize_main_loop")
+    safe_release_lease(@lease, context: "finalize_main_loop")
   end
 
   def transition_session_for_exit(exit_reason)
@@ -159,20 +159,29 @@ class LiveTradingWorker
       # signal_kill_switch? は session.state_stopping? を意味するため stopping → stopped に遷移
       @session.mark_stopped! if @session.state_stopping?
     when :ws_disconnected
-      @session.mark_halted!(reason: "ws_disconnected") unless @session.terminal?
+      reason = ws_disconnected_reason
+      @session.mark_halted!(reason: reason) unless @session.terminal?
     when :terminal
       # 他プロセスが既に状態確定済み. 何もしない.
     end
   end
 
-  def safe_release_lease(lease)
+  # 3.3-10a peer review 軽微 obs 3 反映: 運用調査時に public_ws / private_ws どちらが切れたかを
+  # session.failure_reason で追跡可能にする.
+  def ws_disconnected_reason
+    "ws_disconnected: public_ws=#{@public_ws&.connected?} private_ws=#{@private_ws&.connected?}"
+  end
+
+  # 3.3-10a peer review 軽微 obs 4 反映: cleanup_on_failure / finalize_main_loop の両方から
+  # 共通呼出する DRY helper. context は logger.warn メッセージで呼出元を追跡可能にする.
+  def safe_release_lease(lease, context:)
     return unless lease
     return if lease.state_released?
 
     lease.release!
   rescue StandardError => release_error
     logger.warn(
-      "[LiveTradingWorker] lease.release! failed during finalize_main_loop: " \
+      "[LiveTradingWorker] lease.release! failed during #{context}: " \
       "#{release_error.class.name}: #{release_error.message}"
     )
   end
@@ -358,32 +367,23 @@ class LiveTradingWorker
     return if session.nil?
     return if session.reload.terminal?
 
-    safe_disconnect(private_ws, name: "private_ws")
-    safe_disconnect(public_ws, name: "public_ws")
-
-    if lease && !lease.state_released?
-      begin
-        lease.release!
-      rescue StandardError => release_error
-        logger.warn(
-          "[LiveTradingWorker] lease.release! failed during cleanup_on_failure: " \
-          "#{release_error.class.name}: #{release_error.message}"
-        )
-      end
-    end
+    safe_disconnect(private_ws, name: "private_ws", context: "cleanup_on_failure")
+    safe_disconnect(public_ws, name: "public_ws", context: "cleanup_on_failure")
+    safe_release_lease(lease, context: "cleanup_on_failure")
 
     session.mark_failed_to_start!(reason: "#{error.class.name}: #{error.message}")
   end
 
   # WS disconnect で例外発生時に他の cleanup を妨げないよう logger.warn に落とす.
-  def safe_disconnect(ws, name:)
+  # context は呼出元(cleanup_on_failure / finalize_main_loop)を logger メッセージで追跡可能にする.
+  def safe_disconnect(ws, name:, context:)
     return unless ws
     return unless ws.connected?
 
     ws.disconnect
   rescue StandardError => disconnect_error
     logger.warn(
-      "[LiveTradingWorker] #{name}.disconnect failed during cleanup_on_failure: " \
+      "[LiveTradingWorker] #{name}.disconnect failed during #{context}: " \
       "#{disconnect_error.class.name}: #{disconnect_error.message}"
     )
   end
