@@ -11,71 +11,20 @@
 #
 # Phase 1.2(`lib/strategy_runner_child.rb`)/ Phase 2.1(`lib/backtest_runner_child.rb`)
 # 構造踏襲: Infrastructure::* 名前空間は一切参照せず, setrlimit / checksum 検証 /
-# エラー JSON 整形 を全てインライン定義する(B 案 / 完全不変保護方針).
-#
-# Phase 2 引き継ぎ #15(lib/runner_child_common.rb 抽出判断)は Step 3.3-6 で対応予定.
-# 本 Step では backtest_runner_child.rb と同形式で重複維持し, 共通化判断は次 Step で実施する.
+# エラー JSON 整形 は `lib/runner_child_common.rb` で共通化している
+# (Phase 2 引き継ぎ #15 / Step 3.3-6 / B 案 / 完全不変保護方針).
 #
 # ## 主要差分(backtest_runner_child.rb との比較)
 # - Domain::LiveContext を使用(Domain::BacktestContext ではない)
 # - callback は on_start / on_tick / on_order_event / on_stop の 4 種類サポート
 # - state diff は backtest と同等(replace_all op)/ 設計書 05_§2.7
 
-require "json"
-require "digest"
+require_relative "runner_child_common"
 require "bigdecimal"
 require "ostruct"
 
-SCHEMA_VERSION = "1.0"
-DEFAULT_CPU_SECONDS = 1
-DEFAULT_MEMORY_BYTES = 256 * 1024 * 1024
-
-# === setrlimit インライン適用 ===
-# macOS / Darwin では RLIMIT_AS が EINVAL で拒否されるため rescue で守る.
-begin
-  Process.setrlimit(Process::RLIMIT_CPU, DEFAULT_CPU_SECONDS) if defined?(Process::RLIMIT_CPU)
-rescue Errno::EINVAL
-  # macOS 開発時のフォールバック
-end
-
-begin
-  Process.setrlimit(Process::RLIMIT_AS, DEFAULT_MEMORY_BYTES) if defined?(Process::RLIMIT_AS)
-rescue Errno::EINVAL
-  # macOS は RLIMIT_AS の精密な enforcement 不可
-end
-
-def emit_error_response(callback_name, error_class:, message:, backtrace: nil)
-  error_entry = { "class" => error_class, "message" => message }
-  error_entry["backtrace"] = backtrace if backtrace
-  payload = {
-    "schema_version" => SCHEMA_VERSION,
-    "callback" => callback_name,
-    "status" => "error",
-    "order_intents" => [],
-    "logs" => [],
-    "errors" => [ error_entry ],
-    "strategy_state_diff" => { "ops" => [] }
-  }
-  $stdout.puts(payload.to_json)
-end
-
-# === stdin から JSON 受信 ===
-raw_input = $stdin.read
-begin
-  input = JSON.parse(raw_input)
-rescue JSON::ParserError => e
-  emit_error_response(nil, error_class: "JsonParseError", message: e.message)
-  exit 0
-end
-
+input = load_and_verify_input!
 callback_name = input["callback"]
-
-# === script_checksum 照合 ===
-computed_checksum = Digest::SHA256.hexdigest(input["script_content"])
-unless computed_checksum == input["script_checksum"]
-  emit_error_response(callback_name, error_class: "ScriptIntegrityError", message: "checksum mismatch")
-  exit 0
-end
 
 # === Domain クラス群 個別読込(zeitwerk なし環境, Rails 非依存) ===
 trading_script_base_path = File.expand_path("../app/domain/trading_script_base", __dir__)

@@ -8,63 +8,14 @@
 # Rails 環境を継承せず,JSON / Digest / Open3 の Ruby 標準ライブラリのみ require する.
 #
 # レビュー指摘 重要1 (B)案 に従い `Infrastructure::*` 名前空間は一切参照せず,
-# setrlimit / checksum 検証 / エラー JSON 整形 を全てインライン定義する.
+# setrlimit / checksum 検証 / エラー JSON 整形 を `lib/runner_child_common.rb` で共通化している
+# (Phase 2 引き継ぎ #15 / Step 3.3-6).
 
-require "json"
-require "digest"
+require_relative "runner_child_common"
 require "ostruct"
 
-SCHEMA_VERSION = "1.0"
-DEFAULT_CPU_SECONDS = 1
-DEFAULT_MEMORY_BYTES = 256 * 1024 * 1024
-
-# === setrlimit インライン適用(05_§1.7.2) ===
-# macOS / Darwin では RLIMIT_AS が EINVAL で拒否されるため rescue で守る(02_§注意事項).
-# Linux 本番では setrlimit が確実に効く前提で運用する.
-begin
-  Process.setrlimit(Process::RLIMIT_CPU, DEFAULT_CPU_SECONDS) if defined?(Process::RLIMIT_CPU)
-rescue Errno::EINVAL
-  # macOS 開発時のフォールバック(本番 Linux では発生しない想定)
-end
-
-begin
-  Process.setrlimit(Process::RLIMIT_AS, DEFAULT_MEMORY_BYTES) if defined?(Process::RLIMIT_AS)
-rescue Errno::EINVAL
-  # macOS は RLIMIT_AS の精密な enforcement 不可
-end
-
-def emit_error_response(callback_name, error_class:, message:, backtrace: nil)
-  error_entry = { "class" => error_class, "message" => message }
-  error_entry["backtrace"] = backtrace if backtrace
-  payload = {
-    "schema_version" => SCHEMA_VERSION,
-    "callback" => callback_name,
-    "status" => "error",
-    "order_intents" => [],
-    "logs" => [],
-    "errors" => [ error_entry ],
-    "strategy_state_diff" => { "ops" => [] }
-  }
-  $stdout.puts(payload.to_json)
-end
-
-# === stdin から JSON 受信 ===
-raw_input = $stdin.read
-begin
-  input = JSON.parse(raw_input)
-rescue JSON::ParserError => e
-  emit_error_response(nil, error_class: "JsonParseError", message: e.message)
-  exit 0
-end
-
+input = load_and_verify_input!
 callback_name = input["callback"]
-
-# === script_checksum 照合(05_§1.7.5) ===
-computed_checksum = Digest::SHA256.hexdigest(input["script_content"])
-unless computed_checksum == input["script_checksum"]
-  emit_error_response(callback_name, error_class: "ScriptIntegrityError", message: "checksum mismatch")
-  exit 0
-end
 
 # === Domain::TradingScriptBase 読み込み(zeitwerk なし環境) ===
 trading_script_base_path = File.expand_path("../app/domain/trading_script_base", __dir__)
