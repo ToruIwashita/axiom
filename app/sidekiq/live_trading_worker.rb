@@ -14,9 +14,9 @@
 #   8. history_candles(warmup_range)    ← 3.3-9b 実装済
 #   9. Public WS connect + subscribe    ← 3.3-9c 実装済
 #  10. Private WS connect + login + subscribe ← 3.3-9c 実装済
-#  11. reconciliation(6 件 REST 突合)  ← 3.3-9d / 3.3-11
-#  12. SessionState load                ← 3.3-9d で実装予定
-#  13. mark_running                     ← 3.3-9d で実装予定
+#  11. reconciliation(start_reconciling 遷移 + REST 突合) ← 3.3-9d 実装済(REST 突合内部は 3.3-11 で対応)
+#  12. SessionState load                ← 3.3-9d 実装済
+#  13. mark_running(reconciling → running) ← 3.3-9d 実装済
 #
 # bootstrap 失敗時のクリーンアップ責務(設計書 02_§5.2.6 / レビュー軽微 1 + 軽微 2):
 #   - step 1   失敗(Session 不在): cleanup 対象なし(raise のみ)
@@ -92,7 +92,9 @@ class LiveTradingWorker
       fetch_warmup_candles(session)
       public_ws = connect_public_ws(session)
       private_ws = connect_private_ws(session)
-      # step 11-13 は 3.3-9d で実装予定
+      run_reconciliation(session)
+      load_session_state(session)
+      mark_running(session)
     rescue StandardError => e
       cleanup_on_failure(session: session, lease: lease, public_ws: public_ws, private_ws: private_ws, error: e)
       raise
@@ -187,6 +189,28 @@ class LiveTradingWorker
     %w[orders orders-algo fill positions positions-history account].map do |channel|
       Infrastructure::BitgetPrivateWsSubscription.new(channel: channel, inst_type: "USDT-FUTURES", inst_id: session.symbol)
     end
+  end
+
+  # step 11: reconciliation(6 件 REST 突合 / starting → reconciling 遷移 + REST 突合).
+  # 6 件の REST 突合(orders-pending / orders-plan-pending / orders-plan-history /
+  # plan-sub-order / position-all / fill-history)の内部実装は 3.3-11 で対応予定.
+  # 本 step では `start_reconciling!` 遷移と method skeleton のみを確立する.
+  def run_reconciliation(session)
+    session.start_reconciling!
+    # TODO(3.3-11): 6 件 REST 突合実装(orders-pending, orders-plan-pending, orders-plan-history,
+    #               plan-sub-order, position-all, fill-history)
+  end
+
+  # step 12: SessionState 復元(初回起動時は空 state_data で create, 再起動時は既存をロード).
+  def load_session_state(session)
+    LiveTrading::SessionState.find_or_create_by!(live_trading_session_id: session.id) do |s|
+      s.state_data = {}
+    end
+  end
+
+  # step 13: reconciling → running 遷移(started_at = Time.current 自動設定).
+  def mark_running(session)
+    session.start_running!
   end
 
   # 遅延初期化: spec では DI で mock を渡し, production では Rails.application.credentials から生成.

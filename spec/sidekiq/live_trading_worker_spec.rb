@@ -120,7 +120,7 @@ RSpec.describe LiveTradingWorker do
   end
 
   describe "#perform(session_id)" do
-    context "step 1-10 全成功(現時点 3.3-9c で実装済の範囲)" do
+    context "step 1-13 全成功(bootstrap 完走)" do
       it "process_manager.acquire_lease! を session + worker_instance_id で呼ぶ" do
         worker.perform(session.id)
 
@@ -130,9 +130,24 @@ RSpec.describe LiveTradingWorker do
         )
       end
 
-      it "session の status は starting のまま(step 13 mark_running は 3.3-9d で実装)" do
+      it "session が starting → reconciling → running まで遷移し started_at を記録する" do
         worker.perform(session.id)
-        expect(session.reload.state_starting?).to be true
+        expect(session.reload.state_running?).to be true
+        expect(session.started_at).to be_present
+      end
+
+      it "step 12: LiveTrading::SessionState を空 state_data で作成する" do
+        expect { worker.perform(session.id) }.to change { LiveTrading::SessionState.count }.by(1)
+        expect(LiveTrading::SessionState.last.state_data).to eq({})
+        expect(LiveTrading::SessionState.last.live_trading_session_id).to eq(session.id)
+      end
+
+      it "step 12: 既存 SessionState がある場合(再起動)は新規作成しない" do
+        LiveTrading::SessionState.create!(live_trading_session_id: session.id, state_data: { "ema" => 50_100 })
+
+        expect { worker.perform(session.id) }.not_to change { LiveTrading::SessionState.count }
+        expect(LiveTrading::SessionState.find_by(live_trading_session_id: session.id).state_data)
+          .to eq({ "ema" => 50_100 })
       end
 
       it "step 5: clock_sync.sync! を呼ぶ" do
@@ -314,6 +329,57 @@ RSpec.describe LiveTradingWorker do
           .to raise_error(Infrastructure::BitgetPrivateWsClient::SubscribeFailedError, /subscribe rejected/)
         expect(session.reload.state_failed_to_start?).to be true
         expect(public_ws).to have_received(:disconnect)
+        expect(lease).to have_received(:release!)
+      end
+    end
+
+    context "step 11 失敗(start_reconciling! が InvalidTransitionError)" do
+      before do
+        # session が starting でないと start_reconciling! 失敗する状況を作るため
+        # 後段で context 強制. ここでは update_column で starting 以外に更新.
+        # ただし step 1-10 は session 操作で starting を前提に進むので,
+        # step 11 失敗は session.start_reconciling! が raise する case を直接 stub する.
+        allow_any_instance_of(LiveTrading::Session).to receive(:start_reconciling!)
+          .and_raise(LiveTrading::Session::InvalidTransitionError, "transition rejected")
+      end
+
+      it "InvalidTransitionError を raise + failed_to_start 遷移 + lease.release! + WS disconnect" do
+        expect { worker.perform(session.id) }
+          .to raise_error(LiveTrading::Session::InvalidTransitionError, /transition rejected/)
+        expect(session.reload.state_failed_to_start?).to be true
+        expect(public_ws).to have_received(:disconnect)
+        expect(private_ws).to have_received(:disconnect)
+        expect(lease).to have_received(:release!)
+      end
+    end
+
+    context "step 12 失敗(SessionState 作成 DB エラー)" do
+      before do
+        allow(LiveTrading::SessionState).to receive(:find_or_create_by!)
+          .and_raise(ActiveRecord::RecordInvalid.new(LiveTrading::SessionState.new))
+      end
+
+      it "RecordInvalid を raise + failed_to_start 遷移 + lease.release! + WS disconnect" do
+        expect { worker.perform(session.id) }.to raise_error(ActiveRecord::RecordInvalid)
+        expect(session.reload.state_failed_to_start?).to be true
+        expect(public_ws).to have_received(:disconnect)
+        expect(private_ws).to have_received(:disconnect)
+        expect(lease).to have_received(:release!)
+      end
+    end
+
+    context "step 13 失敗(start_running! が InvalidTransitionError)" do
+      before do
+        allow_any_instance_of(LiveTrading::Session).to receive(:start_running!)
+          .and_raise(LiveTrading::Session::InvalidTransitionError, "running transition rejected")
+      end
+
+      it "InvalidTransitionError を raise + failed_to_start 遷移 + lease.release! + WS disconnect" do
+        expect { worker.perform(session.id) }
+          .to raise_error(LiveTrading::Session::InvalidTransitionError, /running transition rejected/)
+        expect(session.reload.state_failed_to_start?).to be true
+        expect(public_ws).to have_received(:disconnect)
+        expect(private_ws).to have_received(:disconnect)
         expect(lease).to have_received(:release!)
       end
     end
