@@ -243,12 +243,12 @@ class LiveTradingWorker
 
   # step 9: Public WS connect + subscribe(ticker / candle1m / books5).
   # WS instance は public_ws_factory.call で遅延生成(設計書 02_§5.2.6 / 3.3-9a peer review 重要 obs 2 反映).
-  # subscribe callback は 3.3-10b でメインループ用 handler を実装した(handle_public_ws_message).
+  # subscribe callback は (data, result) の 2 引数で BitgetPublicWsClient から呼ばれる.
   def connect_public_ws(session)
     public_ws = public_ws_factory.call
     public_ws.connect
     public_subscriptions(session).each do |sub|
-      public_ws.subscribe(sub) { |msg| handle_public_ws_message(sub, msg) }
+      public_ws.subscribe(sub) { |data, _result| handle_public_ws_message(sub, data) }
     end
     public_ws
   end
@@ -256,10 +256,13 @@ class LiveTradingWorker
   # Public WS callback handler(WebSocket Client thread から呼ばれる).
   # candle1m 以外の channel は 3.3-10 では未処理(MVP では candle1m のみ)で,後続 phase で対応.
   # callback 内例外は logger.warn に落として WS thread を止めない.
-  def handle_public_ws_message(sub, msg)
+  #
+  # @param sub [Infrastructure::BitgetPublicWsSubscription] subscription オブジェクト
+  # @param data [Array, nil] WS push の data 部分(BitgetPublicWsMessageDecoder Push.data)
+  def handle_public_ws_message(sub, data)
     case sub.channel
     when "candle1m"
-      handle_candle_message(msg)
+      handle_candle_message(data)
     end
   rescue StandardError => e
     logger.warn(
@@ -271,13 +274,12 @@ class LiveTradingWorker
   # candle1m push を受信して確定 candle を検出する.
   # Bitget WS は同 ts の candle を複数回更新 push し, ts 進入で前 candle が確定する.
   # 確定検出時は spawn_runner_child_for_tick(candle)を別 thread で呼び出す.
-  def handle_candle_message(msg)
-    return unless msg.is_a?(Hash)
+  #
+  # @param data [Array<Array>, nil] WS push data 部分(各要素は OHLCV row)
+  def handle_candle_message(data)
+    return unless data.is_a?(Array)
 
-    rows = msg["data"]
-    return unless rows.is_a?(Array)
-
-    rows.each do |row|
+    data.each do |row|
       confirmed = detect_confirmed_candle(row)
       next unless confirmed
 

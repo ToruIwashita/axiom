@@ -745,16 +745,16 @@ RSpec.describe LiveTradingWorker do
 
       describe "#handle_public_ws_message" do
         context "channel=candle1m の場合" do
-          it "handle_candle_message へ dispatch される" do
-            expect(worker).to receive(:handle_candle_message).with(a_kind_of(Hash))
-            worker.send(:handle_public_ws_message, candle1m_sub, { "data" => [] })
+          it "handle_candle_message に data を引数として dispatch する" do
+            expect(worker).to receive(:handle_candle_message).with(an_instance_of(Array))
+            worker.send(:handle_public_ws_message, candle1m_sub, [])
           end
         end
 
         context "channel=ticker の場合(MVP では未処理)" do
           it "handle_candle_message を呼ばない" do
             expect(worker).not_to receive(:handle_candle_message)
-            worker.send(:handle_public_ws_message, ticker_sub, { "data" => [] })
+            worker.send(:handle_public_ws_message, ticker_sub, [])
           end
         end
 
@@ -765,7 +765,7 @@ RSpec.describe LiveTradingWorker do
 
           it "logger.warn 落とし + WS thread を止めない(再 raise しない)" do
             expect do
-              worker.send(:handle_public_ws_message, candle1m_sub, { "data" => [] })
+              worker.send(:handle_public_ws_message, candle1m_sub, [])
             end.not_to raise_error
 
             expect(logger).to have_received(:warn).with(
@@ -782,30 +782,30 @@ RSpec.describe LiveTradingWorker do
         context "初回 candle1m 受信(@last_candle_row が nil)" do
           it "確定 candle なし(spawn を呼ばない)" do
             expect(worker).not_to receive(:spawn_runner_child_for_tick)
-            worker.send(:handle_candle_message, { "data" => [ row1 ] })
+            worker.send(:handle_candle_message, [ row1 ])
           end
 
           it "@last_candle_row が更新される" do
-            worker.send(:handle_candle_message, { "data" => [ row1 ] })
+            worker.send(:handle_candle_message, [ row1 ])
             expect(worker.instance_variable_get(:@last_candle_row)).to eq(row1)
           end
         end
 
         context "同一 ts の candle1m 再受信(更新中)" do
           before do
-            worker.send(:handle_candle_message, { "data" => [ row1 ] })
+            worker.send(:handle_candle_message, [ row1 ])
           end
 
           it "確定 candle なし(spawn を呼ばない)" do
             updated_row1 = [ row1[0], "50000", "50500", "49800", "50300", "20", "1000000", "1000000" ]
             expect(worker).not_to receive(:spawn_runner_child_for_tick)
-            worker.send(:handle_candle_message, { "data" => [ updated_row1 ] })
+            worker.send(:handle_candle_message, [ updated_row1 ])
           end
         end
 
         context "ts が進んだ candle1m 受信(前 candle 確定)" do
           before do
-            worker.send(:handle_candle_message, { "data" => [ row1 ] })
+            worker.send(:handle_candle_message, [ row1 ])
           end
 
           it "前 candle(row1)が確定 payload として spawn される" do
@@ -818,17 +818,17 @@ RSpec.describe LiveTradingWorker do
                 "close" => "50050"
               )
             )
-            worker.send(:handle_candle_message, { "data" => [ row2 ] })
+            worker.send(:handle_candle_message, [ row2 ])
           end
         end
 
-        context "data が Array でない / Hash でない" do
-          it "Hash でない msg は no-op" do
+        context "data が Array でない場合" do
+          it "nil は no-op" do
             expect(worker).not_to receive(:spawn_runner_child_for_tick)
-            worker.send(:handle_candle_message, "not-a-hash")
+            worker.send(:handle_candle_message, nil)
           end
 
-          it "data が Array でない場合は no-op" do
+          it "Hash は no-op" do
             expect(worker).not_to receive(:spawn_runner_child_for_tick)
             worker.send(:handle_candle_message, { "data" => "not-array" })
           end
