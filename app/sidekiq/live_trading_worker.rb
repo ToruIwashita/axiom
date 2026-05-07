@@ -137,6 +137,8 @@ class LiveTradingWorker
     exit_reason = nil
     @last_heartbeat_at = nil
     @last_lease_renew_at = nil
+    @last_public_ws_reconnect_count = ws_reconnect_count(@public_ws)
+    @last_private_ws_reconnect_count = ws_reconnect_count(@private_ws)
 
     loop do
       exit_reason = check_loop_exit_condition
@@ -144,10 +146,55 @@ class LiveTradingWorker
 
       pulse_heartbeat_if_due
       renew_lease_if_due
+      detect_ws_reconnect_and_reconcile
       sleep(@main_loop_poll_interval)
     end
 
     finalize_main_loop(exit_reason: exit_reason)
+  end
+
+  # WS Client の reconnect_count から増分を検知し, 増えていれば reconciliation を再実行する
+  # (Phase 1.3 引き継ぎ #13: 24h 切断後 reconciliation / 設計書 02_§5.2.6).
+  # 別 thread + AR pool で実行(WS callback thread は触らないため main loop thread から起動).
+  def detect_ws_reconnect_and_reconcile
+    return unless @session
+
+    public_count = ws_reconnect_count(@public_ws)
+    private_count = ws_reconnect_count(@private_ws)
+    public_reconnected = public_count > @last_public_ws_reconnect_count
+    private_reconnected = private_count > @last_private_ws_reconnect_count
+
+    @last_public_ws_reconnect_count = public_count
+    @last_private_ws_reconnect_count = private_count
+
+    return unless public_reconnected || private_reconnected
+
+    logger.info(
+      "[LiveTradingWorker] WS reconnect detected (public=#{public_reconnected}, " \
+      "private=#{private_reconnected}), re-running reconciliation"
+    )
+
+    run_in_db_thread("reconcile_after_ws_reconnect") do
+      session_reloaded = LiveTrading::Session.find(@session.id)
+      run_reconciliation_after_reconnect(session_reloaded)
+    end
+  end
+
+  # reconnect 後の reconciliation 再実行.
+  # bootstrap step 11 と異なり session 状態遷移(start_reconciling!)は行わない
+  # (running 状態のまま 6 件 REST 突合のみ実施).
+  def run_reconciliation_after_reconnect(session)
+    reconcile_orders_pending(session)
+    reconcile_orders_plan_pending(session)
+    reconcile_orders_plan_history(session)
+    reconcile_position_all(session)
+  end
+
+  # WS Client の reconnect_count を安全に取得する(nil 防御 + respond_to? 防御).
+  def ws_reconnect_count(ws)
+    return 0 unless ws&.respond_to?(:reconnect_count)
+
+    ws.reconnect_count.to_i
   end
 
   # heartbeat 周期到達時に process_manager.pulse_heartbeat! を呼ぶ.

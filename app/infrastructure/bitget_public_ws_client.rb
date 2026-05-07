@@ -67,8 +67,14 @@ module Infrastructure
       @stop_requested = false
       @open_event_received = false
       @last_pong_at = nil
+      @reconnect_count = 0
       @mutex = Mutex.new
     end
+
+    # 自動再接続の累計回数(LiveTradingWorker が 24h 切断後 reconciliation 再実行検知に利用 / 設計書 02_§5.2.6 + Phase 1.3 引き継ぎ #13).
+    # `reconnect_with_backoff` が再接続成功するたびに increment される.
+    # @return [Integer]
+    attr_reader :reconnect_count
 
     # WebSocket 接続を確立する。
     #
@@ -345,6 +351,7 @@ module Infrastructure
 
           wait_until_open
           send_subscribe(list_to_resubscribe) unless list_to_resubscribe.empty?
+          @reconnect_count += 1
           return
         rescue StandardError => e
           # Phase 1.3 obs-6 反映: wait_until_open 失敗等で @ws を取り残さない
