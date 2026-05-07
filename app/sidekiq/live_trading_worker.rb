@@ -39,6 +39,9 @@ class LiveTradingWorker
   # @param public_ws_factory [Proc, nil] Public WS Client 生成 Proc(step 9 で `.call` 遅延生成)
   # @param private_ws_factory [Proc, nil] Private WS Client 生成 Proc(step 10 で `.call` 遅延生成)
   # @param runner_child_spawner [Infrastructure::StrategyRunnerChildSpawner, nil] live_runner_child 起動用
+  # @param ai_filter_service [Domain::AiFilterService, nil] order_intent 評価用 AI フィルタ
+  # @param risk_guard_service [Domain::RiskGuardService, nil] entry / cooldown / halt 判定
+  # @param order_endpoint [Infrastructure::BitgetOrderEndpoint, nil] 発注
   # @param main_loop_poll_interval [Float] メインループ kill-switch / 状態 poll 間隔(秒). spec で 0 を渡して即時 break.
   # @param logger [Logger] release! 例外等の警告出力先
   def initialize(
@@ -49,6 +52,9 @@ class LiveTradingWorker
     public_ws_factory: nil,
     private_ws_factory: nil,
     runner_child_spawner: nil,
+    ai_filter_service: nil,
+    risk_guard_service: nil,
+    order_endpoint: nil,
     main_loop_poll_interval: DEFAULT_MAIN_LOOP_POLL_INTERVAL,
     logger: Rails.logger
   )
@@ -59,6 +65,9 @@ class LiveTradingWorker
     @public_ws_factory = public_ws_factory
     @private_ws_factory = private_ws_factory
     @runner_child_spawner = runner_child_spawner
+    @ai_filter_service = ai_filter_service
+    @risk_guard_service = risk_guard_service
+    @order_endpoint = order_endpoint
     @main_loop_poll_interval = main_loop_poll_interval
     @logger = logger
   end
@@ -339,13 +348,120 @@ class LiveTradingWorker
     end
   end
 
-  # candle 確定 → live_runner_child 起動 → on_tick callback の中身(3.3-10d で完成).
-  # 本 step(3.3-10b)では skeleton method として登録するに留め, 内部実装は 3.3-10d で:
-  # - ctx_input 構築(candle / state / balance 等)
-  # - runner_child_spawner.run(callback: :on_tick, revision:, ctx_input:)
-  # - 戻り値 order_intents → AI filter → RiskGuard → 発注
-  def run_runner_child_for_tick(_session, _candle)
-    # 3.3-10d で実装予定
+  # candle 確定 → live_runner_child 起動 → on_tick callback → order_intents 評価 → 発注 (3.3-10d).
+  # 1. ctx_input 構築(candle / state / symbol)
+  # 2. runner_child_spawner.run(callback: :on_tick, revision:, ctx_input:)
+  # 3. 戻り値 strategy_state_diff → SessionState.apply_diff! で state 同期
+  # 4. order_intents 評価ループ → AI filter → RiskGuard → place_order
+  def run_runner_child_for_tick(session, candle)
+    revision = session.strategy_revision
+    state = session.session_state || LiveTrading::SessionState.create!(live_trading_session_id: session.id, state_data: {})
+
+    response = runner_child_spawner.run(
+      callback: :on_tick,
+      revision: revision,
+      ctx_input: build_runner_ctx_input(session, candle, state)
+    )
+
+    unless response["status"] == "ok"
+      logger.warn(
+        "[LiveTradingWorker] live_runner_child returned non-ok status=#{response['status']}: " \
+        "errors=#{response['errors'].inspect}"
+      )
+      return
+    end
+
+    apply_strategy_state_diff(state, response["strategy_state_diff"])
+
+    Array(response["order_intents"]).each do |intent|
+      process_order_intent(session, revision, intent)
+    end
+  end
+
+  def build_runner_ctx_input(session, candle, state)
+    {
+      "candle" => candle,
+      "state" => state.state_data,
+      "symbol" => session.symbol
+      # TODO(後続 phase): balance / position / open orders 等を Bitget REST API から付与
+    }
+  end
+
+  # strategy_state_diff の各 op を SessionState.apply_diff! で適用.
+  # MVP は replace_all のみ対応(SessionState 内部で fail-fast 検証).
+  # thread-safety guideline (d): transaction 隔離.
+  def apply_strategy_state_diff(state, diff)
+    return if diff.nil?
+
+    ops = Array(diff["ops"])
+    return if ops.empty?
+
+    LiveTrading::Session.transaction do
+      ops.each { |op| state.apply_diff!(diff: op) }
+    end
+  end
+
+  # 1 件の order_intent を AI filter → RiskGuard → 発注の順に評価する.
+  # いずれかで否決された場合は place_order を呼ばない.
+  # 単一 intent 内例外は logger.warn に落として他 intent の処理を妨げない.
+  def process_order_intent(session, revision, intent)
+    return unless ai_filter_pass?(revision, intent)
+    return unless risk_guard_pass?(session, intent)
+
+    place_order_for_intent(session, intent)
+  rescue StandardError => e
+    logger.warn(
+      "[LiveTradingWorker] process_order_intent failed (intent=#{intent.inspect}): " \
+      "#{e.class.name}: #{e.message}"
+    )
+  end
+
+  # AI filter 通過判定. ai_filter_enabled=false なら常に通過.
+  # ai_filter_enabled=true で nil 戻り(validation_failed)は否決(エントリー見送り固定 / 設計書整合).
+  def ai_filter_pass?(revision, intent)
+    return true unless revision.ai_filter_enabled
+
+    result = ai_filter_service.call(
+      template: revision.ai_filter_template_name,
+      context: intent,
+      context_type: "entry_filter",
+      timeout_sec: revision.ai_filter_timeout_sec || 5.0,
+      fail_safe: revision.ai_filter_fail_safe || "skip"
+    )
+    return false if result.nil?
+
+    result["enter"] == true
+  end
+
+  # RiskGuard 通過判定(allow_entry?). balance は 3.3-10d 範囲では 0 placeholder
+  # (account_endpoint 経由の実 balance 取得は後続 phase で対応).
+  def risk_guard_pass?(session, intent)
+    candidate_size = BigDecimal(intent["size"].to_s)
+    risk_guard_service.allow_entry?(
+      session: session,
+      balance: BigDecimal("0"), # TODO(後続 phase): account_endpoint で実 balance 取得
+      candidate_size: candidate_size
+    )
+  end
+
+  # order_intent → BitgetOrderEndpoint#place_order マッピング.
+  # client_oid は intent 由来 / 未指定なら uuid 生成.
+  def place_order_for_intent(session, intent)
+    order_endpoint.place_order(
+      symbol: session.symbol,
+      margin_mode: session.margin_mode,
+      margin_coin: session.margin_coin,
+      side: intent["side"],
+      order_type: intent["order_type"],
+      size: intent["size"].to_s,
+      force: intent.fetch("force", "gtc"),
+      reduce_only: intent.fetch("reduce_only", "NO"),
+      client_oid: intent["client_oid"] || SecureRandom.uuid,
+      trade_side: intent["trade_side"],
+      price: intent["price"]&.to_s,
+      preset_stop_surplus_price: intent["tp"]&.to_s,
+      preset_stop_loss_price: intent["sl"]&.to_s
+    )
   end
 
   # Private WS callback handler(3.3-10c).
@@ -513,6 +629,23 @@ class LiveTradingWorker
     @runner_child_spawner ||= Infrastructure::StrategyRunnerChildSpawner.new(
       runner_script_path: Rails.root.join("lib/live_runner_child.rb").to_s
     )
+  end
+
+  def ai_filter_service
+    @ai_filter_service ||= Domain::AiFilterService.new(
+      invoker: Infrastructure::ClaudeCodeInvoker.new(logger: logger),
+      validator: Domain::AiResponseValidatorService.new,
+      template_repository: Infrastructure::ClaudeCodePromptTemplates,
+      log_recorder: Integration::AiInvocationLog
+    )
+  end
+
+  def risk_guard_service
+    @risk_guard_service ||= Domain::RiskGuardService.new
+  end
+
+  def order_endpoint
+    @order_endpoint ||= Infrastructure::BitgetOrderEndpoint.new(rest_client: build_rest_client)
   end
 
   # WS factory は Proc を保持し step 9/10 内で `.call` で遅延生成する

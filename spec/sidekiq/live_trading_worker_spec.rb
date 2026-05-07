@@ -971,6 +971,204 @@ RSpec.describe LiveTradingWorker do
       end
     end
 
+    describe "run_runner_child_for_tick(3.3-10d)" do
+      let(:spawner) { instance_double(Infrastructure::StrategyRunnerChildSpawner) }
+      let(:ai_filter_service) { instance_double(Domain::AiFilterService) }
+      let(:risk_guard_service) { instance_double(Domain::RiskGuardService) }
+      let(:order_endpoint_di) { instance_double(Infrastructure::BitgetOrderEndpoint) }
+      let(:worker) do
+        described_class.new(
+          process_manager: process_manager,
+          clock_sync: clock_sync,
+          market_endpoint: market_endpoint,
+          position_endpoint: position_endpoint,
+          public_ws_factory: public_ws_factory,
+          private_ws_factory: private_ws_factory,
+          runner_child_spawner: spawner,
+          ai_filter_service: ai_filter_service,
+          risk_guard_service: risk_guard_service,
+          order_endpoint: order_endpoint_di,
+          main_loop_poll_interval: 0,
+          logger: logger
+        )
+      end
+      let(:candle_payload) do
+        {
+          "ts" => 1_700_000_000_000,
+          "open" => "50000", "high" => "50100", "low" => "49900", "close" => "50050"
+        }
+      end
+      let(:order_intent) do
+        {
+          "side" => "buy",
+          "order_type" => "limit",
+          "size" => "0.01",
+          "price" => "49900",
+          "client_oid" => "intent-001"
+        }
+      end
+      let(:state_diff) do
+        { "ops" => [ { "op" => "replace_all", "value" => { "ema" => 50_050 } } ] }
+      end
+      let(:spawn_response_ok) do
+        {
+          "status" => "ok",
+          "order_intents" => [ order_intent ],
+          "strategy_state_diff" => state_diff,
+          "logs" => [],
+          "errors" => []
+        }
+      end
+
+      before do
+        # 既存 SessionState を作成して reload race 回避
+        LiveTrading::SessionState.create!(live_trading_session_id: session.id, state_data: {})
+        allow(spawner).to receive(:run).and_return(spawn_response_ok)
+        allow(ai_filter_service).to receive(:call).and_return({ "enter" => true })
+        allow(risk_guard_service).to receive(:allow_entry?).and_return(true)
+        allow(order_endpoint_di).to receive(:place_order)
+      end
+
+      describe "正常パス(spawn ok)" do
+        subject { worker.send(:run_runner_child_for_tick, session, candle_payload) }
+
+        it "spawner.run を on_tick + revision + ctx_input(candle/state/symbol)で呼ぶ" do
+          subject
+          expect(spawner).to have_received(:run).with(
+            callback: :on_tick,
+            revision: revision,
+            ctx_input: a_hash_including(
+              "candle" => candle_payload,
+              "state" => {},
+              "symbol" => "BTCUSDT"
+            )
+          )
+        end
+
+        it "state_diff (replace_all) が SessionState に適用される" do
+          subject
+          expect(session.session_state.reload.state_data).to eq({ "ema" => 50_050 })
+        end
+
+        it "order_intents の各 intent に対して place_order を呼ぶ" do
+          subject
+          expect(order_endpoint_di).to have_received(:place_order).with(
+            a_hash_including(
+              symbol: "BTCUSDT", margin_mode: "isolated", margin_coin: "USDT",
+              side: "buy", order_type: "limit", size: "0.01",
+              client_oid: "intent-001", price: "49900"
+            )
+          )
+        end
+      end
+
+      describe "spawn 失敗パス" do
+        context "status=error" do
+          before do
+            allow(spawner).to receive(:run).and_return(
+              "status" => "error", "errors" => [ { "class" => "RuntimeError", "message" => "boom" } ]
+            )
+          end
+
+          it "logger.warn 落とし + place_order を呼ばない" do
+            worker.send(:run_runner_child_for_tick, session, candle_payload)
+            expect(logger).to have_received(:warn).with(/non-ok status=error.*RuntimeError/)
+            expect(order_endpoint_di).not_to have_received(:place_order)
+          end
+        end
+
+        context "status=timeout" do
+          before do
+            allow(spawner).to receive(:run).and_return(
+              "status" => "timeout", "errors" => [ { "class" => "TimeoutError" } ]
+            )
+          end
+
+          it "logger.warn 落とし + place_order を呼ばない" do
+            worker.send(:run_runner_child_for_tick, session, candle_payload)
+            expect(logger).to have_received(:warn).with(/non-ok status=timeout/)
+            expect(order_endpoint_di).not_to have_received(:place_order)
+          end
+        end
+      end
+
+      describe "AI filter 判定" do
+        context "revision.ai_filter_enabled = false" do
+          # default revision は ai_filter_enabled: false
+          it "AI filter を呼ばずに RiskGuard → place_order に進む" do
+            worker.send(:run_runner_child_for_tick, session, candle_payload)
+            expect(ai_filter_service).not_to have_received(:call)
+            expect(order_endpoint_di).to have_received(:place_order)
+          end
+        end
+
+        context "revision.ai_filter_enabled = true" do
+          before do
+            revision.update_columns(
+              ai_filter_enabled: true,
+              ai_filter_template_name: "entry_filter",
+              ai_filter_fail_safe: "skip",
+              ai_filter_timeout_sec: 3
+            )
+          end
+
+          context "AI filter 通過(enter=true)" do
+            it "place_order が呼ばれる" do
+              allow(ai_filter_service).to receive(:call).and_return({ "enter" => true })
+              worker.send(:run_runner_child_for_tick, session, candle_payload)
+              expect(order_endpoint_di).to have_received(:place_order)
+            end
+          end
+
+          context "AI filter 否決(enter=false)" do
+            it "place_order を呼ばない" do
+              allow(ai_filter_service).to receive(:call).and_return({ "enter" => false })
+              worker.send(:run_runner_child_for_tick, session, candle_payload)
+              expect(order_endpoint_di).not_to have_received(:place_order)
+            end
+          end
+
+          context "AI filter validation_failed(nil 戻り)" do
+            it "place_order を呼ばない(エントリー見送り固定)" do
+              allow(ai_filter_service).to receive(:call).and_return(nil)
+              worker.send(:run_runner_child_for_tick, session, candle_payload)
+              expect(order_endpoint_di).not_to have_received(:place_order)
+            end
+          end
+        end
+      end
+
+      describe "RiskGuard 否決" do
+        before do
+          allow(risk_guard_service).to receive(:allow_entry?).and_return(false)
+        end
+
+        it "place_order を呼ばない" do
+          worker.send(:run_runner_child_for_tick, session, candle_payload)
+          expect(order_endpoint_di).not_to have_received(:place_order)
+        end
+      end
+
+      describe "process_order_intent 例外時" do
+        before do
+          allow(order_endpoint_di).to receive(:place_order).and_raise(StandardError, "API error")
+        end
+
+        it "logger.warn 落とし + 他 intent の処理を妨げない" do
+          # 2 intent ある場合, 1 件目失敗しても 2 件目の評価は継続
+          response_with_two = spawn_response_ok.merge(
+            "order_intents" => [ order_intent, order_intent.merge("client_oid" => "intent-002") ]
+          )
+          allow(spawner).to receive(:run).and_return(response_with_two)
+
+          worker.send(:run_runner_child_for_tick, session, candle_payload)
+
+          expect(logger).to have_received(:warn).with(/process_order_intent failed.*API error/).twice
+          expect(order_endpoint_di).to have_received(:place_order).twice
+        end
+      end
+    end
+
     context "worker_instance_id 生成" do
       it "jid なし(直接 perform)実行時は manual- prefix で生成される" do
         worker.perform(session.id)
