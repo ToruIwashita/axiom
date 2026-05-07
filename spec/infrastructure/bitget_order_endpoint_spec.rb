@@ -8,6 +8,8 @@ RSpec.describe Infrastructure::BitgetOrderEndpoint do
     subject do
       endpoint.place_order(
         symbol: "BTCUSDT",
+        margin_mode: "isolated",
+        margin_coin: "USDT",
         side: "buy",
         order_type: "limit",
         size: BigDecimal("0.01"),
@@ -18,7 +20,7 @@ RSpec.describe Infrastructure::BitgetOrderEndpoint do
       )
     end
 
-    it "POST /api/v2/mix/order/place-order に必須フィールドを送信" do
+    it "POST /api/v2/mix/order/place-order に必須フィールド(marginMode/marginCoin 含む)を送信" do
       expect(rest_client).to receive(:request) do |method, path, **kwargs|
         expect(method).to eq(:post)
         expect(path).to eq("/api/v2/mix/order/place-order")
@@ -28,6 +30,8 @@ RSpec.describe Infrastructure::BitgetOrderEndpoint do
         expect(body).to include(
           "symbol" => "BTCUSDT",
           "productType" => "usdt-futures",
+          "marginMode" => "isolated",
+          "marginCoin" => "USDT",
           "side" => "buy",
           "orderType" => "limit",
           "size" => "0.01",
@@ -41,6 +45,21 @@ RSpec.describe Infrastructure::BitgetOrderEndpoint do
       subject
     end
 
+    context "margin_mode が crossed の場合" do
+      it "marginMode=crossed が body に含まれる" do
+        expect(rest_client).to receive(:request) do |_method, _path, **kwargs|
+          body = JSON.parse(kwargs[:body])
+          expect(body["marginMode"]).to eq("crossed")
+          { "data" => {} }
+        end
+        endpoint.place_order(
+          symbol: "BTCUSDT", margin_mode: "crossed", margin_coin: "USDT",
+          side: "buy", order_type: "market",
+          size: BigDecimal("0.01"), force: "gtc", reduce_only: "no", client_oid: "x"
+        )
+      end
+    end
+
     context "TP/SL 委託価格を指定する場合" do
       it "presetStopSurplusPrice / presetStopLossPrice を含む" do
         expect(rest_client).to receive(:request) do |_method, _path, **kwargs|
@@ -50,7 +69,8 @@ RSpec.describe Infrastructure::BitgetOrderEndpoint do
           { "data" => {} }
         end
         endpoint.place_order(
-          symbol: "BTCUSDT", side: "buy", order_type: "market",
+          symbol: "BTCUSDT", margin_mode: "isolated", margin_coin: "USDT",
+          side: "buy", order_type: "market",
           size: BigDecimal("0.01"), force: "gtc", reduce_only: "no", client_oid: "x",
           preset_stop_surplus_price: BigDecimal("51000"),
           preset_stop_loss_price: BigDecimal("49000")
@@ -66,10 +86,22 @@ RSpec.describe Infrastructure::BitgetOrderEndpoint do
           { "data" => {} }
         end
         endpoint.place_order(
-          symbol: "BTCUSDT", side: "buy", order_type: "market",
+          symbol: "BTCUSDT", margin_mode: "isolated", margin_coin: "USDT",
+          side: "buy", order_type: "market",
           size: BigDecimal("0.01"), force: "gtc", reduce_only: "no",
           client_oid: "x", trade_side: "open"
         )
+      end
+    end
+
+    context "margin_mode / margin_coin が省略された場合" do
+      it "ArgumentError raise(キーワード引数必須)" do
+        expect do
+          endpoint.place_order(
+            symbol: "BTCUSDT", side: "buy", order_type: "market",
+            size: BigDecimal("0.01"), force: "gtc", reduce_only: "no", client_oid: "x"
+          )
+        end.to raise_error(ArgumentError)
       end
     end
   end

@@ -27,8 +27,12 @@ module Infrastructure
     end
 
     # 通常注文を発注する
+    # Phase 3.3 Step 0(Phase 3.2 引継 1 反映): marginMode / marginCoin を必須引数として受け取る
+    # (Bitget V2 先物 place-order API 仕様で必須パラメータ)
     #
     # @param symbol [String] 例: "BTCUSDT"
+    # @param margin_mode [String] "isolated" / "crossed"(必須)
+    # @param margin_coin [String] 例: "USDT"(必須)
     # @param side [String] "buy" / "sell"
     # @param trade_side [String, nil] hedge_mode 時のみ "open" / "close"(one_way_mode 時は nil)
     # @param order_type [String] "limit" / "market"
@@ -40,14 +44,15 @@ module Infrastructure
     # @param preset_stop_surplus_price [String, nil] TP 委託価格(任意)
     # @param preset_stop_loss_price [String, nil] SL 委託価格(任意)
     # @return [Hash] レスポンスの "data"(orderId / clientOid 等)
-    def place_order(symbol:, side:, order_type:, size:, force:, reduce_only:, client_oid:,
+    def place_order(symbol:, margin_mode:, margin_coin:, side:, order_type:, size:,
+                    force:, reduce_only:, client_oid:,
                     trade_side: nil, price: nil,
                     preset_stop_surplus_price: nil, preset_stop_loss_price: nil)
       body = {
         symbol: symbol,
         productType: PRODUCT_TYPE,
-        marginMode: nil,
-        marginCoin: nil,
+        marginMode: margin_mode,
+        marginCoin: margin_coin,
         side: side,
         orderType: order_type,
         size: size.to_s,
@@ -59,7 +64,6 @@ module Infrastructure
       body[:price] = price.to_s if price
       body[:presetStopSurplusPrice] = preset_stop_surplus_price.to_s if preset_stop_surplus_price
       body[:presetStopLossPrice] = preset_stop_loss_price.to_s if preset_stop_loss_price
-      body.compact!
       post(PATH_PLACE_ORDER, body: body, endpoint_key: :place_order)
     end
 
