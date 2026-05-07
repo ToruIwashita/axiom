@@ -721,6 +721,136 @@ RSpec.describe LiveTradingWorker do
       end
     end
 
+    describe "Public WS callback(3.3-10b)" do
+      let(:candle1m_sub) do
+        Infrastructure::BitgetPublicWsSubscription.new(
+          channel: "candle1m", inst_type: "USDT-FUTURES", inst_id: "BTCUSDT"
+        )
+      end
+      let(:ticker_sub) do
+        Infrastructure::BitgetPublicWsSubscription.new(
+          channel: "ticker", inst_type: "USDT-FUTURES", inst_id: "BTCUSDT"
+        )
+      end
+
+      before do
+        # bootstrap で session を作成しておくが main loop 内処理は不要
+        worker.send(:instance_variable_set, :@session, session)
+        worker.send(:instance_variable_set, :@last_candle_row, nil)
+        # run_in_db_thread を同期化(spec hang 回避)
+        allow(worker).to receive(:run_in_db_thread) do |_label, &block|
+          block.call
+        end
+      end
+
+      describe "#handle_public_ws_message" do
+        context "channel=candle1m の場合" do
+          it "handle_candle_message へ dispatch される" do
+            expect(worker).to receive(:handle_candle_message).with(a_kind_of(Hash))
+            worker.send(:handle_public_ws_message, candle1m_sub, { "data" => [] })
+          end
+        end
+
+        context "channel=ticker の場合(MVP では未処理)" do
+          it "handle_candle_message を呼ばない" do
+            expect(worker).not_to receive(:handle_candle_message)
+            worker.send(:handle_public_ws_message, ticker_sub, { "data" => [] })
+          end
+        end
+
+        context "callback 内で例外が raise した場合" do
+          before do
+            allow(worker).to receive(:handle_candle_message).and_raise(StandardError, "callback failure")
+          end
+
+          it "logger.warn 落とし + WS thread を止めない(再 raise しない)" do
+            expect do
+              worker.send(:handle_public_ws_message, candle1m_sub, { "data" => [] })
+            end.not_to raise_error
+
+            expect(logger).to have_received(:warn).with(
+              /handle_public_ws_message failed in channel=candle1m.*callback failure/
+            )
+          end
+        end
+      end
+
+      describe "#handle_candle_message + #detect_confirmed_candle(確定判定)" do
+        let(:row1) { [ 1_700_000_000_000, "50000", "50100", "49900", "50050", "10", "500000", "500000" ] }
+        let(:row2) { [ 1_700_000_060_000, "50050", "50200", "50000", "50150", "12", "601800", "601800" ] }
+
+        context "初回 candle1m 受信(@last_candle_row が nil)" do
+          it "確定 candle なし(spawn を呼ばない)" do
+            expect(worker).not_to receive(:spawn_runner_child_for_tick)
+            worker.send(:handle_candle_message, { "data" => [ row1 ] })
+          end
+
+          it "@last_candle_row が更新される" do
+            worker.send(:handle_candle_message, { "data" => [ row1 ] })
+            expect(worker.instance_variable_get(:@last_candle_row)).to eq(row1)
+          end
+        end
+
+        context "同一 ts の candle1m 再受信(更新中)" do
+          before do
+            worker.send(:handle_candle_message, { "data" => [ row1 ] })
+          end
+
+          it "確定 candle なし(spawn を呼ばない)" do
+            updated_row1 = [ row1[0], "50000", "50500", "49800", "50300", "20", "1000000", "1000000" ]
+            expect(worker).not_to receive(:spawn_runner_child_for_tick)
+            worker.send(:handle_candle_message, { "data" => [ updated_row1 ] })
+          end
+        end
+
+        context "ts が進んだ candle1m 受信(前 candle 確定)" do
+          before do
+            worker.send(:handle_candle_message, { "data" => [ row1 ] })
+          end
+
+          it "前 candle(row1)が確定 payload として spawn される" do
+            expect(worker).to receive(:spawn_runner_child_for_tick).with(
+              a_hash_including(
+                "ts" => row1[0],
+                "open" => "50000",
+                "high" => "50100",
+                "low" => "49900",
+                "close" => "50050"
+              )
+            )
+            worker.send(:handle_candle_message, { "data" => [ row2 ] })
+          end
+        end
+
+        context "data が Array でない / Hash でない" do
+          it "Hash でない msg は no-op" do
+            expect(worker).not_to receive(:spawn_runner_child_for_tick)
+            worker.send(:handle_candle_message, "not-a-hash")
+          end
+
+          it "data が Array でない場合は no-op" do
+            expect(worker).not_to receive(:spawn_runner_child_for_tick)
+            worker.send(:handle_candle_message, { "data" => "not-array" })
+          end
+        end
+      end
+
+      describe "#spawn_runner_child_for_tick" do
+        let(:candle_payload) { { "ts" => 1_700_000_000_000, "close" => "50050" } }
+
+        it "run_in_db_thread で別 thread + AR pool を確保した中で session.reload + run_runner_child_for_tick を呼ぶ" do
+          expect(worker).to receive(:run_runner_child_for_tick).with(
+            an_object_having_attributes(id: session.id),
+            candle_payload
+          )
+
+          worker.send(:spawn_runner_child_for_tick, candle_payload)
+
+          expect(worker).to have_received(:run_in_db_thread).with("runner_child_for_tick")
+        end
+      end
+    end
+
     context "worker_instance_id 生成" do
       it "jid なし(直接 perform)実行時は manual- prefix で生成される" do
         worker.perform(session.id)

@@ -38,6 +38,7 @@ class LiveTradingWorker
   # @param position_endpoint [Infrastructure::BitgetPositionEndpoint, nil] step 7 (margin/position/asset/leverage settings)
   # @param public_ws_factory [Proc, nil] Public WS Client 生成 Proc(step 9 で `.call` 遅延生成)
   # @param private_ws_factory [Proc, nil] Private WS Client 生成 Proc(step 10 で `.call` 遅延生成)
+  # @param runner_child_spawner [Infrastructure::StrategyRunnerChildSpawner, nil] live_runner_child 起動用
   # @param main_loop_poll_interval [Float] メインループ kill-switch / 状態 poll 間隔(秒). spec で 0 を渡して即時 break.
   # @param logger [Logger] release! 例外等の警告出力先
   def initialize(
@@ -47,6 +48,7 @@ class LiveTradingWorker
     position_endpoint: nil,
     public_ws_factory: nil,
     private_ws_factory: nil,
+    runner_child_spawner: nil,
     main_loop_poll_interval: DEFAULT_MAIN_LOOP_POLL_INTERVAL,
     logger: Rails.logger
   )
@@ -56,6 +58,7 @@ class LiveTradingWorker
     @position_endpoint = position_endpoint
     @public_ws_factory = public_ws_factory
     @private_ws_factory = private_ws_factory
+    @runner_child_spawner = runner_child_spawner
     @main_loop_poll_interval = main_loop_poll_interval
     @logger = logger
   end
@@ -240,14 +243,107 @@ class LiveTradingWorker
 
   # step 9: Public WS connect + subscribe(ticker / candle1m / books5).
   # WS instance は public_ws_factory.call で遅延生成(設計書 02_§5.2.6 / 3.3-9a peer review 重要 obs 2 反映).
-  # callback は 3.3-10 メインループで実装(本 step では subscribe 経路を確立するのみ).
+  # subscribe callback は 3.3-10b でメインループ用 handler を実装した(handle_public_ws_message).
   def connect_public_ws(session)
     public_ws = public_ws_factory.call
     public_ws.connect
     public_subscriptions(session).each do |sub|
-      public_ws.subscribe(sub) { |_msg| } # rubocop:disable Lint/EmptyBlock
+      public_ws.subscribe(sub) { |msg| handle_public_ws_message(sub, msg) }
     end
     public_ws
+  end
+
+  # Public WS callback handler(WebSocket Client thread から呼ばれる).
+  # candle1m 以外の channel は 3.3-10 では未処理(MVP では candle1m のみ)で,後続 phase で対応.
+  # callback 内例外は logger.warn に落として WS thread を止めない.
+  def handle_public_ws_message(sub, msg)
+    case sub.channel
+    when "candle1m"
+      handle_candle_message(msg)
+    end
+  rescue StandardError => e
+    logger.warn(
+      "[LiveTradingWorker] handle_public_ws_message failed in channel=#{sub.channel}: " \
+      "#{e.class.name}: #{e.message}"
+    )
+  end
+
+  # candle1m push を受信して確定 candle を検出する.
+  # Bitget WS は同 ts の candle を複数回更新 push し, ts 進入で前 candle が確定する.
+  # 確定検出時は spawn_runner_child_for_tick(candle)を別 thread で呼び出す.
+  def handle_candle_message(msg)
+    return unless msg.is_a?(Hash)
+
+    rows = msg["data"]
+    return unless rows.is_a?(Array)
+
+    rows.each do |row|
+      confirmed = detect_confirmed_candle(row)
+      next unless confirmed
+
+      spawn_runner_child_for_tick(confirmed)
+    end
+  end
+
+  # 受信 row から確定 candle を判定する.
+  # 直前に保持した row より ts が進んでいたら 直前 row が確定 candle として返る.
+  # 初回受信(@last_candle_row が nil)の場合は確定なし.
+  def detect_confirmed_candle(row)
+    new_ts = row[0].to_i
+    prev_row = @last_candle_row
+    @last_candle_row = row
+
+    return nil if prev_row.nil?
+
+    prev_ts = prev_row[0].to_i
+    return nil if prev_ts == new_ts
+
+    build_candle_payload(prev_row)
+  end
+
+  def build_candle_payload(row)
+    {
+      "ts" => row[0].to_i,
+      "open" => row[1],
+      "high" => row[2],
+      "low" => row[3],
+      "close" => row[4],
+      "base_volume" => row[5],
+      "quote_volume" => row[6]
+    }
+  end
+
+  # 確定 candle を子プロセスで処理するため別 thread + AR pool を確保して実行する
+  # (3.3-10a peer review 重要 obs 1 反映 / WS callback thread-safety guideline (a)(c)).
+  # spec では run_in_db_thread を stub して同期化し検証する.
+  def spawn_runner_child_for_tick(candle)
+    run_in_db_thread("runner_child_for_tick") do
+      reloaded_session = LiveTrading::Session.find(@session.id) # guideline (b)
+      run_runner_child_for_tick(reloaded_session, candle)
+    end
+  end
+
+  # WS callback thread から DB アクセスを伴う処理を別 thread で実行する共通 helper.
+  # production: 別 thread + ActiveRecord::Base.connection_pool.with_connection で connection 確保.
+  # spec: 同期化のため allow(worker).to receive(:run_in_db_thread) { |label, &block| block.call } で差替.
+  def run_in_db_thread(label)
+    Thread.new do
+      ActiveRecord::Base.connection_pool.with_connection { yield }
+    rescue StandardError => e
+      logger.error(
+        "[LiveTradingWorker] background task '#{label}' failed: " \
+        "#{e.class.name}: #{e.message}"
+      )
+    end
+  end
+
+  # candle 確定 → live_runner_child 起動 → on_tick callback の中身(3.3-10d で完成).
+  # 本 step(3.3-10b)では skeleton method として登録するに留め, 内部実装は 3.3-10d で:
+  # - ctx_input 構築(candle / state / balance 等)
+  # - runner_child_spawner.run(callback: :on_tick, revision:, ctx_input:)
+  # - 戻り値 order_intents → AI filter → RiskGuard → 発注
+  def run_runner_child_for_tick(_session, _candle)
+    # 3.3-10d で実装予定
   end
 
   # step 10: Private WS connect(login + heartbeat 起動)+ subscribe(orders / orders-algo / fill / positions / positions-history / account).
@@ -309,6 +405,12 @@ class LiveTradingWorker
 
   def position_endpoint
     @position_endpoint ||= Infrastructure::BitgetPositionEndpoint.new(rest_client: build_rest_client)
+  end
+
+  def runner_child_spawner
+    @runner_child_spawner ||= Infrastructure::StrategyRunnerChildSpawner.new(
+      runner_script_path: Rails.root.join("lib/live_runner_child.rb").to_s
+    )
   end
 
   # WS factory は Proc を保持し step 9/10 内で `.call` で遅延生成する
