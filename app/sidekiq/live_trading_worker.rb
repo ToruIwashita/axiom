@@ -348,13 +348,113 @@ class LiveTradingWorker
     # 3.3-10d で実装予定
   end
 
+  # Private WS callback handler(3.3-10c).
+  # WebSocket Client thread から `(data, result)` で呼ばれる.
+  # result は BitgetPrivateWsMessageDecoder::Result::Push で channel 述語 + algo state 述語を保持.
+  # callback 内例外は logger.warn に落として WS thread を止めない.
+  #
+  # @param sub [Infrastructure::BitgetPrivateWsSubscription]
+  # @param data [Array, nil] WS push の data 部分
+  # @param result [Infrastructure::BitgetPrivateWsMessageDecoder::Result::Push]
+  def handle_private_ws_message(sub, data, result)
+    case sub.channel
+    when "orders"            then handle_orders_message(data)
+    when "orders-algo"       then handle_orders_algo_message(data, result)
+    when "fill"              then handle_fill_message(data)
+    when "positions"         then handle_positions_message(data)
+    when "positions-history" then handle_positions_history_message(data)
+    when "account"           then handle_account_message(data)
+    end
+  rescue StandardError => e
+    logger.warn(
+      "[LiveTradingWorker] handle_private_ws_message failed in channel=#{sub.channel}: " \
+      "#{e.class.name}: #{e.message}"
+    )
+  end
+
+  # orders push: Exchange::Order の状態更新(MVP では skeleton, 後続 phase で詳細実装).
+  # thread-safety guideline (a)(c)(d): run_in_db_thread + with_connection + transaction 隔離.
+  def handle_orders_message(data)
+    run_in_db_thread("orders_update") do
+      LiveTrading::Session.transaction do
+        Array(data).each do |_row|
+          # TODO(後続 phase): Exchange::Order upsert(client_oid / state / filled_size / avg_price 等)
+        end
+      end
+    end
+  end
+
+  # orders-algo push: Exchange::AlgoOrder の状態更新 + algo_anomaly? なら reconciliation 起動.
+  # result.algo_anomaly? の場合 設計書 05_§3.6 でアラート + reconciliation 起動と規定.
+  def handle_orders_algo_message(data, result)
+    if result.respond_to?(:algo_anomaly?) && result.algo_anomaly?
+      logger.warn(
+        "[LiveTradingWorker] orders-algo anomaly detected (state outside known set): " \
+        "data=#{data.inspect}"
+      )
+      # TODO(後続 phase): reconciliation 起動 trigger
+    end
+
+    run_in_db_thread("orders_algo_update") do
+      LiveTrading::Session.transaction do
+        Array(data).each do |_row|
+          # TODO(後続 phase): Exchange::AlgoOrder upsert(plan_id / state / trigger_price / callback_ratio 等)
+        end
+      end
+    end
+  end
+
+  # fill push: Exchange::Fill の新規記録 + 関連 Trade 集計反映.
+  def handle_fill_message(data)
+    run_in_db_thread("fill_create") do
+      LiveTrading::Session.transaction do
+        Array(data).each do |_row|
+          # TODO(後続 phase): Exchange::Fill create + LiveTrading::Trade 集計更新
+        end
+      end
+    end
+  end
+
+  # positions push: Exchange::PositionSnapshot を最新値で upsert(snapshot 系 channel).
+  def handle_positions_message(data)
+    run_in_db_thread("positions_update") do
+      LiveTrading::Session.transaction do
+        Array(data).each do |_row|
+          # TODO(後続 phase): Exchange::PositionSnapshot upsert(symbol / hold_side / size / margin / pnl 等)
+        end
+      end
+    end
+  end
+
+  # positions-history push: 履歴系の PositionSnapshot 記録(close 時等).
+  def handle_positions_history_message(data)
+    run_in_db_thread("positions_history") do
+      LiveTrading::Session.transaction do
+        Array(data).each do |_row|
+          # TODO(後続 phase): Exchange::PositionSnapshot 履歴 record + Trade 集計反映
+        end
+      end
+    end
+  end
+
+  # account push: account 残高(margin balance / available 等)更新.
+  # MVP では BalanceSnapshot モデルがないため skeleton(後続 phase で対応モデル追加 + 反映).
+  def handle_account_message(data)
+    run_in_db_thread("account_update") do
+      Array(data).each do |_row|
+        # TODO(後続 phase): account balance snapshot model 追加後に反映
+      end
+    end
+  end
+
   # step 10: Private WS connect(login + heartbeat 起動)+ subscribe(orders / orders-algo / fill / positions / positions-history / account).
   # `LoginFailedError` / `SubscribeFailedError` は connect 内で raise → bootstrap_session の rescue で
   # cleanup_on_failure 経由 disconnect + lease.release! が実行される(設計書レビュー軽微 2 反映).
+  # subscribe callback は (data, result) の 2 引数で呼ばれる(3.3-10c handler 経由).
   def connect_private_ws(session)
     private_ws = private_ws_factory.call
     private_subscriptions(session).each do |sub|
-      private_ws.subscribe(sub) { |_msg| } # rubocop:disable Lint/EmptyBlock
+      private_ws.subscribe(sub) { |data, result| handle_private_ws_message(sub, data, result) }
     end
     private_ws.connect
     private_ws

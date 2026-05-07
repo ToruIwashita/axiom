@@ -851,6 +851,126 @@ RSpec.describe LiveTradingWorker do
       end
     end
 
+    describe "Private WS callback(3.3-10c)" do
+      # Result::Push は private constant のため duck typing で double 化
+      let(:result_double) { double("Push", algo_anomaly?: false) }
+
+      before do
+        worker.send(:instance_variable_set, :@session, session)
+        # run_in_db_thread を同期化(spec hang 回避)
+        allow(worker).to receive(:run_in_db_thread) do |_label, &block|
+          block.call
+        end
+      end
+
+      describe "#handle_private_ws_message dispatch" do
+        %w[orders orders-algo fill positions positions-history account].each do |channel|
+          context "channel=#{channel}" do
+            let(:sub) do
+              Infrastructure::BitgetPrivateWsSubscription.new(
+                channel: channel, inst_type: "USDT-FUTURES", inst_id: "BTCUSDT"
+              )
+            end
+            let(:expected_method) do
+              case channel
+              when "orders" then :handle_orders_message
+              when "orders-algo" then :handle_orders_algo_message
+              when "fill" then :handle_fill_message
+              when "positions" then :handle_positions_message
+              when "positions-history" then :handle_positions_history_message
+              when "account" then :handle_account_message
+              end
+            end
+
+            it "対応する handler に dispatch される" do
+              if channel == "orders-algo"
+                expect(worker).to receive(expected_method).with([], result_double)
+              else
+                expect(worker).to receive(expected_method).with([])
+              end
+              worker.send(:handle_private_ws_message, sub, [], result_double)
+            end
+          end
+        end
+
+        context "callback 内で例外が raise した場合" do
+          let(:sub) do
+            Infrastructure::BitgetPrivateWsSubscription.new(
+              channel: "orders", inst_type: "USDT-FUTURES", inst_id: "BTCUSDT"
+            )
+          end
+
+          before do
+            allow(worker).to receive(:handle_orders_message).and_raise(StandardError, "callback failure")
+          end
+
+          it "logger.warn 落とし + WS thread を止めない" do
+            expect do
+              worker.send(:handle_private_ws_message, sub, [], result_double)
+            end.not_to raise_error
+
+            expect(logger).to have_received(:warn).with(
+              /handle_private_ws_message failed in channel=orders.*callback failure/
+            )
+          end
+        end
+      end
+
+      describe "#handle_orders_message" do
+        it "run_in_db_thread + transaction で wrap され処理が呼ばれる" do
+          expect(LiveTrading::Session).to receive(:transaction).and_yield
+          worker.send(:handle_orders_message, [ { "client_oid" => "abc" } ])
+          expect(worker).to have_received(:run_in_db_thread).with("orders_update")
+        end
+      end
+
+      describe "#handle_orders_algo_message" do
+        context "algo_anomaly? = true(設計書 05_§3.6 異常状態)" do
+          let(:anomaly_result) { double("Push", algo_anomaly?: true) }
+
+          it "logger.warn でアラート出力" do
+            allow(LiveTrading::Session).to receive(:transaction).and_yield
+            worker.send(:handle_orders_algo_message, [], anomaly_result)
+            expect(logger).to have_received(:warn).with(/orders-algo anomaly detected/)
+          end
+        end
+
+        context "algo_anomaly? = false(正常状態)" do
+          it "アラートなしで run_in_db_thread + transaction wrap" do
+            expect(LiveTrading::Session).to receive(:transaction).and_yield
+            worker.send(:handle_orders_algo_message, [], result_double)
+            expect(logger).not_to have_received(:warn)
+            expect(worker).to have_received(:run_in_db_thread).with("orders_algo_update")
+          end
+        end
+      end
+
+      describe "#handle_fill_message" do
+        it "run_in_db_thread + transaction で wrap される(ラベル: fill_create)" do
+          expect(LiveTrading::Session).to receive(:transaction).and_yield
+          worker.send(:handle_fill_message, [])
+          expect(worker).to have_received(:run_in_db_thread).with("fill_create")
+        end
+      end
+
+      describe "#handle_positions_message / #handle_positions_history_message" do
+        it "positions_update / positions_history ラベルで run_in_db_thread + transaction" do
+          allow(LiveTrading::Session).to receive(:transaction).and_yield
+          worker.send(:handle_positions_message, [])
+          worker.send(:handle_positions_history_message, [])
+          expect(worker).to have_received(:run_in_db_thread).with("positions_update")
+          expect(worker).to have_received(:run_in_db_thread).with("positions_history")
+        end
+      end
+
+      describe "#handle_account_message" do
+        it "account_update ラベルで run_in_db_thread(現状 transaction なし skeleton)" do
+          worker.send(:handle_account_message, [])
+          expect(worker).to have_received(:run_in_db_thread).with("account_update")
+        end
+      end
+    end
+
     context "worker_instance_id 生成" do
       it "jid なし(直接 perform)実行時は manual- prefix で生成される" do
         worker.perform(session.id)
