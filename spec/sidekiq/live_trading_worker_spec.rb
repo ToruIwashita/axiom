@@ -20,12 +20,18 @@ RSpec.describe LiveTradingWorker do
         base_volume: "100", quote_volume: "5020000", usdt_volume: "5020000" }
     ]
   end
+  let(:public_ws) { instance_double(Infrastructure::BitgetPublicWsClient) }
+  let(:private_ws) { instance_double(Infrastructure::BitgetPrivateWsClient) }
+  let(:public_ws_factory) { -> { public_ws } }
+  let(:private_ws_factory) { -> { private_ws } }
   let(:worker) do
     described_class.new(
       process_manager: process_manager,
       clock_sync: clock_sync,
       market_endpoint: market_endpoint,
       position_endpoint: position_endpoint,
+      public_ws_factory: public_ws_factory,
+      private_ws_factory: private_ws_factory,
       logger: logger
     )
   end
@@ -93,6 +99,14 @@ RSpec.describe LiveTradingWorker do
     allow(position_endpoint).to receive(:set_position_mode)
     allow(position_endpoint).to receive(:set_asset_mode)
     allow(position_endpoint).to receive(:set_leverage)
+    allow(public_ws).to receive(:connect)
+    allow(public_ws).to receive(:subscribe)
+    allow(public_ws).to receive(:disconnect)
+    allow(public_ws).to receive(:connected?).and_return(true)
+    allow(private_ws).to receive(:connect)
+    allow(private_ws).to receive(:subscribe)
+    allow(private_ws).to receive(:disconnect)
+    allow(private_ws).to receive(:connected?).and_return(true)
   end
 
   describe "Sidekiq options" do
@@ -106,7 +120,7 @@ RSpec.describe LiveTradingWorker do
   end
 
   describe "#perform(session_id)" do
-    context "step 1-8 全成功(現時点 3.3-9b で実装済の範囲)" do
+    context "step 1-10 全成功(現時点 3.3-9c で実装済の範囲)" do
       it "process_manager.acquire_lease! を session + worker_instance_id で呼ぶ" do
         worker.perform(session.id)
 
@@ -149,6 +163,35 @@ RSpec.describe LiveTradingWorker do
         expect(market_endpoint).to have_received(:history_futures_candles).with(
           symbol: "BTCUSDT", granularity: "1m", limit: 200
         )
+      end
+
+      it "step 9: public_ws.connect + 3 subscribe(ticker / candle1m / books5)を呼ぶ" do
+        worker.perform(session.id)
+
+        expect(public_ws).to have_received(:connect)
+        expect(public_ws).to have_received(:subscribe).exactly(3).times
+        # 各 subscription の channel/inst_type/inst_id 検証
+        expect(public_ws).to have_received(:subscribe).with(
+          an_object_having_attributes(channel: "ticker", inst_type: "USDT-FUTURES", inst_id: "BTCUSDT")
+        )
+        expect(public_ws).to have_received(:subscribe).with(
+          an_object_having_attributes(channel: "candle1m", inst_type: "USDT-FUTURES", inst_id: "BTCUSDT")
+        )
+        expect(public_ws).to have_received(:subscribe).with(
+          an_object_having_attributes(channel: "books5", inst_type: "USDT-FUTURES", inst_id: "BTCUSDT")
+        )
+      end
+
+      it "step 10: private_ws subscribe (6 channels) → connect の順で呼ぶ" do
+        worker.perform(session.id)
+
+        expect(private_ws).to have_received(:subscribe).exactly(6).times
+        %w[orders orders-algo fill positions positions-history account].each do |channel|
+          expect(private_ws).to have_received(:subscribe).with(
+            an_object_having_attributes(channel: channel, inst_type: "USDT-FUTURES", inst_id: "BTCUSDT")
+          )
+        end
+        expect(private_ws).to have_received(:connect)
       end
     end
 
@@ -206,6 +249,92 @@ RSpec.describe LiveTradingWorker do
       include_examples "step 5+ failure cleanup",
                        error_class: StandardError,
                        error_pattern: /history candles API error/
+    end
+
+    context "step 9 失敗(public_ws.connect ConnectionError)" do
+      before do
+        allow(public_ws).to receive(:connect)
+          .and_raise(Infrastructure::BitgetPublicWsClient::ConnectionError, "WS open timeout")
+        allow(public_ws).to receive(:connected?).and_return(false) # connect 失敗のため false
+      end
+
+      it "ConnectionError を raise + failed_to_start 遷移" do
+        expect { worker.perform(session.id) }.to raise_error(Infrastructure::BitgetPublicWsClient::ConnectionError)
+        expect(session.reload.state_failed_to_start?).to be true
+      end
+
+      it "lease.release! を呼ぶ(step 5+ で lease 取得済み)" do
+        expect { worker.perform(session.id) }.to raise_error(Infrastructure::BitgetPublicWsClient::ConnectionError)
+        expect(lease).to have_received(:release!)
+      end
+
+      it "public_ws.disconnect は呼ばない(connected? が false のため)" do
+        expect { worker.perform(session.id) }.to raise_error(Infrastructure::BitgetPublicWsClient::ConnectionError)
+        expect(public_ws).not_to have_received(:disconnect)
+      end
+    end
+
+    context "step 10 失敗(private_ws.connect LoginFailedError 軽微 obs 2)" do
+      before do
+        allow(private_ws).to receive(:connect)
+          .and_raise(Infrastructure::BitgetPrivateWsClient::LoginFailedError, "login signature rejected")
+      end
+
+      it "LoginFailedError を raise + failed_to_start 遷移" do
+        expect { worker.perform(session.id) }
+          .to raise_error(Infrastructure::BitgetPrivateWsClient::LoginFailedError, /login signature rejected/)
+        expect(session.reload.state_failed_to_start?).to be true
+      end
+
+      it "lease.release! を呼ぶ" do
+        expect { worker.perform(session.id) }.to raise_error(Infrastructure::BitgetPrivateWsClient::LoginFailedError)
+        expect(lease).to have_received(:release!)
+      end
+
+      it "public_ws.disconnect を呼ぶ(step 9 で接続済みのため)" do
+        expect { worker.perform(session.id) }.to raise_error(Infrastructure::BitgetPrivateWsClient::LoginFailedError)
+        expect(public_ws).to have_received(:disconnect)
+      end
+
+      it "private_ws.disconnect は connected? が false なら呼ばない" do
+        allow(private_ws).to receive(:connected?).and_return(false)
+        expect { worker.perform(session.id) }.to raise_error(Infrastructure::BitgetPrivateWsClient::LoginFailedError)
+        expect(private_ws).not_to have_received(:disconnect)
+      end
+    end
+
+    context "step 10 失敗(private_ws SubscribeFailedError 軽微 obs 2)" do
+      before do
+        allow(private_ws).to receive(:connect)
+          .and_raise(Infrastructure::BitgetPrivateWsClient::SubscribeFailedError, "subscribe rejected")
+      end
+
+      it "SubscribeFailedError を raise + failed_to_start 遷移 + public_ws.disconnect" do
+        expect { worker.perform(session.id) }
+          .to raise_error(Infrastructure::BitgetPrivateWsClient::SubscribeFailedError, /subscribe rejected/)
+        expect(session.reload.state_failed_to_start?).to be true
+        expect(public_ws).to have_received(:disconnect)
+        expect(lease).to have_received(:release!)
+      end
+    end
+
+    # 軽微 obs 1 拡張: WS.disconnect 例外連鎖失敗対策
+    context "cleanup_on_failure 中に public_ws.disconnect が raise した場合" do
+      before do
+        allow(private_ws).to receive(:connect)
+          .and_raise(Infrastructure::BitgetPrivateWsClient::LoginFailedError, "login error")
+        allow(public_ws).to receive(:disconnect).and_raise(StandardError, "disconnect timeout")
+      end
+
+      it "logger.warn 落とし + lease.release! + mark_failed_to_start! が継続実行される" do
+        expect { worker.perform(session.id) }.to raise_error(Infrastructure::BitgetPrivateWsClient::LoginFailedError)
+
+        expect(logger).to have_received(:warn).with(
+          /public_ws.disconnect failed during cleanup_on_failure.*disconnect timeout/
+        )
+        expect(lease).to have_received(:release!)
+        expect(session.reload.state_failed_to_start?).to be true
+      end
     end
 
     context "step 1 失敗(session_id 不在)" do
@@ -379,10 +508,12 @@ RSpec.describe LiveTradingWorker do
 
       it "lease.release! 例外を logger.warn に落とし mark_failed_to_start! を実行する" do
         # cleanup_on_failure を直接呼び出して挙動検証
-        # (3.3-9a スコープでは step 5+ への到達が無いため, unit-level で cleanup を検証)
+        # (3.3-9a 起源のスコープ. 3.3-9c 以降は public_ws/private_ws も渡す signature)
         worker.send(:cleanup_on_failure,
                     session: session,
                     lease: lease,
+                    public_ws: nil,
+                    private_ws: nil,
                     error: StandardError.new("step 5+ failure"))
 
         expect(logger).to have_received(:warn).with(
