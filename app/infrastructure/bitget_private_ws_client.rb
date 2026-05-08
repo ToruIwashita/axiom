@@ -300,7 +300,14 @@ module Infrastructure
         if result.login_success?
           @login_completed = true
         else
-          @login_error = "code=#{result.code} msg=#{result.message}"
+          # multi-agent review R-4 #10 反映: login error message に Bitget API key 等が
+          # 将来含まれる可能性があるため, 永続化経路(LoginFailedError → DB failure_reason)に
+          # 流す文字列は code のみに限定し, raw message は logger.warn のみに記録する.
+          @login_error = "code=#{result.code}"
+          logger.warn(
+            "[BitgetPrivateWsClient] login error detail (not persisted): " \
+            "code=#{result.code} msg=#{result.message}"
+          )
         end
         return
       end
