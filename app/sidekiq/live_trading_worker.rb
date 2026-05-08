@@ -94,6 +94,8 @@ class LiveTradingWorker
     @lease = nil
     @public_ws = nil
     @private_ws = nil
+    @background_threads = []
+    @background_threads_mutex = Mutex.new
 
     bootstrap_session(session_id)
     enter_main_loop
@@ -255,6 +257,9 @@ class LiveTradingWorker
   # main loop 終了時の状態遷移 + リソース解放.
   # session 状態遷移後 → WS disconnect → lease release の順で安全に解放する.
   def finalize_main_loop(exit_reason:)
+    # R-3 #7 反映: 残存 background thread を timeout 付きで join し AR connection を解放してから
+    # その後の WS disconnect / lease release に進む.
+    join_background_threads
     transition_session_for_exit(exit_reason)
     safe_disconnect(@private_ws, name: "private_ws", context: "finalize_main_loop")
     safe_disconnect(@public_ws, name: "public_ws", context: "finalize_main_loop")
@@ -447,8 +452,12 @@ class LiveTradingWorker
   # WS callback thread から DB アクセスを伴う処理を別 thread で実行する共通 helper.
   # production: 別 thread + ActiveRecord::Base.connection_pool.with_connection で connection 確保.
   # spec: 同期化のため allow(worker).to receive(:run_in_db_thread) { |label, &block| block.call } で差替.
+  #
+  # multiple-agent review R-3 #7 反映: 起動した Thread を @background_threads に保持し,
+  # finalize_main_loop で `join_with_timeout` する.fire-and-forget による thread leak / AR pool 枯渇を防ぐ.
+  # 完了済 thread は finalize 時にまとめて掃除する(loop 中の都度掃除はロック競合になるため避ける).
   def run_in_db_thread(label)
-    Thread.new do
+    thread = Thread.new do
       ActiveRecord::Base.connection_pool.with_connection { yield }
     rescue StandardError => e
       logger.error(
@@ -456,6 +465,32 @@ class LiveTradingWorker
         "#{e.class.name}: #{e.message}"
       )
     end
+
+    @background_threads_mutex.synchronize { @background_threads << thread }
+    thread
+  end
+
+  # finalize_main_loop から呼ばれ, 残存 background thread を timeout 付きで join する.
+  # timeout 経過後も生存している thread は強制終了して connection を解放する.
+  BACKGROUND_THREAD_JOIN_TIMEOUT = 10.0
+  private_constant :BACKGROUND_THREAD_JOIN_TIMEOUT
+
+  def join_background_threads
+    threads = @background_threads_mutex.synchronize { @background_threads.dup }
+    return if threads.empty?
+
+    threads.each do |thread|
+      thread.join(BACKGROUND_THREAD_JOIN_TIMEOUT)
+      next unless thread.alive?
+
+      logger.warn(
+        "[LiveTradingWorker] background thread did not finish within " \
+        "#{BACKGROUND_THREAD_JOIN_TIMEOUT}s; killing"
+      )
+      thread.kill
+    end
+
+    @background_threads_mutex.synchronize { @background_threads.clear }
   end
 
   # candle 確定 → live_runner_child 起動 → on_tick callback → order_intents 評価 → 発注 (3.3-10d).

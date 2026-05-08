@@ -718,6 +718,14 @@ RSpec.describe LiveTradingWorker do
         end
       end
 
+      # R-3 #7 反映: background thread leak 対策
+      context "finalize_main_loop で background thread を join する" do
+        it "join_background_threads が呼ばれる" do
+          expect(worker).to receive(:join_background_threads).and_call_original
+          worker.perform(session.id)
+        end
+      end
+
       context "finalize_main_loop で lease.release! が raise した場合(連鎖失敗対策)" do
         before do
           allow(lease).to receive(:release!).and_raise(StandardError, "release timeout in finalize")
