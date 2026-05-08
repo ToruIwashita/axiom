@@ -608,7 +608,8 @@ RSpec.describe LiveTradingWorker do
       context "kill-switch 検出 + session が stopping 状態" do
         before do
           # bootstrap で running になった後, 即時 stopping → kill-switch true 返却
-          allow(process_manager).to receive(:signal_kill_switch?) do
+          # R-5 #15 反映: 引数 |session:| で signal_kill_switch? の signature を verify
+          allow(process_manager).to receive(:signal_kill_switch?) do |session:|
             session.update_column(:status, "stopping") if session.persisted? && !session.reload.state_stopping?
             true
           end
@@ -645,8 +646,9 @@ RSpec.describe LiveTradingWorker do
       context "他プロセスが session を halted に直接変更(terminal 検出)" do
         before do
           # main loop 1 iteration 目の signal_kill_switch? 呼出時に session を halted に外部更新
+          # R-5 #15 反映: |session:| で signature 検証(typo 検知)
           first_call = true
-          allow(process_manager).to receive(:signal_kill_switch?) do |**_|
+          allow(process_manager).to receive(:signal_kill_switch?) do |session:|
             if first_call
               first_call = false
               LiveTrading::Session.where(id: session.id).update_all(status: "halted")
@@ -1244,7 +1246,7 @@ RSpec.describe LiveTradingWorker do
           expect(session.reload.state_reconciling?).to be true
         end
 
-        it "5 件の reconcile 系 method を順次呼び出す" do
+        it "4 件の reconcile 系 method を順次呼び出す" do
           expect(worker).to receive(:reconcile_orders_pending).with(session).ordered
           expect(worker).to receive(:reconcile_orders_plan_pending).with(session).ordered
           expect(worker).to receive(:reconcile_orders_plan_history).with(session).ordered
@@ -1473,8 +1475,10 @@ RSpec.describe LiveTradingWorker do
 
       describe "main loop 統合: 1 iteration で heartbeat / renew_lease が呼ばれる" do
         before do
+          # R-5 #15 反映: |session:| で signature 検証
           first_call = true
-          allow(process_manager).to receive(:signal_kill_switch?) do
+          allow(process_manager).to receive(:signal_kill_switch?) do |session:|
+            _ = session # signature 検証用に展開(値は未使用)
             if first_call
               first_call = false
               false # 1 回目は false → 1 iteration 通過
