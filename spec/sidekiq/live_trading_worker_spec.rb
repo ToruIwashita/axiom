@@ -35,6 +35,7 @@ RSpec.describe LiveTradingWorker do
       private_ws_factory: private_ws_factory,
       order_endpoint: order_endpoint_di,
       main_loop_poll_interval: 0, # spec ではループを sleep させない
+      ws_disconnect_grace_seconds: 0, # R-6 #9: spec では grace なしで即時 :ws_disconnected return
       logger: logger
     )
   end
@@ -95,6 +96,9 @@ RSpec.describe LiveTradingWorker do
     allow(process_manager).to receive(:acquire_lease!).and_return(lease)
     allow(lease).to receive(:release!)
     allow(lease).to receive(:state_released?).and_return(false)
+    # R-6 #12 反映: safe_release_lease で lease.reload + state_active? チェックを行うため stub 追加
+    allow(lease).to receive(:reload).and_return(lease)
+    allow(lease).to receive(:state_active?).and_return(true)
     allow(clock_sync).to receive(:sync!).and_return(0.123)
     allow(market_endpoint).to receive(:contract_metadata).and_return(contract_metadata_response)
     allow(market_endpoint).to receive(:history_futures_candles).and_return(warmup_candles_response)
@@ -1029,6 +1033,7 @@ RSpec.describe LiveTradingWorker do
           risk_guard_service: risk_guard_service,
           order_endpoint: order_endpoint_di,
           main_loop_poll_interval: 0,
+          ws_disconnect_grace_seconds: 0,
           logger: logger
         )
       end

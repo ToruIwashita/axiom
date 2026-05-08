@@ -33,8 +33,17 @@ class LiveTradingWorker
   HEARTBEAT_INTERVAL_SECONDS = 60
   # lease renew 周期(設計書 02_§5.2.6 / 05_§7.2: 2 分推奨 / TTL 5 分の余裕を持たせた更新).
   LEASE_RENEW_INTERVAL_SECONDS = 120
+  # WS auto reconnect grace 期間(秒).WS Client の reconnect_with_backoff は数秒〜数十秒かかるため,
+  # その間 connected?=false 状態を許容して main loop を continue させる(設計書 02_§5.2.6 / multi-agent review #9 反映).
+  # この期間を超えても disconnect 状態が継続する場合は :ws_disconnected として halted 終了する.
+  WS_DISCONNECT_GRACE_SECONDS = 30
+  # R-6 #13 反映: failure_reason / log メッセージから credentials が漏れる経路を防ぐ
+  # Faraday error / Bitget API レスポンス msg に api_key 等が echo された場合の defense-in-depth.
+  SECRET_PATTERN = /(api_key|secret_key|passphrase|signature|token)[^\s,;}]*/i
 
-  private_constant :DEFAULT_MAIN_LOOP_POLL_INTERVAL, :HEARTBEAT_INTERVAL_SECONDS, :LEASE_RENEW_INTERVAL_SECONDS
+  private_constant :DEFAULT_MAIN_LOOP_POLL_INTERVAL, :HEARTBEAT_INTERVAL_SECONDS,
+                   :LEASE_RENEW_INTERVAL_SECONDS, :WS_DISCONNECT_GRACE_SECONDS,
+                   :SECRET_PATTERN
 
   # @param process_manager [Domain::LiveTradingProcessManager]
   # @param clock_sync [Infrastructure::BitgetClockSync, nil] step 5 で server_time 同期に利用
@@ -50,6 +59,7 @@ class LiveTradingWorker
   # @param monotonic_clock [#call] heartbeat / lease renew の周期判定用 monotonic clock(R-2 #5 反映).
   #   デフォルトは `Process.clock_gettime(Process::CLOCK_MONOTONIC)`. 壁時計逆行(NTP step / 手動修正)による
   #   heartbeat 停止 → SessionLease 奪取事故を防ぐ.
+  # @param ws_disconnect_grace_seconds [Numeric] WS auto reconnect grace 期間(秒). spec で 0 を渡せば即時 :ws_disconnected.
   # @param logger [Logger] release! 例外等の警告出力先
   def initialize(
     process_manager: Domain::LiveTradingProcessManager.new,
@@ -64,6 +74,7 @@ class LiveTradingWorker
     order_endpoint: nil,
     main_loop_poll_interval: DEFAULT_MAIN_LOOP_POLL_INTERVAL,
     monotonic_clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) },
+    ws_disconnect_grace_seconds: WS_DISCONNECT_GRACE_SECONDS,
     logger: Rails.logger
   )
     @process_manager = process_manager
@@ -78,6 +89,7 @@ class LiveTradingWorker
     @order_endpoint = order_endpoint
     @main_loop_poll_interval = main_loop_poll_interval
     @monotonic_clock = monotonic_clock
+    @ws_disconnect_grace_seconds = ws_disconnect_grace_seconds
     @logger = logger
   end
 
@@ -146,6 +158,7 @@ class LiveTradingWorker
     @last_lease_renew_at = nil
     @last_public_ws_reconnect_count = ws_reconnect_count(@public_ws)
     @last_private_ws_reconnect_count = ws_reconnect_count(@private_ws)
+    @ws_disconnected_since = nil # R-6 #9: WS_DISCONNECT_GRACE_SECONDS 計測用
 
     loop do
       exit_reason = check_loop_exit_condition
@@ -171,9 +184,6 @@ class LiveTradingWorker
     public_reconnected = public_count > @last_public_ws_reconnect_count
     private_reconnected = private_count > @last_private_ws_reconnect_count
 
-    @last_public_ws_reconnect_count = public_count
-    @last_private_ws_reconnect_count = private_count
-
     return unless public_reconnected || private_reconnected
 
     logger.info(
@@ -189,6 +199,10 @@ class LiveTradingWorker
     run_in_db_thread("reconcile_after_ws_reconnect") do
       session_reloaded = LiveTrading::Session.find(@session.id)
       run_reconciliation_after_reconnect(session_reloaded)
+      # R-6 #10 反映: count 更新は reconciliation 完了後に行う.
+      # thread 例外時は count 未更新 → 次 main loop iteration で再試行可能(carry 漏れ防止).
+      @last_public_ws_reconnect_count = public_count
+      @last_private_ws_reconnect_count = private_count
     end
   end
 
@@ -242,10 +256,20 @@ class LiveTradingWorker
     )
   end
 
+  # 終了条件判定: terminal / kill_switch / ws_disconnected の 3 経路.
+  # R-6 #9 反映: ws_disconnected は WS_DISCONNECT_GRACE_SECONDS 連続で disconnect 状態継続時のみ trigger.
+  # WS Client の auto reconnect 中(数秒〜数十秒)の disconnect は許容して main loop を continue させる
+  # (24h 切断後 reconciliation を機能させるための前提).
   def check_loop_exit_condition
     return :terminal if @session.reload.terminal?
     return :kill_switch if process_manager.signal_kill_switch?(session: @session)
-    return :ws_disconnected unless ws_healthy?
+
+    if ws_healthy?
+      @ws_disconnected_since = nil
+    else
+      @ws_disconnected_since ||= @monotonic_clock.call
+      return :ws_disconnected if @monotonic_clock.call - @ws_disconnected_since >= @ws_disconnect_grace_seconds
+    end
 
     nil
   end
@@ -290,11 +314,19 @@ class LiveTradingWorker
 
   # 3.3-10a peer review 軽微 obs 4 反映: cleanup_on_failure / finalize_main_loop の両方から
   # 共通呼出する DRY helper. context は logger.warn メッセージで呼出元を追跡可能にする.
+  # R-6 #12 反映: lease.reload で DB 最新状態を確認し, state_active? の場合のみ release! を呼ぶ.
+  # 別プロセスが release! 済の場合の二重 update / expired ステータス上書きを防ぐ.
   def safe_release_lease(lease, context:)
     return unless lease
-    return if lease.state_released?
+
+    lease.reload
+    return unless lease.state_active?
 
     lease.release!
+  rescue ActiveRecord::RecordNotFound
+    logger.warn(
+      "[LiveTradingWorker] lease no longer exists during #{context} (deleted by other process)"
+    )
   rescue StandardError => release_error
     logger.warn(
       "[LiveTradingWorker] lease.release! failed during #{context}: " \
@@ -354,15 +386,18 @@ class LiveTradingWorker
     )
   end
 
-  # step 9: Public WS connect + subscribe(ticker / candle1m / books5).
+  # step 9: Public WS subscribe(ticker / candle1m / books5)→ connect.
   # WS instance は public_ws_factory.call で遅延生成(設計書 02_§5.2.6 / 3.3-9a peer review 重要 obs 2 反映).
   # subscribe callback は (data, result) の 2 引数で BitgetPublicWsClient から呼ばれる.
+  # R-6 #4 反映: subscribe → connect の順に統一(private と対称 / reconnect 中の subscribe 漏れ防止).
+  # 切断中の subscribe は内部 subscriptions Hash に登録されるのみで, connect 後 / reconnect 時に
+  # まとめて再送信される(BitgetPublicWsClient 内部仕様).
   def connect_public_ws(session)
     public_ws = public_ws_factory.call
-    public_ws.connect
     public_subscriptions(session).each do |sub|
       public_ws.subscribe(sub) { |data, result| handle_public_ws_message(sub, data, result) }
     end
+    public_ws.connect
     public_ws
   end
 
@@ -714,10 +749,13 @@ class LiveTradingWorker
 
   # account push: account 残高(margin balance / available 等)更新.
   # MVP では BalanceSnapshot モデルがないため skeleton(後続 phase で対応モデル追加 + 反映).
+  # R-6 #8 反映: 他 5 ハンドラと整合する形で transaction 隔離を先に整える(後続 phase の書き忘れリスク防止).
   def handle_account_message(data)
     run_in_db_thread("account_update") do
-      Array(data).each do |_row|
-        # TODO(後続 phase): account balance snapshot model 追加後に反映
+      LiveTrading::Session.transaction do
+        Array(data).each do |_row|
+          # TODO(後続 phase): account balance snapshot model 追加後に反映
+        end
       end
     end
   end
@@ -905,12 +943,22 @@ class LiveTradingWorker
     )
   end
 
+  # R-6 #15 反映: production で credentials 不足時に運用エラー発生まで判明しない問題を防ぐ.
+  # 初回 lazy init 時点で nil / 空文字を検出して raise(早期失敗).
   def bitget_credentials
-    @bitget_credentials ||= {
+    @bitget_credentials ||= load_and_validate_bitget_credentials
+  end
+
+  def load_and_validate_bitget_credentials
+    creds = {
       api_key: Rails.application.credentials.dig(:bitget, :api_key),
       secret_key: Rails.application.credentials.dig(:bitget, :secret_key),
       passphrase: Rails.application.credentials.dig(:bitget, :passphrase)
     }
+    missing = creds.select { |_, v| v.nil? || v.to_s.empty? }.keys
+    raise "[LiveTradingWorker] missing bitget credentials: #{missing.inspect}" if missing.any?
+
+    creds
   end
 
   def bitget_paptrading_enabled?
@@ -933,7 +981,16 @@ class LiveTradingWorker
     safe_disconnect(public_ws, name: "public_ws", context: "cleanup_on_failure")
     safe_release_lease(lease, context: "cleanup_on_failure")
 
-    session.mark_failed_to_start!(reason: "#{error.class.name}: #{error.message}")
+    # R-6 #13 反映: failure_reason に credentials が漏れる経路を sanitize で遮断
+    session.mark_failed_to_start!(
+      reason: sanitize_failure_reason("#{error.class.name}: #{error.message}")
+    )
+  end
+
+  # failure_reason / log message から credentials を [FILTERED] に置換する.
+  # Faraday error や Bitget API レスポンスに api_key 等が含まれる場合の defense-in-depth.
+  def sanitize_failure_reason(reason)
+    reason.to_s.gsub(SECRET_PATTERN, '\1=[FILTERED]')
   end
 
   # WS disconnect で例外発生時に他の cleanup を妨げないよう logger.warn に落とす.
