@@ -37,13 +37,16 @@ class LiveTradingWorker
   # その間 connected?=false 状態を許容して main loop を continue させる(設計書 02_§5.2.6 / multi-agent review #9 反映).
   # この期間を超えても disconnect 状態が継続する場合は :ws_disconnected として halted 終了する.
   WS_DISCONNECT_GRACE_SECONDS = 30
+  # background thread sweep 周期(秒). R-7 #C 反映: 24h 稼働で @background_threads に
+  # 完了済 thread が蓄積するメモリリークを定期的に reject! で解消する.
+  BACKGROUND_THREAD_SWEEP_INTERVAL_SECONDS = 60
   # R-6 #13 反映: failure_reason / log メッセージから credentials が漏れる経路を防ぐ
   # Faraday error / Bitget API レスポンス msg に api_key 等が echo された場合の defense-in-depth.
   SECRET_PATTERN = /(api_key|secret_key|passphrase|signature|token)[^\s,;}]*/i
 
   private_constant :DEFAULT_MAIN_LOOP_POLL_INTERVAL, :HEARTBEAT_INTERVAL_SECONDS,
                    :LEASE_RENEW_INTERVAL_SECONDS, :WS_DISCONNECT_GRACE_SECONDS,
-                   :SECRET_PATTERN
+                   :BACKGROUND_THREAD_SWEEP_INTERVAL_SECONDS, :SECRET_PATTERN
 
   # @param process_manager [Domain::LiveTradingProcessManager]
   # @param clock_sync [Infrastructure::BitgetClockSync, nil] step 5 で server_time 同期に利用
@@ -156,6 +159,7 @@ class LiveTradingWorker
     exit_reason = nil
     @last_heartbeat_at = nil
     @last_lease_renew_at = nil
+    @last_background_thread_sweep_at = nil
     @last_public_ws_reconnect_count = ws_reconnect_count(@public_ws)
     @last_private_ws_reconnect_count = ws_reconnect_count(@private_ws)
     @ws_disconnected_since = nil # R-6 #9: WS_DISCONNECT_GRACE_SECONDS 計測用
@@ -167,6 +171,7 @@ class LiveTradingWorker
       pulse_heartbeat_if_due
       renew_lease_if_due
       detect_ws_reconnect_and_reconcile
+      sweep_background_threads_if_due
       sleep(@main_loop_poll_interval)
     end
 
@@ -503,6 +508,23 @@ class LiveTradingWorker
 
     @background_threads_mutex.synchronize { @background_threads << thread }
     thread
+  end
+
+  # main loop iteration 内で BACKGROUND_THREAD_SWEEP_INTERVAL_SECONDS 周期で完了済 thread を取り除く.
+  # 24h 稼働で @background_threads に thread が蓄積するメモリリーク対策(R-7 #C 反映).
+  # mutex 内で select! を呼び thread-safety を確保(non-atomic 操作回避).
+  def sweep_background_threads_if_due
+    now = @monotonic_clock.call
+    return if @last_background_thread_sweep_at && (now - @last_background_thread_sweep_at) < BACKGROUND_THREAD_SWEEP_INTERVAL_SECONDS
+
+    sweep_background_threads
+    @last_background_thread_sweep_at = now
+  end
+
+  def sweep_background_threads
+    @background_threads_mutex.synchronize do
+      @background_threads.select!(&:alive?)
+    end
   end
 
   # finalize_main_loop から呼ばれ, 残存 background thread を timeout 付きで join する.

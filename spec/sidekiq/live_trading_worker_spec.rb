@@ -1501,6 +1501,85 @@ RSpec.describe LiveTradingWorker do
       end
     end
 
+    # R-7 #C 反映: background thread leak 対策の sweep
+    describe "background thread sweep(R-7 #C)" do
+      before do
+        worker.send(:instance_variable_set, :@session, session)
+        worker.send(:instance_variable_set, :@background_threads, [])
+        worker.send(:instance_variable_set, :@background_threads_mutex, Mutex.new)
+        worker.instance_variable_set(:@monotonic_clock, -> { @stub_now })
+        @stub_now = 5000.0
+      end
+
+      describe "#sweep_background_threads" do
+        it "alive? = false の thread のみ reject! される(過剰削除防止)" do
+          alive_thread = double("AliveThread", alive?: true)
+          dead_thread1 = double("DeadThread1", alive?: false)
+          dead_thread2 = double("DeadThread2", alive?: false)
+          worker.instance_variable_set(:@background_threads, [ alive_thread, dead_thread1, dead_thread2 ])
+
+          worker.send(:sweep_background_threads)
+
+          expect(worker.instance_variable_get(:@background_threads)).to eq([ alive_thread ])
+        end
+
+        it "空配列(boundary)でも raise しない" do
+          expect { worker.send(:sweep_background_threads) }.not_to raise_error
+          expect(worker.instance_variable_get(:@background_threads)).to eq([])
+        end
+
+        it "全 thread が alive? = true なら全件残る" do
+          t1 = double("T1", alive?: true)
+          t2 = double("T2", alive?: true)
+          worker.instance_variable_set(:@background_threads, [ t1, t2 ])
+
+          worker.send(:sweep_background_threads)
+
+          expect(worker.instance_variable_get(:@background_threads)).to eq([ t1, t2 ])
+        end
+
+        it "mutex 内で reject! を呼ぶ(thread-safety)" do
+          mutex = worker.instance_variable_get(:@background_threads_mutex)
+          expect(mutex).to receive(:synchronize).and_call_original
+          worker.send(:sweep_background_threads)
+        end
+      end
+
+      describe "#sweep_background_threads_if_due" do
+        context "初回呼出(@last_background_thread_sweep_at が nil)" do
+          it "sweep が実行され @last_background_thread_sweep_at が更新される" do
+            expect(worker).to receive(:sweep_background_threads).and_call_original
+            worker.send(:sweep_background_threads_if_due)
+            expect(worker.instance_variable_get(:@last_background_thread_sweep_at)).to eq(5000.0)
+          end
+        end
+
+        context "前回 sweep から 60 秒未経過" do
+          before do
+            worker.instance_variable_set(:@last_background_thread_sweep_at, 5000.0)
+            @stub_now = 5030.0
+          end
+
+          it "sweep を呼ばない" do
+            expect(worker).not_to receive(:sweep_background_threads)
+            worker.send(:sweep_background_threads_if_due)
+          end
+        end
+
+        context "前回 sweep から 60 秒以上経過" do
+          before do
+            worker.instance_variable_set(:@last_background_thread_sweep_at, 5000.0)
+            @stub_now = 5061.0
+          end
+
+          it "sweep を呼ぶ" do
+            expect(worker).to receive(:sweep_background_threads).and_call_original
+            worker.send(:sweep_background_threads_if_due)
+          end
+        end
+      end
+    end
+
     describe "WS reconnect detection + reconciliation 再実行(3.3-13)" do
       before do
         worker.send(:instance_variable_set, :@session, session)
