@@ -1338,6 +1338,12 @@ RSpec.describe LiveTradingWorker do
       end
 
       describe "#pulse_heartbeat_if_due" do
+        # R-2 #5 反映: monotonic clock 化に伴い数値時刻で経過判定する
+        before do
+          worker.instance_variable_set(:@monotonic_clock, -> { @stub_now })
+          @stub_now = 1000.0
+        end
+
         context "初回呼出(@last_heartbeat_at が nil)" do
           it "process_manager.pulse_heartbeat! を session + worker_instance_id で呼ぶ" do
             worker.send(:pulse_heartbeat_if_due)
@@ -1346,21 +1352,16 @@ RSpec.describe LiveTradingWorker do
             )
           end
 
-          it "@last_heartbeat_at に現在時刻が記録される" do
-            fixed_now = Time.utc(2026, 5, 7, 12, 0, 0)
-            allow(Time).to receive(:current).and_return(fixed_now)
-
+          it "@last_heartbeat_at に monotonic_clock の値が記録される" do
             worker.send(:pulse_heartbeat_if_due)
-            expect(worker.instance_variable_get(:@last_heartbeat_at)).to eq(fixed_now)
+            expect(worker.instance_variable_get(:@last_heartbeat_at)).to eq(1000.0)
           end
         end
 
         context "前回 heartbeat から 60 秒未経過" do
-          let(:fixed_now) { Time.utc(2026, 5, 7, 12, 0, 0) }
-
           before do
-            worker.send(:instance_variable_set, :@last_heartbeat_at, fixed_now)
-            allow(Time).to receive(:current).and_return(fixed_now + 30) # 30 秒経過
+            worker.send(:instance_variable_set, :@last_heartbeat_at, 1000.0)
+            @stub_now = 1030.0 # 30 秒経過
           end
 
           it "pulse_heartbeat! を呼ばない" do
@@ -1370,11 +1371,9 @@ RSpec.describe LiveTradingWorker do
         end
 
         context "前回 heartbeat から 60 秒以上経過" do
-          let(:fixed_now) { Time.utc(2026, 5, 7, 12, 0, 0) }
-
           before do
-            worker.send(:instance_variable_set, :@last_heartbeat_at, fixed_now)
-            allow(Time).to receive(:current).and_return(fixed_now + 61) # 61 秒経過
+            worker.send(:instance_variable_set, :@last_heartbeat_at, 1000.0)
+            @stub_now = 1061.0 # 61 秒経過
           end
 
           it "pulse_heartbeat! を呼ぶ" do
@@ -1399,27 +1398,27 @@ RSpec.describe LiveTradingWorker do
       end
 
       describe "#renew_lease_if_due" do
+        before do
+          worker.instance_variable_set(:@monotonic_clock, -> { @stub_now })
+          @stub_now = 2000.0
+        end
+
         context "初回呼出(@last_lease_renew_at が nil)" do
           it "process_manager.renew_lease! を lease で呼ぶ" do
             worker.send(:renew_lease_if_due)
             expect(process_manager).to have_received(:renew_lease!).with(lease: lease)
           end
 
-          it "@last_lease_renew_at に現在時刻が記録される" do
-            fixed_now = Time.utc(2026, 5, 7, 12, 0, 0)
-            allow(Time).to receive(:current).and_return(fixed_now)
-
+          it "@last_lease_renew_at に monotonic_clock の値が記録される" do
             worker.send(:renew_lease_if_due)
-            expect(worker.instance_variable_get(:@last_lease_renew_at)).to eq(fixed_now)
+            expect(worker.instance_variable_get(:@last_lease_renew_at)).to eq(2000.0)
           end
         end
 
         context "前回 lease renew から 120 秒未経過" do
-          let(:fixed_now) { Time.utc(2026, 5, 7, 12, 0, 0) }
-
           before do
-            worker.send(:instance_variable_set, :@last_lease_renew_at, fixed_now)
-            allow(Time).to receive(:current).and_return(fixed_now + 60) # 60 秒経過
+            worker.send(:instance_variable_set, :@last_lease_renew_at, 2000.0)
+            @stub_now = 2060.0 # 60 秒経過
           end
 
           it "renew_lease! を呼ばない" do
@@ -1429,11 +1428,9 @@ RSpec.describe LiveTradingWorker do
         end
 
         context "前回 lease renew から 120 秒以上経過" do
-          let(:fixed_now) { Time.utc(2026, 5, 7, 12, 0, 0) }
-
           before do
-            worker.send(:instance_variable_set, :@last_lease_renew_at, fixed_now)
-            allow(Time).to receive(:current).and_return(fixed_now + 121) # 121 秒経過
+            worker.send(:instance_variable_set, :@last_lease_renew_at, 2000.0)
+            @stub_now = 2121.0 # 121 秒経過
           end
 
           it "renew_lease! を呼ぶ" do
@@ -1533,6 +1530,15 @@ RSpec.describe LiveTradingWorker do
             allow(worker).to receive(:run_reconciliation_after_reconnect)
             worker.send(:detect_ws_reconnect_and_reconcile)
             expect(worker.instance_variable_get(:@last_public_ws_reconnect_count)).to eq(2)
+          end
+
+          # R-2 #6 反映: public_ws reconnect 検知時は @last_candle_row を nil リセットして
+          # 新旧受信 thread の race window を回避する
+          it "@last_candle_row を nil にリセットする" do
+            allow(worker).to receive(:run_reconciliation_after_reconnect)
+            worker.send(:instance_variable_set, :@last_candle_row, [ 1_700_000_000_000, "50000" ])
+            worker.send(:detect_ws_reconnect_and_reconcile)
+            expect(worker.instance_variable_get(:@last_candle_row)).to be_nil
           end
         end
 

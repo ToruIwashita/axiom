@@ -73,8 +73,11 @@ module Infrastructure
 
     # 自動再接続の累計回数(LiveTradingWorker が 24h 切断後 reconciliation 再実行検知に利用 / 設計書 02_§5.2.6 + Phase 1.3 引き継ぎ #13).
     # `reconnect_with_backoff` が再接続成功するたびに increment される.
+    # multiple-agent review R-2 #4 反映: increment / read を mutex で保護し non-atomic race を防ぐ.
     # @return [Integer]
-    attr_reader :reconnect_count
+    def reconnect_count
+      mutex.synchronize { @reconnect_count }
+    end
 
     # WebSocket 接続を確立する。
     #
@@ -351,7 +354,7 @@ module Infrastructure
 
           wait_until_open
           send_subscribe(list_to_resubscribe) unless list_to_resubscribe.empty?
-          @reconnect_count += 1
+          mutex.synchronize { @reconnect_count += 1 }
           return
         rescue StandardError => e
           # Phase 1.3 obs-6 反映: wait_until_open 失敗等で @ws を取り残さない

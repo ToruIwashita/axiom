@@ -47,6 +47,9 @@ class LiveTradingWorker
   # @param risk_guard_service [Domain::RiskGuardService, nil] entry / cooldown / halt 判定
   # @param order_endpoint [Infrastructure::BitgetOrderEndpoint, nil] 発注
   # @param main_loop_poll_interval [Float] メインループ kill-switch / 状態 poll 間隔(秒). spec で 0 を渡して即時 break.
+  # @param monotonic_clock [#call] heartbeat / lease renew の周期判定用 monotonic clock(R-2 #5 反映).
+  #   デフォルトは `Process.clock_gettime(Process::CLOCK_MONOTONIC)`. 壁時計逆行(NTP step / 手動修正)による
+  #   heartbeat 停止 → SessionLease 奪取事故を防ぐ.
   # @param logger [Logger] release! 例外等の警告出力先
   def initialize(
     process_manager: Domain::LiveTradingProcessManager.new,
@@ -60,6 +63,7 @@ class LiveTradingWorker
     risk_guard_service: nil,
     order_endpoint: nil,
     main_loop_poll_interval: DEFAULT_MAIN_LOOP_POLL_INTERVAL,
+    monotonic_clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) },
     logger: Rails.logger
   )
     @process_manager = process_manager
@@ -73,6 +77,7 @@ class LiveTradingWorker
     @risk_guard_service = risk_guard_service
     @order_endpoint = order_endpoint
     @main_loop_poll_interval = main_loop_poll_interval
+    @monotonic_clock = monotonic_clock
     @logger = logger
   end
 
@@ -174,6 +179,11 @@ class LiveTradingWorker
       "private=#{private_reconnected}), re-running reconciliation"
     )
 
+    # R-2 #6 反映: WS reconnect 後は新旧受信 thread の race window が論理上発生し得るため,
+    # @last_candle_row を nil リセットして次の確定判定を新 thread の最初の row から再開する
+    # (snapshot 受信時と同様の振る舞い).
+    @last_candle_row = nil if public_reconnected
+
     run_in_db_thread("reconcile_after_ws_reconnect") do
       session_reloaded = LiveTrading::Session.find(@session.id)
       run_reconciliation_after_reconnect(session_reloaded)
@@ -200,8 +210,9 @@ class LiveTradingWorker
   # heartbeat 周期到達時に process_manager.pulse_heartbeat! を呼ぶ.
   # 初回は @last_heartbeat_at が nil のため即時実行.
   # 失敗時は logger.warn 落とし(main loop を止めない).
+  # 周期判定は monotonic clock を使用し壁時計逆行による heartbeat 停止事故を防ぐ(R-2 #5 反映).
   def pulse_heartbeat_if_due
-    now = Time.current
+    now = @monotonic_clock.call
     return if @last_heartbeat_at && (now - @last_heartbeat_at) < HEARTBEAT_INTERVAL_SECONDS
 
     process_manager.pulse_heartbeat!(session: @session, worker_instance_id: @worker_instance_id)
@@ -215,8 +226,9 @@ class LiveTradingWorker
   # lease renew 周期到達時に process_manager.renew_lease! を呼ぶ.
   # 初回は @last_lease_renew_at が nil のため即時実行.
   # 失敗時は logger.warn 落とし.
+  # 周期判定は monotonic clock を使用(R-2 #5 反映).
   def renew_lease_if_due
-    now = Time.current
+    now = @monotonic_clock.call
     return if @last_lease_renew_at && (now - @last_lease_renew_at) < LEASE_RENEW_INTERVAL_SECONDS
     return unless @lease
 
