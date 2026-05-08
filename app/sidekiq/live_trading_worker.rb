@@ -344,7 +344,7 @@ class LiveTradingWorker
     public_ws = public_ws_factory.call
     public_ws.connect
     public_subscriptions(session).each do |sub|
-      public_ws.subscribe(sub) { |data, _result| handle_public_ws_message(sub, data) }
+      public_ws.subscribe(sub) { |data, result| handle_public_ws_message(sub, data, result) }
     end
     public_ws
   end
@@ -355,10 +355,11 @@ class LiveTradingWorker
   #
   # @param sub [Infrastructure::BitgetPublicWsSubscription] subscription オブジェクト
   # @param data [Array, nil] WS push の data 部分(BitgetPublicWsMessageDecoder Push.data)
-  def handle_public_ws_message(sub, data)
+  # @param result [Infrastructure::BitgetPublicWsMessageDecoder::Result::Push] snapshot? / update? 判定用
+  def handle_public_ws_message(sub, data, result)
     case sub.channel
     when "candle1m"
-      handle_candle_message(data)
+      handle_candle_message(data, snapshot: result.respond_to?(:snapshot?) && result.snapshot?)
     end
   rescue StandardError => e
     logger.warn(
@@ -368,12 +369,22 @@ class LiveTradingWorker
   end
 
   # candle1m push を受信して確定 candle を検出する.
-  # Bitget WS は同 ts の candle を複数回更新 push し, ts 進入で前 candle が確定する.
-  # 確定検出時は spawn_runner_child_for_tick(candle)を別 thread で呼び出す.
+  # Bitget WS は接続直後に snapshot(過去履歴 N 本)を 1 push で送り, その後は update(同 ts 更新)+
+  # ts 進入で前 candle 確定の流れになる.
+  # snapshot 時は最新 row(末尾)で @last_candle_row を初期化するのみ(spawn しない /
+  # warmup_candles は別途 step 8 で REST 取得済 + snapshot 内 row 全件 spawn は二重発注事故になるため).
+  # update 時は data の各 row を順次確定判定する.
+  # multiple-agent review R-1 #2 反映.
   #
   # @param data [Array<Array>, nil] WS push data 部分(各要素は OHLCV row)
-  def handle_candle_message(data)
-    return unless data.is_a?(Array)
+  # @param snapshot [Boolean] result.snapshot? 由来 / true なら確定判定スキップ
+  def handle_candle_message(data, snapshot: false)
+    return unless data.is_a?(Array) && data.any?
+
+    if snapshot
+      @last_candle_row = data.last
+      return
+    end
 
     data.each do |row|
       confirmed = detect_confirmed_candle(row)
@@ -460,18 +471,22 @@ class LiveTradingWorker
 
     apply_strategy_state_diff(state, response["strategy_state_diff"])
 
-    Array(response["order_intents"]).each do |intent|
-      process_order_intent(session, revision, intent)
+    Array(response["order_intents"]).each_with_index do |intent, idx|
+      process_order_intent(session, revision, intent, candle, idx)
     end
   end
 
-  def build_runner_ctx_input(session, candle, state)
-    {
-      "candle" => candle,
-      "state" => state.state_data,
-      "symbol" => session.symbol
-      # TODO(後続 phase): balance / position / open orders 等を Bitget REST API から付与
-    }
+  # Domain::LiveContext.build_ctx_input に委譲して子プロセスへ渡す形式を構築する.
+  # MVP では position / balance を placeholder(no-position / 残高 0)で送信する
+  # (multiple-agent review R-1 #1 反映: LiveContext.from_ctx_input の必須キー満たす契約整合).
+  # TODO(後続 phase): account_endpoint で実 balance + position を取得して付与
+  def build_runner_ctx_input(_session, candle, state)
+    Domain::LiveContext.build_ctx_input(
+      candle: candle,
+      position: Domain::PositionValueObject.new,
+      balance: BigDecimal("0"),
+      state: state.state_data
+    )
   end
 
   # strategy_state_diff の各 op を SessionState.apply_diff! で適用.
@@ -491,11 +506,12 @@ class LiveTradingWorker
   # 1 件の order_intent を AI filter → RiskGuard → 発注の順に評価する.
   # いずれかで否決された場合は place_order を呼ばない.
   # 単一 intent 内例外は logger.warn に落として他 intent の処理を妨げない.
-  def process_order_intent(session, revision, intent)
+  # candle / idx は client_oid 決定論的生成(R-1 #3 反映)に利用.
+  def process_order_intent(session, revision, intent, candle, idx)
     return unless ai_filter_pass?(revision, intent)
     return unless risk_guard_pass?(session, intent)
 
-    place_order_for_intent(session, intent)
+    place_order_for_intent(session, intent, candle, idx)
   rescue StandardError => e
     logger.warn(
       "[LiveTradingWorker] process_order_intent failed (intent=#{intent.inspect}): " \
@@ -532,8 +548,10 @@ class LiveTradingWorker
   end
 
   # order_intent → BitgetOrderEndpoint#place_order マッピング.
-  # client_oid は intent 由来 / 未指定なら uuid 生成.
-  def place_order_for_intent(session, intent)
+  # client_oid は intent 由来優先 / 未指定なら決定論的 ID 生成
+  # (R-1 #3 反映: SecureRandom.uuid フォールバックは Worker 再起動 / WS reconnect 後の同 candle 再処理時に
+  # 毎回別 uuid となり Bitget の冪等チェック通過 → 二重発注事故になるため決定論的生成に変更).
+  def place_order_for_intent(session, intent, candle, idx)
     order_endpoint.place_order(
       symbol: session.symbol,
       margin_mode: session.margin_mode,
@@ -543,12 +561,19 @@ class LiveTradingWorker
       size: intent["size"].to_s,
       force: intent.fetch("force", "gtc"),
       reduce_only: intent.fetch("reduce_only", "NO"),
-      client_oid: intent["client_oid"] || SecureRandom.uuid,
+      client_oid: intent["client_oid"] || deterministic_client_oid(session, candle, idx),
       trade_side: intent["trade_side"],
       price: intent["price"]&.to_s,
       preset_stop_surplus_price: intent["tp"]&.to_s,
       preset_stop_loss_price: intent["sl"]&.to_s
     )
+  end
+
+  # 同一 candle / 同一 intent index に対しては再起動後も同じ client_oid を返す決定論生成.
+  # session.id + candle ts + intent index で一意.Bitget の冪等チェックで二重発注を防止する.
+  def deterministic_client_oid(session, candle, idx)
+    candle_ts = candle.is_a?(Hash) ? candle["ts"] : nil
+    "live-#{session.id}-#{candle_ts}-#{idx}"
   end
 
   # Private WS callback handler(3.3-10c).

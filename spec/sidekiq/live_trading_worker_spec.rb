@@ -756,17 +756,20 @@ RSpec.describe LiveTradingWorker do
       end
 
       describe "#handle_public_ws_message" do
+        let(:update_result) { double("Push", snapshot?: false) }
+        let(:snapshot_result) { double("Push", snapshot?: true) }
+
         context "channel=candle1m の場合" do
-          it "handle_candle_message に data を引数として dispatch する" do
-            expect(worker).to receive(:handle_candle_message).with(an_instance_of(Array))
-            worker.send(:handle_public_ws_message, candle1m_sub, [])
+          it "handle_candle_message に data + snapshot フラグを引数として dispatch する" do
+            expect(worker).to receive(:handle_candle_message).with(an_instance_of(Array), snapshot: false)
+            worker.send(:handle_public_ws_message, candle1m_sub, [], update_result)
           end
         end
 
         context "channel=ticker の場合(MVP では未処理)" do
           it "handle_candle_message を呼ばない" do
             expect(worker).not_to receive(:handle_candle_message)
-            worker.send(:handle_public_ws_message, ticker_sub, [])
+            worker.send(:handle_public_ws_message, ticker_sub, [], update_result)
           end
         end
 
@@ -777,7 +780,7 @@ RSpec.describe LiveTradingWorker do
 
           it "logger.warn 落とし + WS thread を止めない(再 raise しない)" do
             expect do
-              worker.send(:handle_public_ws_message, candle1m_sub, [])
+              worker.send(:handle_public_ws_message, candle1m_sub, [], update_result)
             end.not_to raise_error
 
             expect(logger).to have_received(:warn).with(
@@ -791,33 +794,33 @@ RSpec.describe LiveTradingWorker do
         let(:row1) { [ 1_700_000_000_000, "50000", "50100", "49900", "50050", "10", "500000", "500000" ] }
         let(:row2) { [ 1_700_000_060_000, "50050", "50200", "50000", "50150", "12", "601800", "601800" ] }
 
-        context "初回 candle1m 受信(@last_candle_row が nil)" do
+        context "初回 candle1m 受信 update(@last_candle_row が nil)" do
           it "確定 candle なし(spawn を呼ばない)" do
             expect(worker).not_to receive(:spawn_runner_child_for_tick)
-            worker.send(:handle_candle_message, [ row1 ])
+            worker.send(:handle_candle_message, [ row1 ], snapshot: false)
           end
 
           it "@last_candle_row が更新される" do
-            worker.send(:handle_candle_message, [ row1 ])
+            worker.send(:handle_candle_message, [ row1 ], snapshot: false)
             expect(worker.instance_variable_get(:@last_candle_row)).to eq(row1)
           end
         end
 
         context "同一 ts の candle1m 再受信(更新中)" do
           before do
-            worker.send(:handle_candle_message, [ row1 ])
+            worker.send(:handle_candle_message, [ row1 ], snapshot: false)
           end
 
           it "確定 candle なし(spawn を呼ばない)" do
             updated_row1 = [ row1[0], "50000", "50500", "49800", "50300", "20", "1000000", "1000000" ]
             expect(worker).not_to receive(:spawn_runner_child_for_tick)
-            worker.send(:handle_candle_message, [ updated_row1 ])
+            worker.send(:handle_candle_message, [ updated_row1 ], snapshot: false)
           end
         end
 
         context "ts が進んだ candle1m 受信(前 candle 確定)" do
           before do
-            worker.send(:handle_candle_message, [ row1 ])
+            worker.send(:handle_candle_message, [ row1 ], snapshot: false)
           end
 
           it "前 candle(row1)が確定 payload として spawn される" do
@@ -830,19 +833,34 @@ RSpec.describe LiveTradingWorker do
                 "close" => "50050"
               )
             )
-            worker.send(:handle_candle_message, [ row2 ])
+            worker.send(:handle_candle_message, [ row2 ], snapshot: false)
+          end
+        end
+
+        # R-1 #2 反映: snapshot 時に過去履歴 row 全件確定誤検出を防ぐ
+        context "candle1m snapshot 受信(接続直後の過去履歴一括 push)" do
+          let(:snapshot_rows) { [ row1, row2 ] }
+
+          it "spawn を 1 度も呼ばない(過去履歴は warmup_candles で別途取得済)" do
+            expect(worker).not_to receive(:spawn_runner_child_for_tick)
+            worker.send(:handle_candle_message, snapshot_rows, snapshot: true)
+          end
+
+          it "@last_candle_row が末尾 row(最新)で初期化される" do
+            worker.send(:handle_candle_message, snapshot_rows, snapshot: true)
+            expect(worker.instance_variable_get(:@last_candle_row)).to eq(row2)
           end
         end
 
         context "data が Array でない場合" do
           it "nil は no-op" do
             expect(worker).not_to receive(:spawn_runner_child_for_tick)
-            worker.send(:handle_candle_message, nil)
+            worker.send(:handle_candle_message, nil, snapshot: false)
           end
 
           it "Hash は no-op" do
             expect(worker).not_to receive(:spawn_runner_child_for_tick)
-            worker.send(:handle_candle_message, { "data" => "not-array" })
+            worker.send(:handle_candle_message, { "data" => "not-array" }, snapshot: false)
           end
         end
       end
@@ -1019,6 +1037,11 @@ RSpec.describe LiveTradingWorker do
           "client_oid" => "intent-001"
         }
       end
+      let(:intent_without_client_oid) do
+        {
+          "side" => "buy", "order_type" => "limit", "size" => "0.01", "price" => "49900"
+        }
+      end
       let(:state_diff) do
         { "ops" => [ { "op" => "replace_all", "value" => { "ema" => 50_050 } } ] }
       end
@@ -1044,7 +1067,7 @@ RSpec.describe LiveTradingWorker do
       describe "正常パス(spawn ok)" do
         subject { worker.send(:run_runner_child_for_tick, session, candle_payload) }
 
-        it "spawner.run を on_tick + revision + ctx_input(candle/state/symbol)で呼ぶ" do
+        it "spawner.run を on_tick + revision + ctx_input(candle/state/position/balance)で呼ぶ" do
           subject
           expect(spawner).to have_received(:run).with(
             callback: :on_tick,
@@ -1052,7 +1075,8 @@ RSpec.describe LiveTradingWorker do
             ctx_input: a_hash_including(
               "candle" => candle_payload,
               "state" => {},
-              "symbol" => "BTCUSDT"
+              "position" => a_hash_including("side" => nil, "size" => "0.0", "entry_price" => "0.0"),
+              "balance" => "0.0"
             )
           )
         end
@@ -1071,6 +1095,25 @@ RSpec.describe LiveTradingWorker do
               client_oid: "intent-001", price: "49900"
             )
           )
+        end
+
+        # R-1 #3 反映: client_oid 未指定時の決定論的 ID 生成
+        context "intent に client_oid が無い場合" do
+          let(:spawn_response_ok) do
+            {
+              "status" => "ok",
+              "order_intents" => [ intent_without_client_oid ],
+              "strategy_state_diff" => state_diff,
+              "logs" => [], "errors" => []
+            }
+          end
+
+          it "決定論的 ID(live-{session_id}-{candle_ts}-{idx})が client_oid に使われる" do
+            subject
+            expect(order_endpoint_di).to have_received(:place_order).with(
+              a_hash_including(client_oid: "live-#{session.id}-#{candle_payload['ts']}-0")
+            )
+          end
         end
       end
 
