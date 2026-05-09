@@ -1105,6 +1105,13 @@ RSpec.describe LiveTradingWorker do
             worker.send(:handle_orders_algo_message, [], anomaly_result)
             expect(logger).to have_received(:warn).with(/orders-algo anomaly detected/)
           end
+
+          # Phase 3.4-pre-7: anomaly 検出時 reconciliation trigger
+          it "trigger_reconciliation_for_algo_anomaly が呼ばれる" do
+            allow(LiveTrading::Session).to receive(:transaction).and_yield
+            expect(worker).to receive(:trigger_reconciliation_for_algo_anomaly)
+            worker.send(:handle_orders_algo_message, [], anomaly_result)
+          end
         end
 
         context "algo_anomaly? = false(正常状態)" do
@@ -1113,6 +1120,39 @@ RSpec.describe LiveTradingWorker do
             worker.send(:handle_orders_algo_message, [], result_double)
             expect(logger).not_to have_received(:warn)
             expect(worker).to have_received(:run_in_db_thread).with("orders_algo_update")
+          end
+
+          # Phase 3.4-pre-7: anomaly でない場合は trigger を呼ばない
+          it "trigger_reconciliation_for_algo_anomaly を呼ばない" do
+            expect(LiveTrading::Session).to receive(:transaction).and_yield
+            expect(worker).not_to receive(:trigger_reconciliation_for_algo_anomaly)
+            worker.send(:handle_orders_algo_message, [], result_double)
+          end
+        end
+      end
+
+      # Phase 3.4-pre-7: trigger_reconciliation_for_algo_anomaly
+      describe "#trigger_reconciliation_for_algo_anomaly" do
+        before do
+          worker.instance_variable_set(:@session, session)
+        end
+
+        it "run_in_db_thread('reconcile_after_algo_anomaly')で run_reconciliation_after_reconnect を呼ぶ" do
+          expect(worker).to receive(:run_reconciliation_after_reconnect).with(
+            an_object_having_attributes(id: session.id)
+          )
+          worker.send(:trigger_reconciliation_for_algo_anomaly)
+          expect(worker).to have_received(:run_in_db_thread).with("reconcile_after_algo_anomaly")
+        end
+
+        context "@session が nil の場合(防御)" do
+          before do
+            worker.instance_variable_set(:@session, nil)
+          end
+
+          it "run_reconciliation_after_reconnect を呼ばない / raise しない" do
+            expect(worker).not_to receive(:run_reconciliation_after_reconnect)
+            expect { worker.send(:trigger_reconciliation_for_algo_anomaly) }.not_to raise_error
           end
         end
       end

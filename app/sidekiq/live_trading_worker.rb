@@ -747,21 +747,35 @@ class LiveTradingWorker
 
   # orders-algo push: Exchange::AlgoOrder の状態更新 + algo_anomaly? なら reconciliation 起動.
   # result.algo_anomaly? の場合 設計書 05_§3.6 でアラート + reconciliation 起動と規定.
+  # Phase 3.4-pre-7 反映: anomaly 検出時に run_reconciliation_after_reconnect を別 thread で起動して
+  # exchange 側との状態整合を即時確認する(reconnect 経路と同じ reconcile 5 件を走らせる).
   def handle_orders_algo_message(data, result)
     if result.respond_to?(:algo_anomaly?) && result.algo_anomaly?
       logger.warn(
         "[LiveTradingWorker] orders-algo anomaly detected (state outside known set): " \
         "data=#{data.inspect}"
       )
-      # TODO(後続 phase): reconciliation 起動 trigger
+      trigger_reconciliation_for_algo_anomaly
     end
 
     run_in_db_thread("orders_algo_update") do
       LiveTrading::Session.transaction do
         Array(data).each do |_row|
-          # TODO(後続 phase): Exchange::AlgoOrder upsert(plan_id / state / trigger_price / callback_ratio 等)
+          # TODO(Phase 3.4 本体): Exchange::AlgoOrder upsert(plan_id / state / trigger_price / callback_ratio 等)
         end
       end
+    end
+  end
+
+  # Phase 3.4-pre-7 追加: algo_anomaly 検出時に reconciliation を別 thread で起動する.
+  # WS callback thread から DB 操作 + REST 呼出を直接実行すると thread block 化するため
+  # run_in_db_thread 経由で隔離.session.reload で main loop と同じ最新状態取得.
+  def trigger_reconciliation_for_algo_anomaly
+    return unless @session
+
+    run_in_db_thread("reconcile_after_algo_anomaly") do
+      session_reloaded = LiveTrading::Session.find(@session.id)
+      run_reconciliation_after_reconnect(session_reloaded)
     end
   end
 
