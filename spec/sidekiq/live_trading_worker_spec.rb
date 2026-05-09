@@ -1547,212 +1547,20 @@ RSpec.describe LiveTradingWorker do
       end
     end
 
-    describe "reconciliation(3.3-11 / bootstrap step 11)" do
+    # R-8-6 反映: reconciliation 詳細 spec は spec/domain/reconciliation_coordinator_spec.rb に移動済.
+    # Worker spec では Domain::ReconciliationCoordinator への委譲のみ検証する.
+    describe "reconciliation(bootstrap step 11)" do
+      let(:reconciliation_coordinator) { instance_double(Domain::ReconciliationCoordinator) }
+
       before do
-        worker.send(:instance_variable_set, :@session, session)
-        session.update_column(:status, "starting")
+        worker.instance_variable_set(:@session, session)
+        worker.instance_variable_set(:@reconciliation_coordinator, reconciliation_coordinator)
       end
 
-      describe "#run_reconciliation" do
-        it "session を starting → reconciling に遷移させる" do
+      describe "#run_reconciliation が reconciliation_coordinator.run_for_bootstrap に委譲" do
+        it "session を渡して run_for_bootstrap を呼ぶ" do
+          expect(reconciliation_coordinator).to receive(:run_for_bootstrap).with(session)
           worker.send(:run_reconciliation, session)
-          expect(session.reload.state_reconciling?).to be true
-        end
-
-        it "5 件の reconcile 系 method を順次呼び出す(Phase 3.4-pre-4 で fill_history 追加)" do
-          expect(worker).to receive(:reconcile_orders_pending).with(session).ordered.and_return("data" => [])
-          expect(worker).to receive(:reconcile_orders_plan_pending).with(session).ordered.and_return("data" => [])
-          expect(worker).to receive(:reconcile_orders_plan_history).with(session).ordered.and_return("data" => [])
-          expect(worker).to receive(:reconcile_position_all).with(session).ordered.and_return("data" => [])
-          expect(worker).to receive(:reconcile_fill_history).with(session).ordered.and_return("data" => [])
-
-          worker.send(:run_reconciliation, session)
-        end
-      end
-
-      # Phase 3.4-pre-3 反映: 結果集約 + 全失敗時 bootstrap 中断(設計 #6)
-      describe "#evaluate_reconciliation_outcome" do
-        context "全成功(全 reconcile 結果が non-nil)" do
-          let(:results) do
-            { orders_pending: {}, orders_plan_pending: {}, orders_plan_history: {}, position_all: {}, fill_history: {} }
-          end
-
-          it "raise しない / logger.warn も呼ばない" do
-            expect { worker.send(:evaluate_reconciliation_outcome, results) }.not_to raise_error
-            expect(logger).not_to have_received(:warn)
-          end
-        end
-
-        context "部分失敗(1 件失敗 / 4 件成功)" do
-          let(:results) do
-            { orders_pending: {}, orders_plan_pending: nil, orders_plan_history: {}, position_all: {}, fill_history: {} }
-          end
-
-          it "logger.warn でアラート出力 + raise しない(続行)" do
-            expect { worker.send(:evaluate_reconciliation_outcome, results) }.not_to raise_error
-            expect(logger).to have_received(:warn).with(
-              /reconciliation partially failed \(1\/5\).*orders_plan_pending/
-            )
-          end
-        end
-
-        context "部分失敗(4 件失敗 / 1 件成功)" do
-          let(:results) do
-            { orders_pending: nil, orders_plan_pending: nil, orders_plan_history: nil, position_all: {}, fill_history: nil }
-          end
-
-          it "logger.warn でアラート(全失敗ではないため raise しない)" do
-            expect { worker.send(:evaluate_reconciliation_outcome, results) }.not_to raise_error
-            expect(logger).to have_received(:warn).with(/reconciliation partially failed \(4\/5\)/)
-          end
-        end
-
-        context "全失敗(全 reconcile 結果が nil)" do
-          let(:results) do
-            { orders_pending: nil, orders_plan_pending: nil, orders_plan_history: nil, position_all: nil, fill_history: nil }
-          end
-
-          it "raise StandardError(reconciliation all failed)" do
-            expect { worker.send(:evaluate_reconciliation_outcome, results) }
-              .to raise_error(StandardError, /reconciliation all failed/)
-          end
-        end
-
-        # R-8-3 #C-4: failed 判定明示化(nil / false / :failed sentinel を失敗扱い)
-        context "false / :failed sentinel が混在(将来 contract 変更耐性)" do
-          let(:results) do
-            { orders_pending: false, orders_plan_pending: :failed, orders_plan_history: {}, position_all: {}, fill_history: {} }
-          end
-
-          it "false / :failed を failed として扱い部分失敗 warn 出力" do
-            expect { worker.send(:evaluate_reconciliation_outcome, results) }.not_to raise_error
-            expect(logger).to have_received(:warn).with(/partially failed \(2\/5\)/)
-          end
-        end
-      end
-
-      describe "全失敗時の bootstrap 中断統合" do
-        before do
-          allow(worker).to receive(:reconcile_orders_pending).and_return(nil)
-          allow(worker).to receive(:reconcile_orders_plan_pending).and_return(nil)
-          allow(worker).to receive(:reconcile_orders_plan_history).and_return(nil)
-          allow(worker).to receive(:reconcile_position_all).and_return(nil)
-          allow(worker).to receive(:reconcile_fill_history).and_return(nil)
-        end
-
-        it "run_reconciliation が raise する(cleanup_on_failure 経由 bootstrap 中断)" do
-          expect { worker.send(:run_reconciliation, session) }
-            .to raise_error(StandardError, /reconciliation all failed/)
-        end
-      end
-
-      # Phase 3.4-pre-4: reconcile_fill_history
-      describe "#reconcile_fill_history" do
-        it "account_endpoint.fill_history を 24h lookback の start_time / end_time + symbol で呼ぶ" do
-          fixed_now = Time.utc(2026, 5, 8, 12, 0, 0)
-          allow(Time).to receive(:current).and_return(fixed_now)
-          end_time_ms = (fixed_now.to_f * 1000).to_i
-          start_time_ms = end_time_ms - (24 * 60 * 60 * 1000)
-
-          worker.send(:reconcile_fill_history, session)
-
-          expect(account_endpoint_di).to have_received(:fill_history).with(
-            symbol: "BTCUSDT", start_time: start_time_ms, end_time: end_time_ms
-          )
-        end
-
-        context "REST 失敗時" do
-          before do
-            allow(account_endpoint_di).to receive(:fill_history).and_raise(StandardError, "API down")
-          end
-
-          it "logger.warn + nil 返却" do
-            expect(worker.send(:reconcile_fill_history, session)).to be_nil
-            expect(logger).to have_received(:warn).with(/reconcile_fill_history failed.*API down/)
-          end
-        end
-      end
-
-      describe "#reconcile_orders_pending" do
-        it "order_endpoint.orders_pending を session.symbol で呼ぶ" do
-          worker.send(:reconcile_orders_pending, session)
-          expect(order_endpoint_di).to have_received(:orders_pending).with(symbol: "BTCUSDT")
-        end
-
-        context "REST 呼出が失敗した場合" do
-          before do
-            allow(order_endpoint_di).to receive(:orders_pending).and_raise(StandardError, "API down")
-          end
-
-          it "logger.warn 落とし + nil 返却(後続 reconcile 継続)" do
-            result = worker.send(:reconcile_orders_pending, session)
-            expect(result).to be_nil
-            expect(logger).to have_received(:warn).with(/reconcile_orders_pending failed.*API down/)
-          end
-        end
-      end
-
-      describe "#reconcile_orders_plan_pending" do
-        it "order_endpoint.orders_plan_pending を symbol で呼ぶ" do
-          worker.send(:reconcile_orders_plan_pending, session)
-          expect(order_endpoint_di).to have_received(:orders_plan_pending).with(symbol: "BTCUSDT")
-        end
-
-        context "REST 失敗時" do
-          before do
-            allow(order_endpoint_di).to receive(:orders_plan_pending).and_raise(StandardError, "boom")
-          end
-
-          it "logger.warn + nil 返却" do
-            expect(worker.send(:reconcile_orders_plan_pending, session)).to be_nil
-            expect(logger).to have_received(:warn).with(/reconcile_orders_plan_pending failed/)
-          end
-        end
-      end
-
-      describe "#reconcile_orders_plan_history" do
-        it "直近 24h 範囲(start_time / end_time)で symbol を指定して呼ぶ" do
-          fixed_now = Time.utc(2026, 5, 7, 12, 0, 0)
-          allow(Time).to receive(:current).and_return(fixed_now)
-          end_time_ms = (fixed_now.to_f * 1000).to_i
-          start_time_ms = end_time_ms - (24 * 60 * 60 * 1000)
-
-          worker.send(:reconcile_orders_plan_history, session)
-
-          expect(order_endpoint_di).to have_received(:orders_plan_history).with(
-            symbol: "BTCUSDT", start_time: start_time_ms, end_time: end_time_ms
-          )
-        end
-
-        context "REST 失敗時" do
-          before do
-            allow(order_endpoint_di).to receive(:orders_plan_history).and_raise(StandardError, "boom")
-          end
-
-          it "logger.warn + nil 返却" do
-            expect(worker.send(:reconcile_orders_plan_history, session)).to be_nil
-            expect(logger).to have_received(:warn).with(/reconcile_orders_plan_history failed/)
-          end
-        end
-      end
-
-      describe "#reconcile_position_all" do
-        it "position_endpoint.position_all を margin_coin + symbol で呼ぶ" do
-          worker.send(:reconcile_position_all, session)
-          expect(position_endpoint).to have_received(:position_all).with(
-            margin_coin: "USDT", symbol: "BTCUSDT"
-          )
-        end
-
-        context "REST 失敗時" do
-          before do
-            allow(position_endpoint).to receive(:position_all).and_raise(StandardError, "boom")
-          end
-
-          it "logger.warn + nil 返却" do
-            expect(worker.send(:reconcile_position_all, session)).to be_nil
-            expect(logger).to have_received(:warn).with(/reconcile_position_all failed/)
-          end
         end
       end
     end
@@ -2079,15 +1887,11 @@ RSpec.describe LiveTradingWorker do
         end
       end
 
-      describe "#run_reconciliation_after_reconnect" do
-        it "session.start_reconciling! は呼ばずに 5 件 reconcile を呼び出す(Phase 3.4-pre-4 で fill_history 追加)" do
-          expect(session).not_to receive(:start_reconciling!)
-          expect(worker).to receive(:reconcile_orders_pending).with(session)
-          expect(worker).to receive(:reconcile_orders_plan_pending).with(session)
-          expect(worker).to receive(:reconcile_orders_plan_history).with(session)
-          expect(worker).to receive(:reconcile_position_all).with(session)
-          expect(worker).to receive(:reconcile_fill_history).with(session)
-
+      describe "#run_reconciliation_after_reconnect が reconciliation_coordinator.run_after_reconnect に委譲" do
+        it "session を渡して run_after_reconnect を呼ぶ" do
+          coordinator = instance_double(Domain::ReconciliationCoordinator)
+          worker.instance_variable_set(:@reconciliation_coordinator, coordinator)
+          expect(coordinator).to receive(:run_after_reconnect).with(session)
           worker.send(:run_reconciliation_after_reconnect, session)
         end
       end

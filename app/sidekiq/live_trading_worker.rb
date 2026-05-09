@@ -60,6 +60,7 @@ class LiveTradingWorker
   # @param order_endpoint [Infrastructure::BitgetOrderEndpoint, nil] 発注
   # @param account_endpoint [Infrastructure::BitgetAccountEndpoint, nil] 残高 / fill_history 取得(3.4-pre-1 + 3.4-pre-4)
   # @param state_cache [Domain::LiveTradingStateCache, nil] balance / position memory cache(R-8-5 抽出)
+  # @param reconciliation_coordinator [Domain::ReconciliationCoordinator, nil] reconciliation REST 突合(R-8-6 抽出)
   # @param main_loop_poll_interval [Float] メインループ kill-switch / 状態 poll 間隔(秒). spec で 0 を渡して即時 break.
   # @param monotonic_clock [#call] heartbeat / lease renew の周期判定用 monotonic clock(R-2 #5 反映).
   #   デフォルトは `Process.clock_gettime(Process::CLOCK_MONOTONIC)`. 壁時計逆行(NTP step / 手動修正)による
@@ -79,6 +80,7 @@ class LiveTradingWorker
     order_endpoint: nil,
     account_endpoint: nil,
     state_cache: nil,
+    reconciliation_coordinator: nil,
     main_loop_poll_interval: DEFAULT_MAIN_LOOP_POLL_INTERVAL,
     monotonic_clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) },
     ws_disconnect_grace_seconds: WS_DISCONNECT_GRACE_SECONDS,
@@ -96,6 +98,7 @@ class LiveTradingWorker
     @order_endpoint = order_endpoint
     @account_endpoint = account_endpoint
     @state_cache = state_cache
+    @reconciliation_coordinator = reconciliation_coordinator
     @main_loop_poll_interval = main_loop_poll_interval
     @monotonic_clock = monotonic_clock
     @ws_disconnect_grace_seconds = ws_disconnect_grace_seconds
@@ -119,6 +122,8 @@ class LiveTradingWorker
     @background_threads_mutex = Mutex.new
     # R-8-5 反映: balance / position memory cache を Domain::LiveTradingStateCache に抽出.
     @state_cache = state_cache_lazy
+    # R-8-6 反映: reconciliation を Domain::ReconciliationCoordinator に抽出.
+    @reconciliation_coordinator = reconciliation_coordinator_lazy
     # R-8-2: algo anomaly reconcile の debounce 用フラグ + 最終起動時刻.
     @anomaly_reconcile_in_progress = false
     @anomaly_reconcile_mutex = Mutex.new
@@ -236,15 +241,9 @@ class LiveTradingWorker
   end
 
   # reconnect 後の reconciliation 再実行.
-  # bootstrap step 11 と異なり session 状態遷移(start_reconciling!)は行わない
-  # (running 状態のまま 5 件 REST 突合のみ実施).
-  # Phase 3.4-pre-4 反映: fill_history も追加(WS reconnect 中の fill 欠落補完).
+  # R-8-6 反映: Domain::ReconciliationCoordinator に委譲.
   def run_reconciliation_after_reconnect(session)
-    reconcile_orders_pending(session)
-    reconcile_orders_plan_pending(session)
-    reconcile_orders_plan_history(session)
-    reconcile_position_all(session)
-    reconcile_fill_history(session)
+    @reconciliation_coordinator.run_after_reconnect(session)
   end
 
   # WS Client の reconnect_count を安全に取得する(nil 防御 + respond_to? 防御).
@@ -898,134 +897,10 @@ class LiveTradingWorker
     end
   end
 
-  # step 11: reconciliation(starting → reconciling 遷移 + 6 件 REST 突合).
-  # 各 REST 呼出は失敗時に logger.warn に落として後続 reconcile を継続する(部分復旧志向).
-  # 各結果からの DB upsert は後続 phase で実装(現状は呼出構造のみ確立).
-  #
-  # Phase 3.4-pre-3 反映: 各 reconcile_* の結果(非 nil = 成功 / nil = 失敗)を集約し,
-  # 全失敗時は raise で bootstrap 中断する(設計書 #6 整合性問題対応).
-  # 部分失敗時は logger.warn でアラートを残しつつ続行する(MVP 暫定挙動).
-  #
-  # MVP 範囲(5 件 / Phase 3.4-pre-4 で fill_history 追加):
-  # - orders_pending: 未約定通常注文
-  # - orders_plan_pending: 未起動 plan order
-  # - orders_plan_history: 履歴 plan order(直近 24h)
-  # - position_all: 全 position
-  # - fill_history: 約定履歴(直近 24h / WS fill push 欠落分の補完)
-  # 範囲外(将来 phase):
-  # - plan_sub_order: orders_plan_pending 取得後に各 plan_id について(現状 skeleton)
+  # step 11: reconciliation(starting → reconciling 遷移 + 5 件 REST 突合 + 結果集約).
+  # R-8-6 反映: 詳細実装は Domain::ReconciliationCoordinator に委譲.
   def run_reconciliation(session)
-    session.start_reconciling!
-
-    results = {
-      orders_pending: reconcile_orders_pending(session),
-      orders_plan_pending: reconcile_orders_plan_pending(session),
-      orders_plan_history: reconcile_orders_plan_history(session),
-      position_all: reconcile_position_all(session),
-      fill_history: reconcile_fill_history(session)
-    }
-
-    evaluate_reconciliation_outcome(results)
-  end
-
-  # 結果集約: 全成功 / 部分失敗 / 全失敗の 3 経路に振り分ける.
-  # - 全成功: 何もせず続行
-  # - 部分失敗: logger.warn でアラート + 続行(MVP 暫定 / 04_運用ガイド §6.2-2 で目視確認)
-  # - 全失敗: raise → bootstrap_session の rescue → cleanup_on_failure → mark_failed_to_start!
-  #
-  # R-8-3 #C-4 反映: failed 判定を明示化(nil / false / 例外 sentinel `:failed` を失敗扱い).
-  # 各 reconcile_* の戻り値 contract は「成功時は API レスポンス Hash, 失敗時は nil」だが,
-  # 将来 false / Symbol 戻り値に変わっても silent 見逃しを防ぐ.
-  RECONCILIATION_FAILURE_SENTINELS = [ nil, false, :failed ].freeze
-  private_constant :RECONCILIATION_FAILURE_SENTINELS
-
-  def evaluate_reconciliation_outcome(results)
-    failed = results.select { |_, v| RECONCILIATION_FAILURE_SENTINELS.include?(v) }.keys
-    total = results.size
-    failed_count = failed.size
-
-    return if failed_count.zero?
-
-    if failed_count == total
-      raise StandardError, "reconciliation all failed: #{failed.inspect}"
-    else
-      logger.warn(
-        "[LiveTradingWorker] reconciliation partially failed " \
-        "(#{failed_count}/#{total}): failed=#{failed.inspect}"
-      )
-    end
-  end
-
-  def reconcile_orders_pending(session)
-    response = order_endpoint.orders_pending(symbol: session.symbol)
-    # TODO(後続 phase): response["data"] から Exchange::Order upsert
-    response
-  rescue StandardError => e
-    logger.warn(
-      "[LiveTradingWorker] reconcile_orders_pending failed: #{e.class.name}: #{sanitize_log_message(e.message)}"
-    )
-    nil
-  end
-
-  def reconcile_orders_plan_pending(session)
-    response = order_endpoint.orders_plan_pending(symbol: session.symbol)
-    # TODO(後続 phase): response["data"] から Exchange::AlgoOrder upsert
-    #   + 各 plan_id について order_endpoint.plan_sub_order(plan_id:) を呼んで sub-order を反映
-    response
-  rescue StandardError => e
-    logger.warn(
-      "[LiveTradingWorker] reconcile_orders_plan_pending failed: #{e.class.name}: #{sanitize_log_message(e.message)}"
-    )
-    nil
-  end
-
-  # 直近 24h の履歴 plan order を取得する(MVP デフォルト範囲 / 設計書明示なしのため固定値).
-  RECONCILE_PLAN_HISTORY_LOOKBACK_MS = 24 * 60 * 60 * 1000
-  private_constant :RECONCILE_PLAN_HISTORY_LOOKBACK_MS
-
-  def reconcile_orders_plan_history(session)
-    end_time = (Time.current.to_f * 1000).to_i
-    start_time = end_time - RECONCILE_PLAN_HISTORY_LOOKBACK_MS
-
-    response = order_endpoint.orders_plan_history(
-      symbol: session.symbol, start_time: start_time, end_time: end_time
-    )
-    # TODO(後続 phase): response["data"] から AlgoOrder 履歴 upsert
-    response
-  rescue StandardError => e
-    logger.warn(
-      "[LiveTradingWorker] reconcile_orders_plan_history failed: #{e.class.name}: #{sanitize_log_message(e.message)}"
-    )
-    nil
-  end
-
-  def reconcile_position_all(session)
-    response = position_endpoint.position_all(margin_coin: session.margin_coin, symbol: session.symbol)
-    # TODO(後続 phase): response["data"] から Exchange::PositionSnapshot upsert
-    response
-  rescue StandardError => e
-    logger.warn(
-      "[LiveTradingWorker] reconcile_position_all failed: #{e.class.name}: #{sanitize_log_message(e.message)}"
-    )
-    nil
-  end
-
-  # Phase 3.4-pre-4 追加: 直近 24h の約定履歴を取得(WS fill push 欠落分の補完).
-  # account_endpoint.fill_history(start_time:, end_time:, symbol:)で REST 取得.
-  def reconcile_fill_history(session)
-    end_time = (Time.current.to_f * 1000).to_i
-    start_time = end_time - RECONCILE_PLAN_HISTORY_LOOKBACK_MS
-
-    response = account_endpoint.fill_history(
-      symbol: session.symbol, start_time: start_time, end_time: end_time
-    )
-    # TODO(後続 phase): response["data"] から Exchange::Fill upsert + Trade 集計反映
-    response
-  rescue StandardError => e
-    logger.warn(
-      "[LiveTradingWorker] reconcile_fill_history failed: #{e.class.name}: #{sanitize_log_message(e.message)}"
-    )
-    nil
+    @reconciliation_coordinator.run_for_bootstrap(session)
   end
 
   # step 12: SessionState 復元(初回起動時は空 state_data で create, 再起動時は既存をロード).
@@ -1083,6 +958,17 @@ class LiveTradingWorker
   # R-8-5: state_cache が DI されていない場合の lazy init(perform 内で呼ばれる).
   def state_cache_lazy
     @state_cache || Domain::LiveTradingStateCache.new(logger: logger)
+  end
+
+  # R-8-6: reconciliation_coordinator が DI されていない場合の lazy init.
+  # endpoint 依存は lazy 解決(REST client 認証情報の評価を perform 時点まで遅延).
+  def reconciliation_coordinator_lazy
+    @reconciliation_coordinator || Domain::ReconciliationCoordinator.new(
+      order_endpoint: order_endpoint,
+      position_endpoint: position_endpoint,
+      account_endpoint: account_endpoint,
+      logger: logger
+    )
   end
 
   # WS factory は Proc を保持し step 9/10 内で `.call` で遅延生成する
