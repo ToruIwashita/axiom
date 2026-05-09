@@ -845,7 +845,7 @@ RSpec.describe LiveTradingWorker do
       end
     end
 
-    describe "Public WS callback(3.3-10b)" do
+    describe "Public WS callback" do
       let(:candle1m_sub) do
         Infrastructure::BitgetPublicWsSubscription.new(
           channel: "candle1m", inst_type: "USDT-FUTURES", inst_id: "BTCUSDT"
@@ -993,7 +993,7 @@ RSpec.describe LiveTradingWorker do
       end
     end
 
-    describe "balance / position memory cache(R-8-5 で Domain::LiveTradingStateCache に抽出済)" do
+    describe "balance / position memory cache(Domain::LiveTradingStateCache 委譲)" do
       let(:state_cache) { Domain::LiveTradingStateCache.new(logger: logger) }
 
       before do
@@ -1098,7 +1098,7 @@ RSpec.describe LiveTradingWorker do
       end
     end
 
-    describe "Private WS callback(3.3-10c)" do
+    describe "Private WS callback" do
       # Result::Push は private constant のため duck typing で double 化
       let(:result_double) { double("Push", algo_anomaly?: false) }
 
@@ -1321,7 +1321,7 @@ RSpec.describe LiveTradingWorker do
       end
     end
 
-    describe "run_runner_child_for_tick(3.3-10d)" do
+    describe "run_runner_child_for_tick" do
       let(:spawner) { instance_double(Infrastructure::StrategyRunnerChildSpawner) }
       let(:ai_filter_service) { instance_double(Domain::AiFilterService) }
       let(:risk_guard_service) { instance_double(Domain::RiskGuardService) }
@@ -1565,7 +1565,7 @@ RSpec.describe LiveTradingWorker do
       end
     end
 
-    describe "heartbeat / lease renew(3.3-12)" do
+    describe "heartbeat / lease renew" do
       before do
         worker.send(:instance_variable_set, :@session, session)
         worker.send(:instance_variable_set, :@lease, lease)
@@ -1722,7 +1722,7 @@ RSpec.describe LiveTradingWorker do
     end
 
     # R-7 #C 反映: background thread leak 対策の sweep
-    describe "background thread sweep(R-7 #C)" do
+    describe "background thread sweep" do
       before do
         worker.send(:instance_variable_set, :@session, session)
         worker.send(:instance_variable_set, :@background_threads, [])
@@ -1800,7 +1800,7 @@ RSpec.describe LiveTradingWorker do
       end
     end
 
-    describe "WS reconnect detection + reconciliation 再実行(3.3-13)" do
+    describe "WS reconnect detection + reconciliation 再実行" do
       before do
         worker.send(:instance_variable_set, :@session, session)
         worker.send(:instance_variable_set, :@public_ws, public_ws)

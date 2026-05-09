@@ -143,7 +143,7 @@ RSpec.describe Domain::ReconciliationCoordinator do
       end
     end
 
-    context "false / :failed sentinel(R-8-3 #C-4)" do
+    context "false / :failed sentinel が混在" do
       let(:results) do
         {
           orders_pending: false,
