@@ -1065,6 +1065,28 @@ RSpec.describe LiveTradingWorker do
           worker.send(:update_cached_balance_from_push, nil)
           expect(worker.instance_variable_get(:@cached_balance)).to eq(BigDecimal("100"))
         end
+
+        # R-8-3 #C-3: BigDecimal nil/不正値ガード
+        it "available が nil の場合は cache 不変" do
+          worker.instance_variable_set(:@cached_balance, BigDecimal("100"))
+          data = [ { "marginCoin" => "USDT", "available" => nil } ]
+          worker.send(:update_cached_balance_from_push, data)
+          expect(worker.instance_variable_get(:@cached_balance)).to eq(BigDecimal("100"))
+        end
+
+        it "available が空文字の場合は cache 不変" do
+          worker.instance_variable_set(:@cached_balance, BigDecimal("100"))
+          data = [ { "marginCoin" => "USDT", "available" => "" } ]
+          worker.send(:update_cached_balance_from_push, data)
+          expect(worker.instance_variable_get(:@cached_balance)).to eq(BigDecimal("100"))
+        end
+
+        it "available が不正な文字列の場合は cache 不変" do
+          worker.instance_variable_set(:@cached_balance, BigDecimal("100"))
+          data = [ { "marginCoin" => "USDT", "available" => "abc" } ]
+          worker.send(:update_cached_balance_from_push, data)
+          expect(worker.instance_variable_get(:@cached_balance)).to eq(BigDecimal("100"))
+        end
       end
 
       describe "#update_cached_position_from_push(positions WS push)" do
@@ -1090,7 +1112,43 @@ RSpec.describe LiveTradingWorker do
           original = worker.instance_variable_get(:@cached_position)
           data = [ { "symbol" => "ETHUSDT", "holdSide" => "short", "total" => "1.0", "openPriceAvg" => "3000" } ]
           worker.send(:update_cached_position_from_push, data)
-          expect(worker.instance_variable_get(:@cached_position)).to eq(original)
+          expect(worker.instance_variable_get(:@cached_position)).to equal(original)
+        end
+
+        # R-8-3 #C-2: holdSide allow-list ガード
+        it "holdSide が `long` / `short` 以外の場合は cache 不変 + logger.warn" do
+          original = worker.instance_variable_get(:@cached_position)
+          data = [ { "symbol" => "BTCUSDT", "holdSide" => "net", "total" => "0.05", "openPriceAvg" => "50000" } ]
+          worker.send(:update_cached_position_from_push, data)
+          expect(worker.instance_variable_get(:@cached_position)).to equal(original)
+          expect(logger).to have_received(:warn).with(/unknown holdSide=.*net/)
+        end
+
+        # R-8-3 #C-3: BigDecimal nil/不正値ガード
+        it "total が nil の場合は cache 不変" do
+          original = worker.instance_variable_get(:@cached_position)
+          data = [ { "symbol" => "BTCUSDT", "holdSide" => "long", "total" => nil, "openPriceAvg" => "50000" } ]
+          worker.send(:update_cached_position_from_push, data)
+          expect(worker.instance_variable_get(:@cached_position)).to equal(original)
+        end
+
+        it "openPriceAvg が空文字の場合は cache 不変" do
+          original = worker.instance_variable_get(:@cached_position)
+          data = [ { "symbol" => "BTCUSDT", "holdSide" => "long", "total" => "0.05", "openPriceAvg" => "" } ]
+          worker.send(:update_cached_position_from_push, data)
+          expect(worker.instance_variable_get(:@cached_position)).to equal(original)
+        end
+
+        it "data が nil の場合は no-op" do
+          original = worker.instance_variable_get(:@cached_position)
+          worker.send(:update_cached_position_from_push, nil)
+          expect(worker.instance_variable_get(:@cached_position)).to equal(original)
+        end
+
+        it "data が空配列の場合は no-op" do
+          original = worker.instance_variable_get(:@cached_position)
+          worker.send(:update_cached_position_from_push, [])
+          expect(worker.instance_variable_get(:@cached_position)).to equal(original)
         end
       end
 
@@ -1635,6 +1693,18 @@ RSpec.describe LiveTradingWorker do
               .to raise_error(StandardError, /reconciliation all failed/)
           end
         end
+
+        # R-8-3 #C-4: failed 判定明示化(nil / false / :failed sentinel を失敗扱い)
+        context "false / :failed sentinel が混在(将来 contract 変更耐性)" do
+          let(:results) do
+            { orders_pending: false, orders_plan_pending: :failed, orders_plan_history: {}, position_all: {}, fill_history: {} }
+          end
+
+          it "false / :failed を failed として扱い部分失敗 warn 出力" do
+            expect { worker.send(:evaluate_reconciliation_outcome, results) }.not_to raise_error
+            expect(logger).to have_received(:warn).with(/partially failed \(2\/5\)/)
+          end
+        end
       end
 
       describe "全失敗時の bootstrap 中断統合" do
@@ -2005,6 +2075,8 @@ RSpec.describe LiveTradingWorker do
         worker.send(:instance_variable_set, :@private_ws, private_ws)
         worker.send(:instance_variable_set, :@last_public_ws_reconnect_count, 0)
         worker.send(:instance_variable_set, :@last_private_ws_reconnect_count, 0)
+        # R-8-3 #C-1: cross-thread mutex 初期化
+        worker.send(:instance_variable_set, :@ws_reconnect_count_mutex, Mutex.new)
         # run_in_db_thread を同期化(spec hang 回避)
         allow(worker).to receive(:run_in_db_thread) do |_label, &block|
           block.call

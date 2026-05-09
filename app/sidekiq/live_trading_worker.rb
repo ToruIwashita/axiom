@@ -152,6 +152,8 @@ class LiveTradingWorker
     @anomaly_reconcile_in_progress = false
     @anomaly_reconcile_mutex = Mutex.new
     @last_anomaly_reconcile_at = nil
+    # R-8-3 #C-1: WS reconnect_count の cross-thread mutex(main loop read / run_in_db_thread block write).
+    @ws_reconnect_count_mutex = Mutex.new
 
     bootstrap_session(session_id)
     enter_main_loop
@@ -223,13 +225,19 @@ class LiveTradingWorker
   # WS Client の reconnect_count から増分を検知し, 増えていれば reconciliation を再実行する
   # (Phase 1.3 引き継ぎ #13: 24h 切断後 reconciliation / 設計書 02_§5.2.6).
   # 別 thread + AR pool で実行(WS callback thread は触らないため main loop thread から起動).
+  #
+  # R-8-3 #C-1 反映: @last_*_reconnect_count の cross-thread 読書きを @anomaly_reconcile_mutex 流用で
+  # 保護する(別 mutex を増やすと初期化箇所が増えるため流用 / read main loop / write run_in_db_thread block).
   def detect_ws_reconnect_and_reconcile
     return unless @session
 
     public_count = ws_reconnect_count(@public_ws)
     private_count = ws_reconnect_count(@private_ws)
-    public_reconnected = public_count > @last_public_ws_reconnect_count
-    private_reconnected = private_count > @last_private_ws_reconnect_count
+    last_public, last_private = @ws_reconnect_count_mutex.synchronize do
+      [ @last_public_ws_reconnect_count, @last_private_ws_reconnect_count ]
+    end
+    public_reconnected = public_count > last_public
+    private_reconnected = private_count > last_private
 
     return unless public_reconnected || private_reconnected
 
@@ -248,8 +256,11 @@ class LiveTradingWorker
       run_reconciliation_after_reconnect(session_reloaded)
       # R-6 #10 反映: count 更新は reconciliation 完了後に行う.
       # thread 例外時は count 未更新 → 次 main loop iteration で再試行可能(carry 漏れ防止).
-      @last_public_ws_reconnect_count = public_count
-      @last_private_ws_reconnect_count = private_count
+      # R-8-3 #C-1: mutex 保護で main loop thread の read と整合性確保.
+      @ws_reconnect_count_mutex.synchronize do
+        @last_public_ws_reconnect_count = public_count
+        @last_private_ws_reconnect_count = private_count
+      end
     end
   end
 
@@ -871,9 +882,15 @@ class LiveTradingWorker
     end
   end
 
-  # Phase 3.4-pre-1: positions push の最新 row から @cached_position を更新.
+  # Phase 3.4-pre-1 + R-8-3 反映: positions push の最新 row から @cached_position を更新.
   # data 形式: [{"symbol":..., "holdSide": "long"|"short", "total": "0.01", "openPriceAvg": "50000", ...}, ...]
   # session.symbol に該当する row のみ反映(複数 symbol push の中から自セッションを抽出).
+  #
+  # R-8-3 #C-2: holdSide allow-list ガード(`long` / `short` 以外は cache 不変 + warn).
+  # R-8-3 #C-3: BigDecimal nil/不正値ガード(parse_big_decimal helper 経由).
+  ALLOWED_POSITION_SIDES = %w[long short].freeze
+  private_constant :ALLOWED_POSITION_SIDES
+
   def update_cached_position_from_push(data)
     return unless data.is_a?(Array) && @session
 
@@ -881,12 +898,21 @@ class LiveTradingWorker
     return unless row
 
     side_str = row["holdSide"]
-    size = BigDecimal(row.fetch("total", "0").to_s)
-    entry = BigDecimal(row.fetch("openPriceAvg", "0").to_s)
+    unless ALLOWED_POSITION_SIDES.include?(side_str)
+      logger.warn(
+        "[LiveTradingWorker] update_cached_position_from_push: " \
+        "unknown holdSide=#{side_str.inspect} (cache unchanged)"
+      )
+      return
+    end
+
+    size = parse_big_decimal(row["total"])
+    entry = parse_big_decimal(row["openPriceAvg"])
+    return if size.nil? || entry.nil? # R-8-3 #C-3: 不正値時は cache 不変
 
     @cached_state_mutex.synchronize do
       @cached_position = Domain::PositionValueObject.new(
-        side: side_str&.to_sym,
+        side: side_str.to_sym,
         size: size,
         entry_price: entry
       )
@@ -895,6 +921,18 @@ class LiveTradingWorker
     logger.warn(
       "[LiveTradingWorker] update_cached_position_from_push failed: #{e.class.name}: #{sanitize_log_message(e.message)}"
     )
+  end
+
+  # R-8-3 #C-3 反映: BigDecimal の nil / 空文字列 / 不正値ガード共通 helper.
+  # 返り値 nil で「parse 不可」を表現し,呼出側で cache 更新 skip を判定する.
+  def parse_big_decimal(value)
+    return nil if value.nil?
+    str = value.to_s
+    return nil if str.empty?
+
+    BigDecimal(str)
+  rescue ArgumentError
+    nil
   end
 
   # positions-history push: 履歴系の PositionSnapshot 記録(close 時等).
@@ -930,11 +968,12 @@ class LiveTradingWorker
     row = data.find { |r| r.is_a?(Hash) && r["marginCoin"] == @session.margin_coin }
     return unless row
 
-    available = row["available"]
-    return if available.nil?
+    # R-8-3 #C-3: BigDecimal nil / 不正値ガード(parse_big_decimal 経由).
+    parsed = parse_big_decimal(row["available"])
+    return if parsed.nil?
 
     @cached_state_mutex.synchronize do
-      @cached_balance = BigDecimal(available.to_s)
+      @cached_balance = parsed
     end
   rescue StandardError => e
     logger.warn(
@@ -1003,8 +1042,15 @@ class LiveTradingWorker
   # - 全成功: 何もせず続行
   # - 部分失敗: logger.warn でアラート + 続行(MVP 暫定 / 04_運用ガイド §6.2-2 で目視確認)
   # - 全失敗: raise → bootstrap_session の rescue → cleanup_on_failure → mark_failed_to_start!
+  #
+  # R-8-3 #C-4 反映: failed 判定を明示化(nil / false / 例外 sentinel `:failed` を失敗扱い).
+  # 各 reconcile_* の戻り値 contract は「成功時は API レスポンス Hash, 失敗時は nil」だが,
+  # 将来 false / Symbol 戻り値に変わっても silent 見逃しを防ぐ.
+  RECONCILIATION_FAILURE_SENTINELS = [ nil, false, :failed ].freeze
+  private_constant :RECONCILIATION_FAILURE_SENTINELS
+
   def evaluate_reconciliation_outcome(results)
-    failed = results.select { |_, v| v.nil? }.keys
+    failed = results.select { |_, v| RECONCILIATION_FAILURE_SENTINELS.include?(v) }.keys
     total = results.size
     failed_count = failed.size
 
