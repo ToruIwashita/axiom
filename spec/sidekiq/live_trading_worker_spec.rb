@@ -739,53 +739,94 @@ RSpec.describe LiveTradingWorker do
       end
 
       # Phase 3.4-pre-8: SECRET_PATTERN JSON 拡張 + 日本語誤マスク boundary
-      describe "#sanitize_failure_reason(R-6 #13 + Phase 3.4-pre-8)" do
+      describe "#sanitize_log_message" do
         it "key=value 形式の credentials を [FILTERED] に置換する" do
           input = "Faraday error: api_key=ABC123XYZ failed"
-          expect(worker.send(:sanitize_failure_reason, input))
+          expect(worker.send(:sanitize_log_message, input))
             .to eq("Faraday error: api_key=[FILTERED] failed")
         end
 
         it "JSON 形式の credentials value を [FILTERED] に置換する(key 名は保持)" do
           input = '{"api_key": "ABC123", "other": "value"}'
-          expect(worker.send(:sanitize_failure_reason, input))
+          expect(worker.send(:sanitize_log_message, input))
             .to eq('{"api_key": "[FILTERED]", "other": "value"}')
         end
 
         it "JSON 形式 camelCase(apiKey / secretKey)も対応" do
           input = '{"apiKey": "ABC", "secretKey": "XYZ"}'
-          expect(worker.send(:sanitize_failure_reason, input))
+          expect(worker.send(:sanitize_log_message, input))
             .to eq('{"apiKey": "[FILTERED]", "secretKey": "[FILTERED]"}')
         end
 
         it "passphrase / signature / token も同様に対応" do
           input = 'passphrase=secret123 token=abc456 signature=xyz789'
-          result = worker.send(:sanitize_failure_reason, input)
+          result = worker.send(:sanitize_log_message, input)
           expect(result).to include("passphrase=[FILTERED]")
           expect(result).to include("token=[FILTERED]")
           expect(result).to include("signature=[FILTERED]")
         end
 
+        # R-8 反映: 別フィールド名対応
+        it "authorization / bearer / x-api-key / private_key も対応" do
+          input = "authorization=Bearer xyz bearer=abc x-api-key=key123 private_key=PEM"
+          # ` ` で連続性を保つ。実際には `=` 後のトークンで sanitize される
+          result = worker.send(:sanitize_log_message, input)
+          expect(result).to include("authorization=[FILTERED]")
+          expect(result).to include("bearer=[FILTERED]")
+          expect(result).to include("x-api-key=[FILTERED]")
+          expect(result).to include("private_key=[FILTERED]")
+        end
+
+        # R-8 反映: Bitget HTTP header(ACCESS-KEY 等)対応
+        it "Bitget HTTP header 形式(access-key / access-sign / access-passphrase)も対応" do
+          input = "ACCESS-KEY=abc ACCESS-SIGN=xyz ACCESS-PASSPHRASE=pass"
+          result = worker.send(:sanitize_log_message, input)
+          expect(result).to include("ACCESS-KEY=[FILTERED]")
+          expect(result).to include("ACCESS-SIGN=[FILTERED]")
+          expect(result).to include("ACCESS-PASSPHRASE=[FILTERED]")
+        end
+
+        # R-8 反映: SECRET_JSON_PATTERN escape quote 対応
+        it "JSON value 内に escape された quote(\\\\\\\")を含む値も全 value マスク" do
+          input = '{"api_key": "ABC\\"DEF"}'
+          expect(worker.send(:sanitize_log_message, input))
+            .to eq('{"api_key": "[FILTERED]"}')
+        end
+
+        # R-8 反映: URL parameter 形式の `&` 終端
+        it "URL parameter 形式(?api_key=ABC&other=val)で `&` を終端と認識する" do
+          input = "?api_key=ABC123&other=value"
+          expect(worker.send(:sanitize_log_message, input))
+            .to eq("?api_key=[FILTERED]&other=value")
+        end
+
         # 日本語誤マスク boundary spec(誤検出防止)
         it "通常の日本語テキスト(passphrase は秘密です)は誤マスクしない(= 前置き必須)" do
           input = "passphrase は秘密です"
-          expect(worker.send(:sanitize_failure_reason, input)).to eq("passphrase は秘密です")
+          expect(worker.send(:sanitize_log_message, input)).to eq("passphrase は秘密です")
         end
 
         it "key 名を含むがコンテキストが違う文(設計書の signature について)は誤マスクしない" do
           input = "設計書の signature について追記する"
-          expect(worker.send(:sanitize_failure_reason, input))
+          expect(worker.send(:sanitize_log_message, input))
             .to eq("設計書の signature について追記する")
         end
 
         it "ws_disconnected reason 形式は影響を受けない" do
           input = "ws_disconnected: public_ws=true private_ws=false"
-          expect(worker.send(:sanitize_failure_reason, input))
+          expect(worker.send(:sanitize_log_message, input))
             .to eq("ws_disconnected: public_ws=true private_ws=false")
         end
 
         it "nil 入力でも raise しない(空文字返却)" do
-          expect(worker.send(:sanitize_failure_reason, nil)).to eq("")
+          expect(worker.send(:sanitize_log_message, nil)).to eq("")
+        end
+
+        # 後方互換 alias の確認
+        it "sanitize_failure_reason alias でも同じ結果を返す" do
+          input = "api_key=ABC123"
+          expect(worker.send(:sanitize_failure_reason, input))
+            .to eq(worker.send(:sanitize_log_message, input))
         end
       end
 

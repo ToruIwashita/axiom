@@ -40,21 +40,39 @@ class LiveTradingWorker
   # background thread sweep 周期(秒). R-7 #C 反映: 24h 稼働で @background_threads に
   # 完了済 thread が蓄積するメモリリークを定期的に reject! で解消する.
   BACKGROUND_THREAD_SWEEP_INTERVAL_SECONDS = 60
-  # R-6 #13 + Phase 3.4-pre-8 反映: failure_reason / log メッセージから credentials が漏れる経路を防ぐ
+  # R-6 #13 + Phase 3.4-pre-8 + R-8 反映: failure_reason / log メッセージから credentials が漏れる経路を防ぐ.
   # Faraday error / Bitget API レスポンス msg に api_key 等が echo された場合の defense-in-depth.
+  #
+  # 対応 key 名(snake_case + camelCase / Bitget 仕様):
+  #   - api_key / apiKey
+  #   - secret_key / secretKey
+  #   - passphrase
+  #   - signature / sign
+  #   - token / accessToken / access_token
+  #   - access-key / access-sign / access-passphrase / access-timestamp(Bitget HTTP header)
+  #   - authorization / bearer / x-api-key / private_key
+  #
   # 2 形式に対応:
   #   1. key=value 形式(`api_key=ABC123` など)→ `api_key=[FILTERED]` に置換
+  #      区切り文字も capture して `\1\2[FILTERED]` で形式保持
   #   2. JSON 形式(`"api_key": "ABC123"` など)→ value 部分のみ `[FILTERED]` に置換(key 名は保持)
-  # `=` または `: "..."` の context が必須のため `passphrase は秘密です` のような通常テキストは誤マスクしない.
-  SECRET_PATTERN = /\b(api_key|secret_key|passphrase|signature|token)\s*=\s*[^\s,;}]+/i
-  # JSON 形式: capture 1 = `"key": "` prefix / capture 2 = closing `"` のため
-  # `\1[FILTERED]\2` で value 部分のみ置換(可変長 lookbehind 非対応の Onigmo 制限への対応).
-  SECRET_JSON_PATTERN = /("(?:api_?key|secret_?key|passphrase|signature|token)"\s*:\s*")[^"]*(")/i
+  #      escape 対応: `(?:[^"\\]|\\.)*` で `"api_key": "ABC\"DEF"` のようなケースも全 value マスク
+  #
+  # `=` / `: "..."` の context が必須のため `passphrase は秘密です` のような通常テキストは誤マスクしない.
+  # 別境界文字(`&` / `]` / `"`)も SECRET_PATTERN の終端に含めて URL parameter 形式 / JSON 隣接で誤拡張しないよう防御.
+  SECRET_KEY_NAMES = %w[
+    api_?key secret_?key passphrase signature sign
+    token access_?token bearer authorization
+    access-key access-sign access-passphrase
+    private_?key x-api-key
+  ].join("|").freeze
+  SECRET_PATTERN = /\b(#{SECRET_KEY_NAMES})(\s*=\s*)[^\s,;}&\]"]+/i
+  SECRET_JSON_PATTERN = /("(?:#{SECRET_KEY_NAMES})"\s*:\s*")(?:[^"\\]|\\.)*(")/i
 
   private_constant :DEFAULT_MAIN_LOOP_POLL_INTERVAL, :HEARTBEAT_INTERVAL_SECONDS,
                    :LEASE_RENEW_INTERVAL_SECONDS, :WS_DISCONNECT_GRACE_SECONDS,
                    :BACKGROUND_THREAD_SWEEP_INTERVAL_SECONDS,
-                   :SECRET_PATTERN, :SECRET_JSON_PATTERN
+                   :SECRET_KEY_NAMES, :SECRET_PATTERN, :SECRET_JSON_PATTERN
 
   # @param process_manager [Domain::LiveTradingProcessManager]
   # @param clock_sync [Infrastructure::BitgetClockSync, nil] step 5 で server_time 同期に利用
@@ -258,7 +276,7 @@ class LiveTradingWorker
     @last_heartbeat_at = now
   rescue StandardError => e
     logger.warn(
-      "[LiveTradingWorker] pulse_heartbeat! failed: #{e.class.name}: #{e.message}"
+      "[LiveTradingWorker] pulse_heartbeat! failed: #{e.class.name}: #{sanitize_log_message(e.message)}"
     )
   end
 
@@ -275,7 +293,7 @@ class LiveTradingWorker
     @last_lease_renew_at = now
   rescue StandardError => e
     logger.warn(
-      "[LiveTradingWorker] renew_lease! failed: #{e.class.name}: #{e.message}"
+      "[LiveTradingWorker] renew_lease! failed: #{e.class.name}: #{sanitize_log_message(e.message)}"
     )
   end
 
@@ -353,7 +371,7 @@ class LiveTradingWorker
   rescue StandardError => release_error
     logger.warn(
       "[LiveTradingWorker] lease.release! failed during #{context}: " \
-      "#{release_error.class.name}: #{release_error.message}"
+      "#{release_error.class.name}: #{sanitize_log_message(release_error.message)}"
     )
   end
 
@@ -423,7 +441,7 @@ class LiveTradingWorker
     end
   rescue StandardError => e
     logger.warn(
-      "[LiveTradingWorker] fetch_initial_balance failed: #{e.class.name}: #{e.message}"
+      "[LiveTradingWorker] fetch_initial_balance failed: #{e.class.name}: #{sanitize_log_message(e.message)}"
     )
   end
 
@@ -457,7 +475,7 @@ class LiveTradingWorker
   rescue StandardError => e
     logger.warn(
       "[LiveTradingWorker] handle_public_ws_message failed in channel=#{sub.channel}: " \
-      "#{e.class.name}: #{e.message}"
+      "#{e.class.name}: #{sanitize_log_message(e.message)}"
     )
   end
 
@@ -538,7 +556,7 @@ class LiveTradingWorker
     rescue StandardError => e
       logger.error(
         "[LiveTradingWorker] background task '#{label}' failed: " \
-        "#{e.class.name}: #{e.message}"
+        "#{e.class.name}: #{sanitize_log_message(e.message)}"
       )
     end
 
@@ -655,7 +673,7 @@ class LiveTradingWorker
   rescue StandardError => e
     logger.warn(
       "[LiveTradingWorker] process_order_intent failed (intent=#{intent.inspect}): " \
-      "#{e.class.name}: #{e.message}"
+      "#{e.class.name}: #{sanitize_log_message(e.message)}"
     )
   end
 
@@ -737,7 +755,7 @@ class LiveTradingWorker
   rescue StandardError => e
     logger.warn(
       "[LiveTradingWorker] handle_private_ws_message failed in channel=#{sub.channel}: " \
-      "#{e.class.name}: #{e.message}"
+      "#{e.class.name}: #{sanitize_log_message(e.message)}"
     )
   end
 
@@ -759,9 +777,11 @@ class LiveTradingWorker
   # exchange 側との状態整合を即時確認する(reconnect 経路と同じ reconcile 5 件を走らせる).
   def handle_orders_algo_message(data, result)
     if result.respond_to?(:algo_anomaly?) && result.algo_anomaly?
+      # R-8 反映: data.inspect の sanitize 適用 + 巨大 data の inspect 抑制
+      data_repr = data.is_a?(Array) ? "rows=#{data.size}" : data.class.name
       logger.warn(
         "[LiveTradingWorker] orders-algo anomaly detected (state outside known set): " \
-        "data=#{data.inspect}"
+        "data=#{sanitize_log_message(data_repr)}"
       )
       trigger_reconciliation_for_algo_anomaly
     end
@@ -833,7 +853,7 @@ class LiveTradingWorker
     end
   rescue StandardError => e
     logger.warn(
-      "[LiveTradingWorker] update_cached_position_from_push failed: #{e.class.name}: #{e.message}"
+      "[LiveTradingWorker] update_cached_position_from_push failed: #{e.class.name}: #{sanitize_log_message(e.message)}"
     )
   end
 
@@ -878,7 +898,7 @@ class LiveTradingWorker
     end
   rescue StandardError => e
     logger.warn(
-      "[LiveTradingWorker] update_cached_balance_from_push failed: #{e.class.name}: #{e.message}"
+      "[LiveTradingWorker] update_cached_balance_from_push failed: #{e.class.name}: #{sanitize_log_message(e.message)}"
     )
   end
 
@@ -966,7 +986,7 @@ class LiveTradingWorker
     response
   rescue StandardError => e
     logger.warn(
-      "[LiveTradingWorker] reconcile_orders_pending failed: #{e.class.name}: #{e.message}"
+      "[LiveTradingWorker] reconcile_orders_pending failed: #{e.class.name}: #{sanitize_log_message(e.message)}"
     )
     nil
   end
@@ -978,7 +998,7 @@ class LiveTradingWorker
     response
   rescue StandardError => e
     logger.warn(
-      "[LiveTradingWorker] reconcile_orders_plan_pending failed: #{e.class.name}: #{e.message}"
+      "[LiveTradingWorker] reconcile_orders_plan_pending failed: #{e.class.name}: #{sanitize_log_message(e.message)}"
     )
     nil
   end
@@ -998,7 +1018,7 @@ class LiveTradingWorker
     response
   rescue StandardError => e
     logger.warn(
-      "[LiveTradingWorker] reconcile_orders_plan_history failed: #{e.class.name}: #{e.message}"
+      "[LiveTradingWorker] reconcile_orders_plan_history failed: #{e.class.name}: #{sanitize_log_message(e.message)}"
     )
     nil
   end
@@ -1009,7 +1029,7 @@ class LiveTradingWorker
     response
   rescue StandardError => e
     logger.warn(
-      "[LiveTradingWorker] reconcile_position_all failed: #{e.class.name}: #{e.message}"
+      "[LiveTradingWorker] reconcile_position_all failed: #{e.class.name}: #{sanitize_log_message(e.message)}"
     )
     nil
   end
@@ -1027,7 +1047,7 @@ class LiveTradingWorker
     response
   rescue StandardError => e
     logger.warn(
-      "[LiveTradingWorker] reconcile_fill_history failed: #{e.class.name}: #{e.message}"
+      "[LiveTradingWorker] reconcile_fill_history failed: #{e.class.name}: #{sanitize_log_message(e.message)}"
     )
     nil
   end
@@ -1160,15 +1180,20 @@ class LiveTradingWorker
     )
   end
 
-  # failure_reason / log message から credentials を [FILTERED] に置換する.
+  # failure_reason / log message から credentials を [FILTERED] に置換する共通 helper.
+  # R-8 反映: log 出力経路全般に適用するため sanitize_failure_reason → sanitize_log_message にリネーム.
+  # 適用箇所: failure_reason / data.inspect / e.message / その他 log 出力対象すべて.
   # Faraday error や Bitget API レスポンスに api_key 等が含まれる場合の defense-in-depth.
-  # Phase 3.4-pre-8: JSON 形式 `"key": "value"` も value 部分のみ置換対応.
   # 順序: JSON 形式を先に置換 → key=value 形式を後で置換(衝突回避).
-  def sanitize_failure_reason(reason)
-    reason.to_s
-          .gsub(SECRET_JSON_PATTERN, '\1[FILTERED]\2')
-          .gsub(SECRET_PATTERN, '\1=[FILTERED]')
+  # SECRET_PATTERN の 2 番目 capture group(区切り文字 `\s*=\s*`)を `\2` で保持して原形を残す.
+  def sanitize_log_message(message)
+    message.to_s
+           .gsub(SECRET_JSON_PATTERN, '\1[FILTERED]\2')
+           .gsub(SECRET_PATTERN, '\1\2[FILTERED]')
   end
+
+  # 後方互換 alias(failure_reason 専用呼出は sanitize_log_message を経由する).
+  alias_method :sanitize_failure_reason, :sanitize_log_message
 
   # WS disconnect で例外発生時に他の cleanup を妨げないよう logger.warn に落とす.
   # context は呼出元(cleanup_on_failure / finalize_main_loop)を logger メッセージで追跡可能にする.
@@ -1180,7 +1205,7 @@ class LiveTradingWorker
   rescue StandardError => disconnect_error
     logger.warn(
       "[LiveTradingWorker] #{name}.disconnect failed during #{context}: " \
-      "#{disconnect_error.class.name}: #{disconnect_error.message}"
+      "#{disconnect_error.class.name}: #{sanitize_log_message(disconnect_error.message)}"
     )
   end
 end
