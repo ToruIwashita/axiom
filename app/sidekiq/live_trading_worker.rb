@@ -40,6 +40,9 @@ class LiveTradingWorker
   # background thread sweep 周期(秒). R-7 #C 反映: 24h 稼働で @background_threads に
   # 完了済 thread が蓄積するメモリリークを定期的に reject! で解消する.
   BACKGROUND_THREAD_SWEEP_INTERVAL_SECONDS = 60
+  # algo anomaly trigger debounce 期間(秒). R-8-2 反映: WS push burst で reconciliation thread が
+  # 大量起動し AR pool 枯渇 / Bitget rate limit 抵触するのを防ぐ.同期間中は in-progress フラグでスキップ.
+  ALGO_ANOMALY_RECONCILE_DEBOUNCE_SECONDS = 30
   # R-6 #13 + Phase 3.4-pre-8 + R-8 反映: failure_reason / log メッセージから credentials が漏れる経路を防ぐ.
   # Faraday error / Bitget API レスポンス msg に api_key 等が echo された場合の defense-in-depth.
   #
@@ -72,6 +75,7 @@ class LiveTradingWorker
   private_constant :DEFAULT_MAIN_LOOP_POLL_INTERVAL, :HEARTBEAT_INTERVAL_SECONDS,
                    :LEASE_RENEW_INTERVAL_SECONDS, :WS_DISCONNECT_GRACE_SECONDS,
                    :BACKGROUND_THREAD_SWEEP_INTERVAL_SECONDS,
+                   :ALGO_ANOMALY_RECONCILE_DEBOUNCE_SECONDS,
                    :SECRET_KEY_NAMES, :SECRET_PATTERN, :SECRET_JSON_PATTERN
 
   # @param process_manager [Domain::LiveTradingProcessManager]
@@ -144,6 +148,10 @@ class LiveTradingWorker
     @cached_balance = BigDecimal("0")
     @cached_position = Domain::PositionValueObject.new
     @cached_state_mutex = Mutex.new
+    # R-8-2: algo anomaly reconcile の debounce 用フラグ + 最終起動時刻.
+    @anomaly_reconcile_in_progress = false
+    @anomaly_reconcile_mutex = Mutex.new
+    @last_anomaly_reconcile_at = nil
 
     bootstrap_session(session_id)
     enter_main_loop
@@ -798,12 +806,44 @@ class LiveTradingWorker
   # Phase 3.4-pre-7 追加: algo_anomaly 検出時に reconciliation を別 thread で起動する.
   # WS callback thread から DB 操作 + REST 呼出を直接実行すると thread block 化するため
   # run_in_db_thread 経由で隔離.session.reload で main loop と同じ最新状態取得.
+  #
+  # R-8-2 反映: WS push burst での thread 爆発 / Bitget rate limit 抵触を防ぐため debounce 適用.
+  # - in-progress フラグで重複起動防止
+  # - 前回起動から ALGO_ANOMALY_RECONCILE_DEBOUNCE_SECONDS 未満なら skip
   def trigger_reconciliation_for_algo_anomaly
     return unless @session
+    return unless acquire_anomaly_reconcile_slot
 
     run_in_db_thread("reconcile_after_algo_anomaly") do
-      session_reloaded = LiveTrading::Session.find(@session.id)
-      run_reconciliation_after_reconnect(session_reloaded)
+      begin
+        session_reloaded = LiveTrading::Session.find(@session.id)
+        run_reconciliation_after_reconnect(session_reloaded)
+      ensure
+        release_anomaly_reconcile_slot
+      end
+    end
+  end
+
+  # debounce slot 取得: in-progress でなく前回から DEBOUNCE 以上経過していれば true.
+  # 取得時に in-progress = true + last_triggered_at 更新.
+  def acquire_anomaly_reconcile_slot
+    @anomaly_reconcile_mutex.synchronize do
+      return false if @anomaly_reconcile_in_progress
+
+      now = @monotonic_clock.call
+      if @last_anomaly_reconcile_at && (now - @last_anomaly_reconcile_at) < ALGO_ANOMALY_RECONCILE_DEBOUNCE_SECONDS
+        return false
+      end
+
+      @anomaly_reconcile_in_progress = true
+      @last_anomaly_reconcile_at = now
+      true
+    end
+  end
+
+  def release_anomaly_reconcile_slot
+    @anomaly_reconcile_mutex.synchronize do
+      @anomaly_reconcile_in_progress = false
     end
   end
 
