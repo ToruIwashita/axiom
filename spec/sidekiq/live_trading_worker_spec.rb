@@ -1382,12 +1382,75 @@ RSpec.describe LiveTradingWorker do
         end
 
         it "4 件の reconcile 系 method を順次呼び出す" do
-          expect(worker).to receive(:reconcile_orders_pending).with(session).ordered
-          expect(worker).to receive(:reconcile_orders_plan_pending).with(session).ordered
-          expect(worker).to receive(:reconcile_orders_plan_history).with(session).ordered
-          expect(worker).to receive(:reconcile_position_all).with(session).ordered
+          expect(worker).to receive(:reconcile_orders_pending).with(session).ordered.and_return("data" => [])
+          expect(worker).to receive(:reconcile_orders_plan_pending).with(session).ordered.and_return("data" => [])
+          expect(worker).to receive(:reconcile_orders_plan_history).with(session).ordered.and_return("data" => [])
+          expect(worker).to receive(:reconcile_position_all).with(session).ordered.and_return("data" => [])
 
           worker.send(:run_reconciliation, session)
+        end
+      end
+
+      # Phase 3.4-pre-3 反映: 結果集約 + 全失敗時 bootstrap 中断(設計 #6)
+      describe "#evaluate_reconciliation_outcome" do
+        context "全成功(全 reconcile 結果が non-nil)" do
+          let(:results) do
+            { orders_pending: {}, orders_plan_pending: {}, orders_plan_history: {}, position_all: {} }
+          end
+
+          it "raise しない / logger.warn も呼ばない" do
+            expect { worker.send(:evaluate_reconciliation_outcome, results) }.not_to raise_error
+            expect(logger).not_to have_received(:warn)
+          end
+        end
+
+        context "部分失敗(1 件失敗 / 3 件成功)" do
+          let(:results) do
+            { orders_pending: {}, orders_plan_pending: nil, orders_plan_history: {}, position_all: {} }
+          end
+
+          it "logger.warn でアラート出力 + raise しない(続行)" do
+            expect { worker.send(:evaluate_reconciliation_outcome, results) }.not_to raise_error
+            expect(logger).to have_received(:warn).with(
+              /reconciliation partially failed \(1\/4\).*orders_plan_pending/
+            )
+          end
+        end
+
+        context "部分失敗(3 件失敗 / 1 件成功)" do
+          let(:results) do
+            { orders_pending: nil, orders_plan_pending: nil, orders_plan_history: nil, position_all: {} }
+          end
+
+          it "logger.warn でアラート(全失敗ではないため raise しない)" do
+            expect { worker.send(:evaluate_reconciliation_outcome, results) }.not_to raise_error
+            expect(logger).to have_received(:warn).with(/reconciliation partially failed \(3\/4\)/)
+          end
+        end
+
+        context "全失敗(全 reconcile 結果が nil)" do
+          let(:results) do
+            { orders_pending: nil, orders_plan_pending: nil, orders_plan_history: nil, position_all: nil }
+          end
+
+          it "raise StandardError(reconciliation all failed)" do
+            expect { worker.send(:evaluate_reconciliation_outcome, results) }
+              .to raise_error(StandardError, /reconciliation all failed/)
+          end
+        end
+      end
+
+      describe "全失敗時の bootstrap 中断統合" do
+        before do
+          allow(worker).to receive(:reconcile_orders_pending).and_return(nil)
+          allow(worker).to receive(:reconcile_orders_plan_pending).and_return(nil)
+          allow(worker).to receive(:reconcile_orders_plan_history).and_return(nil)
+          allow(worker).to receive(:reconcile_position_all).and_return(nil)
+        end
+
+        it "run_reconciliation が raise する(cleanup_on_failure 経由 bootstrap 中断)" do
+          expect { worker.send(:run_reconciliation, session) }
+            .to raise_error(StandardError, /reconciliation all failed/)
         end
       end
 

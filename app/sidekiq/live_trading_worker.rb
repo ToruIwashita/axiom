@@ -889,22 +889,50 @@ class LiveTradingWorker
   # 各 REST 呼出は失敗時に logger.warn に落として後続 reconcile を継続する(部分復旧志向).
   # 各結果からの DB upsert は後続 phase で実装(現状は呼出構造のみ確立).
   #
-  # MVP 範囲(5 件):
+  # Phase 3.4-pre-3 反映: 各 reconcile_* の結果(非 nil = 成功 / nil = 失敗)を集約し,
+  # 全失敗時は raise で bootstrap 中断する(設計書 #6 整合性問題対応).
+  # 部分失敗時は logger.warn でアラートを残しつつ続行する(MVP 暫定挙動).
+  #
+  # MVP 範囲(4 件):
   # - orders_pending: 未約定通常注文
   # - orders_plan_pending: 未起動 plan order
   # - orders_plan_history: 履歴 plan order(直近 24h)
   # - position_all: 全 position
-  # - plan_sub_order: orders_plan_pending 取得後に各 plan_id について(現状 skeleton)
   # 範囲外(将来 phase):
-  # - fill_history: BitgetOrderEndpoint に対応 endpoint 未実装のため将来追加候補
+  # - fill_history: Phase 3.4-pre-4 で reconcile_fill_history 追加予定
+  # - plan_sub_order: orders_plan_pending 取得後に各 plan_id について(現状 skeleton)
   def run_reconciliation(session)
     session.start_reconciling!
 
-    reconcile_orders_pending(session)
-    reconcile_orders_plan_pending(session)
-    reconcile_orders_plan_history(session)
-    reconcile_position_all(session)
-    # TODO(将来 phase): reconcile_fill_history(BitgetOrderEndpoint#fill_history 追加後)
+    results = {
+      orders_pending: reconcile_orders_pending(session),
+      orders_plan_pending: reconcile_orders_plan_pending(session),
+      orders_plan_history: reconcile_orders_plan_history(session),
+      position_all: reconcile_position_all(session)
+    }
+
+    evaluate_reconciliation_outcome(results)
+  end
+
+  # 結果集約: 全成功 / 部分失敗 / 全失敗の 3 経路に振り分ける.
+  # - 全成功: 何もせず続行
+  # - 部分失敗: logger.warn でアラート + 続行(MVP 暫定 / 04_運用ガイド §6.2-2 で目視確認)
+  # - 全失敗: raise → bootstrap_session の rescue → cleanup_on_failure → mark_failed_to_start!
+  def evaluate_reconciliation_outcome(results)
+    failed = results.select { |_, v| v.nil? }.keys
+    total = results.size
+    failed_count = failed.size
+
+    return if failed_count.zero?
+
+    if failed_count == total
+      raise StandardError, "reconciliation all failed: #{failed.inspect}"
+    else
+      logger.warn(
+        "[LiveTradingWorker] reconciliation partially failed " \
+        "(#{failed_count}/#{total}): failed=#{failed.inspect}"
+      )
+    end
   end
 
   def reconcile_orders_pending(session)
