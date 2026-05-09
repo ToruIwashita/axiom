@@ -43,40 +43,10 @@ class LiveTradingWorker
   # algo anomaly trigger debounce 期間(秒). R-8-2 反映: WS push burst で reconciliation thread が
   # 大量起動し AR pool 枯渇 / Bitget rate limit 抵触するのを防ぐ.同期間中は in-progress フラグでスキップ.
   ALGO_ANOMALY_RECONCILE_DEBOUNCE_SECONDS = 30
-  # R-6 #13 + Phase 3.4-pre-8 + R-8 反映: failure_reason / log メッセージから credentials が漏れる経路を防ぐ.
-  # Faraday error / Bitget API レスポンス msg に api_key 等が echo された場合の defense-in-depth.
-  #
-  # 対応 key 名(snake_case + camelCase / Bitget 仕様):
-  #   - api_key / apiKey
-  #   - secret_key / secretKey
-  #   - passphrase
-  #   - signature / sign
-  #   - token / accessToken / access_token
-  #   - access-key / access-sign / access-passphrase / access-timestamp(Bitget HTTP header)
-  #   - authorization / bearer / x-api-key / private_key
-  #
-  # 2 形式に対応:
-  #   1. key=value 形式(`api_key=ABC123` など)→ `api_key=[FILTERED]` に置換
-  #      区切り文字も capture して `\1\2[FILTERED]` で形式保持
-  #   2. JSON 形式(`"api_key": "ABC123"` など)→ value 部分のみ `[FILTERED]` に置換(key 名は保持)
-  #      escape 対応: `(?:[^"\\]|\\.)*` で `"api_key": "ABC\"DEF"` のようなケースも全 value マスク
-  #
-  # `=` / `: "..."` の context が必須のため `passphrase は秘密です` のような通常テキストは誤マスクしない.
-  # 別境界文字(`&` / `]` / `"`)も SECRET_PATTERN の終端に含めて URL parameter 形式 / JSON 隣接で誤拡張しないよう防御.
-  SECRET_KEY_NAMES = %w[
-    api_?key secret_?key passphrase signature sign
-    token access_?token bearer authorization
-    access-key access-sign access-passphrase
-    private_?key x-api-key
-  ].join("|").freeze
-  SECRET_PATTERN = /\b(#{SECRET_KEY_NAMES})(\s*=\s*)[^\s,;}&\]"]+/i
-  SECRET_JSON_PATTERN = /("(?:#{SECRET_KEY_NAMES})"\s*:\s*")(?:[^"\\]|\\.)*(")/i
-
   private_constant :DEFAULT_MAIN_LOOP_POLL_INTERVAL, :HEARTBEAT_INTERVAL_SECONDS,
                    :LEASE_RENEW_INTERVAL_SECONDS, :WS_DISCONNECT_GRACE_SECONDS,
                    :BACKGROUND_THREAD_SWEEP_INTERVAL_SECONDS,
-                   :ALGO_ANOMALY_RECONCILE_DEBOUNCE_SECONDS,
-                   :SECRET_KEY_NAMES, :SECRET_PATTERN, :SECRET_JSON_PATTERN
+                   :ALGO_ANOMALY_RECONCILE_DEBOUNCE_SECONDS
 
   # @param process_manager [Domain::LiveTradingProcessManager]
   # @param clock_sync [Infrastructure::BitgetClockSync, nil] step 5 で server_time 同期に利用
@@ -1266,19 +1236,12 @@ class LiveTradingWorker
     )
   end
 
-  # failure_reason / log message から credentials を [FILTERED] に置換する共通 helper.
-  # R-8 反映: log 出力経路全般に適用するため sanitize_failure_reason → sanitize_log_message にリネーム.
-  # 適用箇所: failure_reason / data.inspect / e.message / その他 log 出力対象すべて.
-  # Faraday error や Bitget API レスポンスに api_key 等が含まれる場合の defense-in-depth.
-  # 順序: JSON 形式を先に置換 → key=value 形式を後で置換(衝突回避).
-  # SECRET_PATTERN の 2 番目 capture group(区切り文字 `\s*=\s*`)を `\2` で保持して原形を残す.
+  # R-8-4 反映: sanitize 機能を Domain::FailureReasonSanitizer に抽出.Worker 内 helper は委譲のみ.
   def sanitize_log_message(message)
-    message.to_s
-           .gsub(SECRET_JSON_PATTERN, '\1[FILTERED]\2')
-           .gsub(SECRET_PATTERN, '\1\2[FILTERED]')
+    Domain::FailureReasonSanitizer.sanitize(message)
   end
 
-  # 後方互換 alias(failure_reason 専用呼出は sanitize_log_message を経由する).
+  # 後方互換 alias(failure_reason 専用呼出も sanitize_log_message 経由で Domain サービスへ).
   alias_method :sanitize_failure_reason, :sanitize_log_message
 
   # WS disconnect で例外発生時に他の cleanup を妨げないよう logger.warn に落とす.
