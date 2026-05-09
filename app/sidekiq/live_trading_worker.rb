@@ -59,6 +59,7 @@ class LiveTradingWorker
   # @param risk_guard_service [Domain::RiskGuardService, nil] entry / cooldown / halt 判定
   # @param order_endpoint [Infrastructure::BitgetOrderEndpoint, nil] 発注
   # @param account_endpoint [Infrastructure::BitgetAccountEndpoint, nil] 残高 / fill_history 取得(3.4-pre-1 + 3.4-pre-4)
+  # @param state_cache [Domain::LiveTradingStateCache, nil] balance / position memory cache(R-8-5 抽出)
   # @param main_loop_poll_interval [Float] メインループ kill-switch / 状態 poll 間隔(秒). spec で 0 を渡して即時 break.
   # @param monotonic_clock [#call] heartbeat / lease renew の周期判定用 monotonic clock(R-2 #5 反映).
   #   デフォルトは `Process.clock_gettime(Process::CLOCK_MONOTONIC)`. 壁時計逆行(NTP step / 手動修正)による
@@ -77,6 +78,7 @@ class LiveTradingWorker
     risk_guard_service: nil,
     order_endpoint: nil,
     account_endpoint: nil,
+    state_cache: nil,
     main_loop_poll_interval: DEFAULT_MAIN_LOOP_POLL_INTERVAL,
     monotonic_clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) },
     ws_disconnect_grace_seconds: WS_DISCONNECT_GRACE_SECONDS,
@@ -93,6 +95,7 @@ class LiveTradingWorker
     @risk_guard_service = risk_guard_service
     @order_endpoint = order_endpoint
     @account_endpoint = account_endpoint
+    @state_cache = state_cache
     @main_loop_poll_interval = main_loop_poll_interval
     @monotonic_clock = monotonic_clock
     @ws_disconnect_grace_seconds = ws_disconnect_grace_seconds
@@ -114,10 +117,8 @@ class LiveTradingWorker
     @private_ws = nil
     @background_threads = []
     @background_threads_mutex = Mutex.new
-    # Phase 3.4-pre-1: balance / position の memory cache(WS push + bootstrap で更新).
-    @cached_balance = BigDecimal("0")
-    @cached_position = Domain::PositionValueObject.new
-    @cached_state_mutex = Mutex.new
+    # R-8-5 反映: balance / position memory cache を Domain::LiveTradingStateCache に抽出.
+    @state_cache = state_cache_lazy
     # R-8-2: algo anomaly reconcile の debounce 用フラグ + 最終起動時刻.
     @anomaly_reconcile_in_progress = false
     @anomaly_reconcile_mutex = Mutex.new
@@ -416,18 +417,16 @@ class LiveTradingWorker
     )
   end
 
-  # Phase 3.4-pre-1 追加: bootstrap step 7 後に initial balance を取得して @cached_balance に保存.
-  # 以降は handle_account_message で WS push を memory cache に反映する.
-  # 失敗時は logger.warn 落とし + @cached_balance=0 を維持(bootstrap は中断しない).
+  # Phase 3.4-pre-1 + R-8-5 反映: bootstrap step 7 後に initial balance を取得して
+  # Domain::LiveTradingStateCache に保存する.以降は handle_account_message で WS push を反映.
+  # 失敗時は logger.warn 落とし + cache 不変(bootstrap は中断しない).
   def fetch_initial_balance(session)
     response = account_endpoint.account(margin_coin: session.margin_coin, symbol: session.symbol)
     data = response.is_a?(Hash) ? response["data"] : nil
     available = data.is_a?(Hash) ? data["available"] : nil
     return if available.nil?
 
-    @cached_state_mutex.synchronize do
-      @cached_balance = BigDecimal(available.to_s)
-    end
+    @state_cache.update_balance(available)
   rescue StandardError => e
     logger.warn(
       "[LiveTradingWorker] fetch_initial_balance failed: #{e.class.name}: #{sanitize_log_message(e.message)}"
@@ -624,10 +623,9 @@ class LiveTradingWorker
   end
 
   # Domain::LiveContext.build_ctx_input に委譲して子プロセスへ渡す形式を構築する.
-  # Phase 3.4-pre-1 反映: balance / position は memory cache から取得(bootstrap initial 取得 + WS push 更新).
-  # cache は @cached_state_mutex で thread-safe に読む.
+  # R-8-5 反映: balance / position は Domain::LiveTradingStateCache.snapshot から取得(thread-safe).
   def build_runner_ctx_input(_session, candle, state)
-    balance, position = @cached_state_mutex.synchronize { [ @cached_balance, @cached_position ] }
+    balance, position = @state_cache.snapshot
     Domain::LiveContext.build_ctx_input(
       candle: candle,
       position: position,
@@ -683,14 +681,13 @@ class LiveTradingWorker
     result["enter"] == true
   end
 
-  # RiskGuard 通過判定(allow_entry?). balance は @cached_balance(memory cache)から取得.
-  # Phase 3.4-pre-1 で cache 化, Phase 3.4-pre-2 で allow_entry? 内 balance > 0 必須化.
+  # RiskGuard 通過判定(allow_entry?). balance は Domain::LiveTradingStateCache から取得.
+  # R-8-5 反映: state_cache.balance で thread-safe read.
   def risk_guard_pass?(session, intent)
     candidate_size = BigDecimal(intent["size"].to_s)
-    balance = @cached_state_mutex.synchronize { @cached_balance }
     risk_guard_service.allow_entry?(
       session: session,
-      balance: balance,
+      balance: @state_cache.balance,
       candidate_size: candidate_size
     )
   end
@@ -839,70 +836,16 @@ class LiveTradingWorker
     end
   end
 
-  # positions push: memory cache を更新(Phase 3.4-pre-1)+ Exchange::PositionSnapshot を最新値で upsert(後続 phase).
-  # cache 更新は WS callback thread で同期実行(別 thread 不要 / 単純な memory 書込).
+  # positions push: Domain::LiveTradingStateCache に反映(R-8-5)+ Exchange::PositionSnapshot upsert(後続 phase).
   def handle_positions_message(data)
-    update_cached_position_from_push(data)
+    @state_cache.apply_position_push(data, symbol: @session.symbol) if @session
     run_in_db_thread("positions_update") do
       LiveTrading::Session.transaction do
         Array(data).each do |_row|
-          # TODO(Phase 3.4-pre-6): Exchange::PositionSnapshot upsert(symbol / hold_side / size / margin / pnl 等)
+          # TODO(Phase 3.4 本体): Exchange::PositionSnapshot upsert(symbol / hold_side / size / margin / pnl 等)
         end
       end
     end
-  end
-
-  # Phase 3.4-pre-1 + R-8-3 反映: positions push の最新 row から @cached_position を更新.
-  # data 形式: [{"symbol":..., "holdSide": "long"|"short", "total": "0.01", "openPriceAvg": "50000", ...}, ...]
-  # session.symbol に該当する row のみ反映(複数 symbol push の中から自セッションを抽出).
-  #
-  # R-8-3 #C-2: holdSide allow-list ガード(`long` / `short` 以外は cache 不変 + warn).
-  # R-8-3 #C-3: BigDecimal nil/不正値ガード(parse_big_decimal helper 経由).
-  ALLOWED_POSITION_SIDES = %w[long short].freeze
-  private_constant :ALLOWED_POSITION_SIDES
-
-  def update_cached_position_from_push(data)
-    return unless data.is_a?(Array) && @session
-
-    row = data.find { |r| r.is_a?(Hash) && r["symbol"] == @session.symbol }
-    return unless row
-
-    side_str = row["holdSide"]
-    unless ALLOWED_POSITION_SIDES.include?(side_str)
-      logger.warn(
-        "[LiveTradingWorker] update_cached_position_from_push: " \
-        "unknown holdSide=#{side_str.inspect} (cache unchanged)"
-      )
-      return
-    end
-
-    size = parse_big_decimal(row["total"])
-    entry = parse_big_decimal(row["openPriceAvg"])
-    return if size.nil? || entry.nil? # R-8-3 #C-3: 不正値時は cache 不変
-
-    @cached_state_mutex.synchronize do
-      @cached_position = Domain::PositionValueObject.new(
-        side: side_str.to_sym,
-        size: size,
-        entry_price: entry
-      )
-    end
-  rescue StandardError => e
-    logger.warn(
-      "[LiveTradingWorker] update_cached_position_from_push failed: #{e.class.name}: #{sanitize_log_message(e.message)}"
-    )
-  end
-
-  # R-8-3 #C-3 反映: BigDecimal の nil / 空文字列 / 不正値ガード共通 helper.
-  # 返り値 nil で「parse 不可」を表現し,呼出側で cache 更新 skip を判定する.
-  def parse_big_decimal(value)
-    return nil if value.nil?
-    str = value.to_s
-    return nil if str.empty?
-
-    BigDecimal(str)
-  rescue ArgumentError
-    nil
   end
 
   # positions-history push: 履歴系の PositionSnapshot 記録(close 時等).
@@ -916,39 +859,16 @@ class LiveTradingWorker
     end
   end
 
-  # account push: memory cache を更新(Phase 3.4-pre-1)+ BalanceSnapshot model 追加後に DB 反映(後続 phase).
-  # cache 更新は WS callback thread で同期実行(別 thread 不要 / 単純な memory 書込).
+  # account push: Domain::LiveTradingStateCache に反映(R-8-5)+ BalanceSnapshot DB 反映(後続 phase).
   def handle_account_message(data)
-    update_cached_balance_from_push(data)
+    @state_cache.apply_account_push(data, margin_coin: @session.margin_coin) if @session
     run_in_db_thread("account_update") do
       LiveTrading::Session.transaction do
         Array(data).each do |_row|
-          # TODO(Phase 3.4-pre-6): account balance snapshot model 追加後に反映
+          # TODO(Phase 3.4 本体): account balance snapshot model 追加後に反映
         end
       end
     end
-  end
-
-  # Phase 3.4-pre-1: account push の最新 row から @cached_balance を更新.
-  # data 形式: [{"marginCoin":..., "available":"1000.0", "frozen":"0.0", ...}, ...]
-  # session.margin_coin に該当する row のみ反映.
-  def update_cached_balance_from_push(data)
-    return unless data.is_a?(Array) && @session
-
-    row = data.find { |r| r.is_a?(Hash) && r["marginCoin"] == @session.margin_coin }
-    return unless row
-
-    # R-8-3 #C-3: BigDecimal nil / 不正値ガード(parse_big_decimal 経由).
-    parsed = parse_big_decimal(row["available"])
-    return if parsed.nil?
-
-    @cached_state_mutex.synchronize do
-      @cached_balance = parsed
-    end
-  rescue StandardError => e
-    logger.warn(
-      "[LiveTradingWorker] update_cached_balance_from_push failed: #{e.class.name}: #{sanitize_log_message(e.message)}"
-    )
   end
 
   # step 10: Private WS connect(login + heartbeat 起動)+ subscribe(orders / orders-algo / fill / positions / positions-history / account).
@@ -1158,6 +1078,11 @@ class LiveTradingWorker
 
   def account_endpoint
     @account_endpoint ||= Infrastructure::BitgetAccountEndpoint.new(rest_client: build_rest_client)
+  end
+
+  # R-8-5: state_cache が DI されていない場合の lazy init(perform 内で呼ばれる).
+  def state_cache_lazy
+    @state_cache || Domain::LiveTradingStateCache.new(logger: logger)
   end
 
   # WS factory は Proc を保持し step 9/10 内で `.call` で遅延生成する
