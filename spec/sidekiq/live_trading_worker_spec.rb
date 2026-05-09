@@ -26,6 +26,8 @@ RSpec.describe LiveTradingWorker do
   let(:private_ws) { instance_double(Infrastructure::BitgetPrivateWsClient) }
   let(:public_ws_factory) { -> { public_ws } }
   let(:private_ws_factory) { -> { private_ws } }
+  let(:state_cache) { Domain::LiveTradingStateCache.new(logger: logger) }
+  let(:reconciliation_coordinator) { nil } # 個別 describe で instance_double 等に override
   let(:worker) do
     described_class.new(
       process_manager: process_manager,
@@ -36,6 +38,8 @@ RSpec.describe LiveTradingWorker do
       private_ws_factory: private_ws_factory,
       order_endpoint: order_endpoint_di,
       account_endpoint: account_endpoint_di,
+      state_cache: state_cache,
+      reconciliation_coordinator: reconciliation_coordinator,
       main_loop_poll_interval: 0, # spec ではループを sleep させない
       ws_disconnect_grace_seconds: 0, # R-6 #9: spec では grace なしで即時 :ws_disconnected return
       logger: logger
@@ -994,10 +998,7 @@ RSpec.describe LiveTradingWorker do
     end
 
     describe "balance / position memory cache(Domain::LiveTradingStateCache 委譲)" do
-      let(:state_cache) { Domain::LiveTradingStateCache.new(logger: logger) }
-
       before do
-        worker.instance_variable_set(:@state_cache, state_cache)
         worker.instance_variable_set(:@session, session)
       end
 
@@ -1104,7 +1105,6 @@ RSpec.describe LiveTradingWorker do
 
       before do
         worker.send(:instance_variable_set, :@session, session)
-        worker.send(:instance_variable_set, :@state_cache, Domain::LiveTradingStateCache.new(logger: logger))
         # run_in_db_thread を同期化(spec hang 回避)
         allow(worker).to receive(:run_in_db_thread) do |_label, &block|
           block.call
@@ -1338,6 +1338,7 @@ RSpec.describe LiveTradingWorker do
           ai_filter_service: ai_filter_service,
           risk_guard_service: risk_guard_service,
           order_endpoint: order_endpoint_di,
+          state_cache: state_cache,
           main_loop_poll_interval: 0,
           ws_disconnect_grace_seconds: 0,
           logger: logger
@@ -1383,8 +1384,6 @@ RSpec.describe LiveTradingWorker do
         allow(ai_filter_service).to receive(:call).and_return({ "enter" => true })
         allow(risk_guard_service).to receive(:allow_entry?).and_return(true)
         allow(order_endpoint_di).to receive(:place_order)
-        # Phase 3.4-pre-1: build_runner_ctx_input が memory cache を参照するため初期化
-        worker.instance_variable_set(:@state_cache, Domain::LiveTradingStateCache.new(logger: logger))
       end
 
       describe "正常パス(spawn ok)" do
@@ -1552,10 +1551,7 @@ RSpec.describe LiveTradingWorker do
     describe "reconciliation(bootstrap step 11)" do
       let(:reconciliation_coordinator) { instance_double(Domain::ReconciliationCoordinator) }
 
-      before do
-        worker.instance_variable_set(:@session, session)
-        worker.instance_variable_set(:@reconciliation_coordinator, reconciliation_coordinator)
-      end
+      before { worker.instance_variable_set(:@session, session) }
 
       describe "#run_reconciliation が reconciliation_coordinator.run_for_bootstrap に委譲" do
         it "session を渡して run_for_bootstrap を呼ぶ" do
@@ -1888,10 +1884,10 @@ RSpec.describe LiveTradingWorker do
       end
 
       describe "#run_reconciliation_after_reconnect が reconciliation_coordinator.run_after_reconnect に委譲" do
+        let(:reconciliation_coordinator) { instance_double(Domain::ReconciliationCoordinator) }
+
         it "session を渡して run_after_reconnect を呼ぶ" do
-          coordinator = instance_double(Domain::ReconciliationCoordinator)
-          worker.instance_variable_set(:@reconciliation_coordinator, coordinator)
-          expect(coordinator).to receive(:run_after_reconnect).with(session)
+          expect(reconciliation_coordinator).to receive(:run_after_reconnect).with(session)
           worker.send(:run_reconciliation_after_reconnect, session)
         end
       end
