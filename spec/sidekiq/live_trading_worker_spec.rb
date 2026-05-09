@@ -8,6 +8,7 @@ RSpec.describe LiveTradingWorker do
   let(:market_endpoint) { instance_double(Infrastructure::BitgetMarketEndpoint) }
   let(:position_endpoint) { instance_double(Infrastructure::BitgetPositionEndpoint) }
   let(:order_endpoint_di) { instance_double(Infrastructure::BitgetOrderEndpoint) }
+  let(:account_endpoint_di) { instance_double(Infrastructure::BitgetAccountEndpoint) }
   let(:contract_metadata_response) do
     {
       symbol: "BTCUSDT", price_place: 1, price_end_step: 1, tick_size: BigDecimal("0.1"),
@@ -34,6 +35,7 @@ RSpec.describe LiveTradingWorker do
       public_ws_factory: public_ws_factory,
       private_ws_factory: private_ws_factory,
       order_endpoint: order_endpoint_di,
+      account_endpoint: account_endpoint_di,
       main_loop_poll_interval: 0, # spec ではループを sleep させない
       ws_disconnect_grace_seconds: 0, # R-6 #9: spec では grace なしで即時 :ws_disconnected return
       logger: logger
@@ -126,6 +128,8 @@ RSpec.describe LiveTradingWorker do
     allow(order_endpoint_di).to receive(:orders_plan_pending).and_return("data" => [])
     allow(order_endpoint_di).to receive(:orders_plan_history).and_return("data" => [])
     allow(position_endpoint).to receive(:position_all).and_return("data" => [])
+    # Phase 3.4-pre-1: account_endpoint default stub(initial balance 取得)
+    allow(account_endpoint_di).to receive(:account).and_return("data" => { "available" => "1000.0" })
   end
 
   describe "Sidekiq options" do
@@ -895,6 +899,128 @@ RSpec.describe LiveTradingWorker do
       end
     end
 
+    describe "balance / position memory cache(3.4-pre-1)" do
+      describe "#fetch_initial_balance(bootstrap step 7 後)" do
+        before do
+          worker.send(:instance_variable_set, :@session, session)
+          worker.send(:instance_variable_set, :@cached_state_mutex, Mutex.new)
+          worker.send(:instance_variable_set, :@cached_balance, BigDecimal("0"))
+        end
+
+        it "account_endpoint.account を margin_coin + symbol で呼ぶ" do
+          worker.send(:fetch_initial_balance, session)
+          expect(account_endpoint_di).to have_received(:account).with(margin_coin: "USDT", symbol: "BTCUSDT")
+        end
+
+        it "@cached_balance が API レスポンスの available 値で更新される" do
+          allow(account_endpoint_di).to receive(:account)
+            .and_return("data" => { "available" => "12345.67" })
+          worker.send(:fetch_initial_balance, session)
+          expect(worker.instance_variable_get(:@cached_balance)).to eq(BigDecimal("12345.67"))
+        end
+
+        context "API 呼出が失敗した場合" do
+          before do
+            allow(account_endpoint_di).to receive(:account).and_raise(StandardError, "API down")
+          end
+
+          it "logger.warn 落とし + @cached_balance は変更されない(0 のまま)" do
+            worker.send(:fetch_initial_balance, session)
+            expect(worker.instance_variable_get(:@cached_balance)).to eq(BigDecimal("0"))
+            expect(logger).to have_received(:warn).with(/fetch_initial_balance failed.*API down/)
+          end
+        end
+
+        context "available フィールドが存在しないレスポンスの場合" do
+          before do
+            allow(account_endpoint_di).to receive(:account).and_return("data" => {})
+          end
+
+          it "@cached_balance は変更されない(0 のまま)" do
+            worker.send(:fetch_initial_balance, session)
+            expect(worker.instance_variable_get(:@cached_balance)).to eq(BigDecimal("0"))
+          end
+        end
+      end
+
+      describe "#update_cached_balance_from_push(account WS push)" do
+        before do
+          worker.send(:instance_variable_set, :@session, session)
+          worker.send(:instance_variable_set, :@cached_state_mutex, Mutex.new)
+          worker.send(:instance_variable_set, :@cached_balance, BigDecimal("0"))
+        end
+
+        it "session.margin_coin に該当する row の available 値で @cached_balance を更新" do
+          data = [
+            { "marginCoin" => "USDT", "available" => "5000.0", "frozen" => "0.0" },
+            { "marginCoin" => "BTC", "available" => "0.5" }
+          ]
+          worker.send(:update_cached_balance_from_push, data)
+          expect(worker.instance_variable_get(:@cached_balance)).to eq(BigDecimal("5000.0"))
+        end
+
+        it "session.margin_coin に該当 row が無い場合は変更しない" do
+          worker.instance_variable_set(:@cached_balance, BigDecimal("100"))
+          data = [ { "marginCoin" => "BTC", "available" => "0.5" } ]
+          worker.send(:update_cached_balance_from_push, data)
+          expect(worker.instance_variable_get(:@cached_balance)).to eq(BigDecimal("100"))
+        end
+
+        it "data が Array でない場合は no-op" do
+          worker.instance_variable_set(:@cached_balance, BigDecimal("100"))
+          worker.send(:update_cached_balance_from_push, nil)
+          expect(worker.instance_variable_get(:@cached_balance)).to eq(BigDecimal("100"))
+        end
+      end
+
+      describe "#update_cached_position_from_push(positions WS push)" do
+        before do
+          worker.send(:instance_variable_set, :@session, session)
+          worker.send(:instance_variable_set, :@cached_state_mutex, Mutex.new)
+          worker.send(:instance_variable_set, :@cached_position, Domain::PositionValueObject.new)
+        end
+
+        it "session.symbol に該当する row で @cached_position を更新(side/size/entry_price)" do
+          data = [
+            { "symbol" => "BTCUSDT", "holdSide" => "long", "total" => "0.05", "openPriceAvg" => "50000" },
+            { "symbol" => "ETHUSDT", "holdSide" => "short", "total" => "1.0", "openPriceAvg" => "3000" }
+          ]
+          worker.send(:update_cached_position_from_push, data)
+          pos = worker.instance_variable_get(:@cached_position)
+          expect(pos.side).to eq(:long)
+          expect(pos.size).to eq(BigDecimal("0.05"))
+          expect(pos.entry_price).to eq(BigDecimal("50000"))
+        end
+
+        it "session.symbol に該当 row が無い場合は変更しない" do
+          original = worker.instance_variable_get(:@cached_position)
+          data = [ { "symbol" => "ETHUSDT", "holdSide" => "short", "total" => "1.0", "openPriceAvg" => "3000" } ]
+          worker.send(:update_cached_position_from_push, data)
+          expect(worker.instance_variable_get(:@cached_position)).to eq(original)
+        end
+      end
+
+      describe "build_runner_ctx_input が memory cache を反映" do
+        before do
+          worker.send(:instance_variable_set, :@cached_state_mutex, Mutex.new)
+          worker.send(:instance_variable_set, :@cached_balance, BigDecimal("3500"))
+          worker.send(:instance_variable_set, :@cached_position, Domain::PositionValueObject.new(
+            side: :long, size: BigDecimal("0.02"), entry_price: BigDecimal("48500")
+          ))
+        end
+
+        it "ctx_input の balance / position が cache 値を反映する" do
+          state = double("state", state_data: { "ema" => 50_000 })
+          ctx = worker.send(:build_runner_ctx_input, session, { "ts" => 1 }, state)
+
+          expect(ctx["balance"]).to eq("3500.0")
+          expect(ctx["position"]).to eq(
+            "side" => "long", "size" => "0.02", "entry_price" => "48500.0"
+          )
+        end
+      end
+    end
+
     describe "Private WS callback(3.3-10c)" do
       # Result::Push は private constant のため duck typing で double 化
       let(:result_double) { double("Push", algo_anomaly?: false) }
@@ -1077,6 +1203,10 @@ RSpec.describe LiveTradingWorker do
         allow(ai_filter_service).to receive(:call).and_return({ "enter" => true })
         allow(risk_guard_service).to receive(:allow_entry?).and_return(true)
         allow(order_endpoint_di).to receive(:place_order)
+        # Phase 3.4-pre-1: build_runner_ctx_input が memory cache を参照するため初期化
+        worker.instance_variable_set(:@cached_state_mutex, Mutex.new)
+        worker.instance_variable_set(:@cached_balance, BigDecimal("0"))
+        worker.instance_variable_set(:@cached_position, Domain::PositionValueObject.new)
       end
 
       describe "正常パス(spawn ok)" do
