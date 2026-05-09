@@ -40,13 +40,21 @@ class LiveTradingWorker
   # background thread sweep 周期(秒). R-7 #C 反映: 24h 稼働で @background_threads に
   # 完了済 thread が蓄積するメモリリークを定期的に reject! で解消する.
   BACKGROUND_THREAD_SWEEP_INTERVAL_SECONDS = 60
-  # R-6 #13 反映: failure_reason / log メッセージから credentials が漏れる経路を防ぐ
+  # R-6 #13 + Phase 3.4-pre-8 反映: failure_reason / log メッセージから credentials が漏れる経路を防ぐ
   # Faraday error / Bitget API レスポンス msg に api_key 等が echo された場合の defense-in-depth.
-  SECRET_PATTERN = /(api_key|secret_key|passphrase|signature|token)[^\s,;}]*/i
+  # 2 形式に対応:
+  #   1. key=value 形式(`api_key=ABC123` など)→ `api_key=[FILTERED]` に置換
+  #   2. JSON 形式(`"api_key": "ABC123"` など)→ value 部分のみ `[FILTERED]` に置換(key 名は保持)
+  # `=` または `: "..."` の context が必須のため `passphrase は秘密です` のような通常テキストは誤マスクしない.
+  SECRET_PATTERN = /\b(api_key|secret_key|passphrase|signature|token)\s*=\s*[^\s,;}]+/i
+  # JSON 形式: capture 1 = `"key": "` prefix / capture 2 = closing `"` のため
+  # `\1[FILTERED]\2` で value 部分のみ置換(可変長 lookbehind 非対応の Onigmo 制限への対応).
+  SECRET_JSON_PATTERN = /("(?:api_?key|secret_?key|passphrase|signature|token)"\s*:\s*")[^"]*(")/i
 
   private_constant :DEFAULT_MAIN_LOOP_POLL_INTERVAL, :HEARTBEAT_INTERVAL_SECONDS,
                    :LEASE_RENEW_INTERVAL_SECONDS, :WS_DISCONNECT_GRACE_SECONDS,
-                   :BACKGROUND_THREAD_SWEEP_INTERVAL_SECONDS, :SECRET_PATTERN
+                   :BACKGROUND_THREAD_SWEEP_INTERVAL_SECONDS,
+                   :SECRET_PATTERN, :SECRET_JSON_PATTERN
 
   # @param process_manager [Domain::LiveTradingProcessManager]
   # @param clock_sync [Infrastructure::BitgetClockSync, nil] step 5 で server_time 同期に利用
@@ -1154,8 +1162,12 @@ class LiveTradingWorker
 
   # failure_reason / log message から credentials を [FILTERED] に置換する.
   # Faraday error や Bitget API レスポンスに api_key 等が含まれる場合の defense-in-depth.
+  # Phase 3.4-pre-8: JSON 形式 `"key": "value"` も value 部分のみ置換対応.
+  # 順序: JSON 形式を先に置換 → key=value 形式を後で置換(衝突回避).
   def sanitize_failure_reason(reason)
-    reason.to_s.gsub(SECRET_PATTERN, '\1=[FILTERED]')
+    reason.to_s
+          .gsub(SECRET_JSON_PATTERN, '\1[FILTERED]\2')
+          .gsub(SECRET_PATTERN, '\1=[FILTERED]')
   end
 
   # WS disconnect で例外発生時に他の cleanup を妨げないよう logger.warn に落とす.

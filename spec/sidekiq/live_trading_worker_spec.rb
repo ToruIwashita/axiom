@@ -738,6 +738,57 @@ RSpec.describe LiveTradingWorker do
         end
       end
 
+      # Phase 3.4-pre-8: SECRET_PATTERN JSON 拡張 + 日本語誤マスク boundary
+      describe "#sanitize_failure_reason(R-6 #13 + Phase 3.4-pre-8)" do
+        it "key=value 形式の credentials を [FILTERED] に置換する" do
+          input = "Faraday error: api_key=ABC123XYZ failed"
+          expect(worker.send(:sanitize_failure_reason, input))
+            .to eq("Faraday error: api_key=[FILTERED] failed")
+        end
+
+        it "JSON 形式の credentials value を [FILTERED] に置換する(key 名は保持)" do
+          input = '{"api_key": "ABC123", "other": "value"}'
+          expect(worker.send(:sanitize_failure_reason, input))
+            .to eq('{"api_key": "[FILTERED]", "other": "value"}')
+        end
+
+        it "JSON 形式 camelCase(apiKey / secretKey)も対応" do
+          input = '{"apiKey": "ABC", "secretKey": "XYZ"}'
+          expect(worker.send(:sanitize_failure_reason, input))
+            .to eq('{"apiKey": "[FILTERED]", "secretKey": "[FILTERED]"}')
+        end
+
+        it "passphrase / signature / token も同様に対応" do
+          input = 'passphrase=secret123 token=abc456 signature=xyz789'
+          result = worker.send(:sanitize_failure_reason, input)
+          expect(result).to include("passphrase=[FILTERED]")
+          expect(result).to include("token=[FILTERED]")
+          expect(result).to include("signature=[FILTERED]")
+        end
+
+        # 日本語誤マスク boundary spec(誤検出防止)
+        it "通常の日本語テキスト(passphrase は秘密です)は誤マスクしない(= 前置き必須)" do
+          input = "passphrase は秘密です"
+          expect(worker.send(:sanitize_failure_reason, input)).to eq("passphrase は秘密です")
+        end
+
+        it "key 名を含むがコンテキストが違う文(設計書の signature について)は誤マスクしない" do
+          input = "設計書の signature について追記する"
+          expect(worker.send(:sanitize_failure_reason, input))
+            .to eq("設計書の signature について追記する")
+        end
+
+        it "ws_disconnected reason 形式は影響を受けない" do
+          input = "ws_disconnected: public_ws=true private_ws=false"
+          expect(worker.send(:sanitize_failure_reason, input))
+            .to eq("ws_disconnected: public_ws=true private_ws=false")
+        end
+
+        it "nil 入力でも raise しない(空文字返却)" do
+          expect(worker.send(:sanitize_failure_reason, nil)).to eq("")
+        end
+      end
+
       context "finalize_main_loop で lease.release! が raise した場合(連鎖失敗対策)" do
         before do
           allow(lease).to receive(:release!).and_raise(StandardError, "release timeout in finalize")
