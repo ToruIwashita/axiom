@@ -130,6 +130,8 @@ RSpec.describe LiveTradingWorker do
     allow(position_endpoint).to receive(:position_all).and_return("data" => [])
     # Phase 3.4-pre-1: account_endpoint default stub(initial balance 取得)
     allow(account_endpoint_di).to receive(:account).and_return("data" => { "available" => "1000.0" })
+    # Phase 3.4-pre-4: reconcile_fill_history default stub
+    allow(account_endpoint_di).to receive(:fill_history).and_return("data" => [])
   end
 
   describe "Sidekiq options" do
@@ -1381,11 +1383,12 @@ RSpec.describe LiveTradingWorker do
           expect(session.reload.state_reconciling?).to be true
         end
 
-        it "4 件の reconcile 系 method を順次呼び出す" do
+        it "5 件の reconcile 系 method を順次呼び出す(Phase 3.4-pre-4 で fill_history 追加)" do
           expect(worker).to receive(:reconcile_orders_pending).with(session).ordered.and_return("data" => [])
           expect(worker).to receive(:reconcile_orders_plan_pending).with(session).ordered.and_return("data" => [])
           expect(worker).to receive(:reconcile_orders_plan_history).with(session).ordered.and_return("data" => [])
           expect(worker).to receive(:reconcile_position_all).with(session).ordered.and_return("data" => [])
+          expect(worker).to receive(:reconcile_fill_history).with(session).ordered.and_return("data" => [])
 
           worker.send(:run_reconciliation, session)
         end
@@ -1395,7 +1398,7 @@ RSpec.describe LiveTradingWorker do
       describe "#evaluate_reconciliation_outcome" do
         context "全成功(全 reconcile 結果が non-nil)" do
           let(:results) do
-            { orders_pending: {}, orders_plan_pending: {}, orders_plan_history: {}, position_all: {} }
+            { orders_pending: {}, orders_plan_pending: {}, orders_plan_history: {}, position_all: {}, fill_history: {} }
           end
 
           it "raise しない / logger.warn も呼ばない" do
@@ -1404,33 +1407,33 @@ RSpec.describe LiveTradingWorker do
           end
         end
 
-        context "部分失敗(1 件失敗 / 3 件成功)" do
+        context "部分失敗(1 件失敗 / 4 件成功)" do
           let(:results) do
-            { orders_pending: {}, orders_plan_pending: nil, orders_plan_history: {}, position_all: {} }
+            { orders_pending: {}, orders_plan_pending: nil, orders_plan_history: {}, position_all: {}, fill_history: {} }
           end
 
           it "logger.warn でアラート出力 + raise しない(続行)" do
             expect { worker.send(:evaluate_reconciliation_outcome, results) }.not_to raise_error
             expect(logger).to have_received(:warn).with(
-              /reconciliation partially failed \(1\/4\).*orders_plan_pending/
+              /reconciliation partially failed \(1\/5\).*orders_plan_pending/
             )
           end
         end
 
-        context "部分失敗(3 件失敗 / 1 件成功)" do
+        context "部分失敗(4 件失敗 / 1 件成功)" do
           let(:results) do
-            { orders_pending: nil, orders_plan_pending: nil, orders_plan_history: nil, position_all: {} }
+            { orders_pending: nil, orders_plan_pending: nil, orders_plan_history: nil, position_all: {}, fill_history: nil }
           end
 
           it "logger.warn でアラート(全失敗ではないため raise しない)" do
             expect { worker.send(:evaluate_reconciliation_outcome, results) }.not_to raise_error
-            expect(logger).to have_received(:warn).with(/reconciliation partially failed \(3\/4\)/)
+            expect(logger).to have_received(:warn).with(/reconciliation partially failed \(4\/5\)/)
           end
         end
 
         context "全失敗(全 reconcile 結果が nil)" do
           let(:results) do
-            { orders_pending: nil, orders_plan_pending: nil, orders_plan_history: nil, position_all: nil }
+            { orders_pending: nil, orders_plan_pending: nil, orders_plan_history: nil, position_all: nil, fill_history: nil }
           end
 
           it "raise StandardError(reconciliation all failed)" do
@@ -1446,11 +1449,39 @@ RSpec.describe LiveTradingWorker do
           allow(worker).to receive(:reconcile_orders_plan_pending).and_return(nil)
           allow(worker).to receive(:reconcile_orders_plan_history).and_return(nil)
           allow(worker).to receive(:reconcile_position_all).and_return(nil)
+          allow(worker).to receive(:reconcile_fill_history).and_return(nil)
         end
 
         it "run_reconciliation が raise する(cleanup_on_failure 経由 bootstrap 中断)" do
           expect { worker.send(:run_reconciliation, session) }
             .to raise_error(StandardError, /reconciliation all failed/)
+        end
+      end
+
+      # Phase 3.4-pre-4: reconcile_fill_history
+      describe "#reconcile_fill_history" do
+        it "account_endpoint.fill_history を 24h lookback の start_time / end_time + symbol で呼ぶ" do
+          fixed_now = Time.utc(2026, 5, 8, 12, 0, 0)
+          allow(Time).to receive(:current).and_return(fixed_now)
+          end_time_ms = (fixed_now.to_f * 1000).to_i
+          start_time_ms = end_time_ms - (24 * 60 * 60 * 1000)
+
+          worker.send(:reconcile_fill_history, session)
+
+          expect(account_endpoint_di).to have_received(:fill_history).with(
+            symbol: "BTCUSDT", start_time: start_time_ms, end_time: end_time_ms
+          )
+        end
+
+        context "REST 失敗時" do
+          before do
+            allow(account_endpoint_di).to receive(:fill_history).and_raise(StandardError, "API down")
+          end
+
+          it "logger.warn + nil 返却" do
+            expect(worker.send(:reconcile_fill_history, session)).to be_nil
+            expect(logger).to have_received(:warn).with(/reconcile_fill_history failed.*API down/)
+          end
         end
       end
 
@@ -1859,12 +1890,13 @@ RSpec.describe LiveTradingWorker do
       end
 
       describe "#run_reconciliation_after_reconnect" do
-        it "session.start_reconciling! は呼ばずに 4 件 reconcile を呼び出す" do
+        it "session.start_reconciling! は呼ばずに 5 件 reconcile を呼び出す(Phase 3.4-pre-4 で fill_history 追加)" do
           expect(session).not_to receive(:start_reconciling!)
           expect(worker).to receive(:reconcile_orders_pending).with(session)
           expect(worker).to receive(:reconcile_orders_plan_pending).with(session)
           expect(worker).to receive(:reconcile_orders_plan_history).with(session)
           expect(worker).to receive(:reconcile_position_all).with(session)
+          expect(worker).to receive(:reconcile_fill_history).with(session)
 
           worker.send(:run_reconciliation_after_reconnect, session)
         end

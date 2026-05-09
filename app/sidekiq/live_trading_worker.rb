@@ -221,12 +221,14 @@ class LiveTradingWorker
 
   # reconnect 後の reconciliation 再実行.
   # bootstrap step 11 と異なり session 状態遷移(start_reconciling!)は行わない
-  # (running 状態のまま 6 件 REST 突合のみ実施).
+  # (running 状態のまま 5 件 REST 突合のみ実施).
+  # Phase 3.4-pre-4 反映: fill_history も追加(WS reconnect 中の fill 欠落補完).
   def run_reconciliation_after_reconnect(session)
     reconcile_orders_pending(session)
     reconcile_orders_plan_pending(session)
     reconcile_orders_plan_history(session)
     reconcile_position_all(session)
+    reconcile_fill_history(session)
   end
 
   # WS Client の reconnect_count を安全に取得する(nil 防御 + respond_to? 防御).
@@ -893,13 +895,13 @@ class LiveTradingWorker
   # 全失敗時は raise で bootstrap 中断する(設計書 #6 整合性問題対応).
   # 部分失敗時は logger.warn でアラートを残しつつ続行する(MVP 暫定挙動).
   #
-  # MVP 範囲(4 件):
+  # MVP 範囲(5 件 / Phase 3.4-pre-4 で fill_history 追加):
   # - orders_pending: 未約定通常注文
   # - orders_plan_pending: 未起動 plan order
   # - orders_plan_history: 履歴 plan order(直近 24h)
   # - position_all: 全 position
+  # - fill_history: 約定履歴(直近 24h / WS fill push 欠落分の補完)
   # 範囲外(将来 phase):
-  # - fill_history: Phase 3.4-pre-4 で reconcile_fill_history 追加予定
   # - plan_sub_order: orders_plan_pending 取得後に各 plan_id について(現状 skeleton)
   def run_reconciliation(session)
     session.start_reconciling!
@@ -908,7 +910,8 @@ class LiveTradingWorker
       orders_pending: reconcile_orders_pending(session),
       orders_plan_pending: reconcile_orders_plan_pending(session),
       orders_plan_history: reconcile_orders_plan_history(session),
-      position_all: reconcile_position_all(session)
+      position_all: reconcile_position_all(session),
+      fill_history: reconcile_fill_history(session)
     }
 
     evaluate_reconciliation_outcome(results)
@@ -985,6 +988,24 @@ class LiveTradingWorker
   rescue StandardError => e
     logger.warn(
       "[LiveTradingWorker] reconcile_position_all failed: #{e.class.name}: #{e.message}"
+    )
+    nil
+  end
+
+  # Phase 3.4-pre-4 追加: 直近 24h の約定履歴を取得(WS fill push 欠落分の補完).
+  # account_endpoint.fill_history(start_time:, end_time:, symbol:)で REST 取得.
+  def reconcile_fill_history(session)
+    end_time = (Time.current.to_f * 1000).to_i
+    start_time = end_time - RECONCILE_PLAN_HISTORY_LOOKBACK_MS
+
+    response = account_endpoint.fill_history(
+      symbol: session.symbol, start_time: start_time, end_time: end_time
+    )
+    # TODO(後続 phase): response["data"] から Exchange::Fill upsert + Trade 集計反映
+    response
+  rescue StandardError => e
+    logger.warn(
+      "[LiveTradingWorker] reconcile_fill_history failed: #{e.class.name}: #{e.message}"
     )
     nil
   end
