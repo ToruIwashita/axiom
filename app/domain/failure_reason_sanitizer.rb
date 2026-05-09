@@ -26,7 +26,9 @@ module Domain
       access-key access-sign access-passphrase
       private_?key x-api-key
     ].join("|").freeze
-    SECRET_PATTERN = /\b(#{SECRET_KEY_NAMES})(\s*=\s*)[^\s,;}&\]"]+/i
+    # 終端文字: 空白・JSON / array 区切り(`,` `;` `}` `]`)・URL query 区切り(`&` `?` `#`)・
+    # 連結代入(`=`)・引用符(`"`)。`=` を含めることで `api_key=A=B` 形式で次のトークンを呑み込まない.
+    SECRET_PATTERN = /\b(#{SECRET_KEY_NAMES})(\s*=\s*)[^\s,;}&\]"=?#]+/i
     SECRET_JSON_PATTERN = /("(?:#{SECRET_KEY_NAMES})"\s*:\s*")(?:[^"\\]|\\.)*(")/i
 
     private_constant :SECRET_KEY_NAMES, :SECRET_PATTERN, :SECRET_JSON_PATTERN

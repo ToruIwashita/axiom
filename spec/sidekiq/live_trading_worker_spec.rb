@@ -742,98 +742,9 @@ RSpec.describe LiveTradingWorker do
         end
       end
 
-      # Phase 3.4-pre-8: SECRET_PATTERN JSON 拡張 + 日本語誤マスク boundary
-      describe "#sanitize_log_message" do
-        it "key=value 形式の credentials を [FILTERED] に置換する" do
-          input = "Faraday error: api_key=ABC123XYZ failed"
-          expect(worker.send(:sanitize_log_message, input))
-            .to eq("Faraday error: api_key=[FILTERED] failed")
-        end
-
-        it "JSON 形式の credentials value を [FILTERED] に置換する(key 名は保持)" do
-          input = '{"api_key": "ABC123", "other": "value"}'
-          expect(worker.send(:sanitize_log_message, input))
-            .to eq('{"api_key": "[FILTERED]", "other": "value"}')
-        end
-
-        it "JSON 形式 camelCase(apiKey / secretKey)も対応" do
-          input = '{"apiKey": "ABC", "secretKey": "XYZ"}'
-          expect(worker.send(:sanitize_log_message, input))
-            .to eq('{"apiKey": "[FILTERED]", "secretKey": "[FILTERED]"}')
-        end
-
-        it "passphrase / signature / token も同様に対応" do
-          input = 'passphrase=secret123 token=abc456 signature=xyz789'
-          result = worker.send(:sanitize_log_message, input)
-          expect(result).to include("passphrase=[FILTERED]")
-          expect(result).to include("token=[FILTERED]")
-          expect(result).to include("signature=[FILTERED]")
-        end
-
-        # R-8 反映: 別フィールド名対応
-        it "authorization / bearer / x-api-key / private_key も対応" do
-          input = "authorization=Bearer xyz bearer=abc x-api-key=key123 private_key=PEM"
-          # ` ` で連続性を保つ。実際には `=` 後のトークンで sanitize される
-          result = worker.send(:sanitize_log_message, input)
-          expect(result).to include("authorization=[FILTERED]")
-          expect(result).to include("bearer=[FILTERED]")
-          expect(result).to include("x-api-key=[FILTERED]")
-          expect(result).to include("private_key=[FILTERED]")
-        end
-
-        # R-8 反映: Bitget HTTP header(ACCESS-KEY 等)対応
-        it "Bitget HTTP header 形式(access-key / access-sign / access-passphrase)も対応" do
-          input = "ACCESS-KEY=abc ACCESS-SIGN=xyz ACCESS-PASSPHRASE=pass"
-          result = worker.send(:sanitize_log_message, input)
-          expect(result).to include("ACCESS-KEY=[FILTERED]")
-          expect(result).to include("ACCESS-SIGN=[FILTERED]")
-          expect(result).to include("ACCESS-PASSPHRASE=[FILTERED]")
-        end
-
-        # R-8 反映: SECRET_JSON_PATTERN escape quote 対応
-        it "JSON value 内に escape された quote(\\\\\\\")を含む値も全 value マスク" do
-          input = '{"api_key": "ABC\\"DEF"}'
-          expect(worker.send(:sanitize_log_message, input))
-            .to eq('{"api_key": "[FILTERED]"}')
-        end
-
-        # R-8 反映: URL parameter 形式の `&` 終端
-        it "URL parameter 形式(?api_key=ABC&other=val)で `&` を終端と認識する" do
-          input = "?api_key=ABC123&other=value"
-          expect(worker.send(:sanitize_log_message, input))
-            .to eq("?api_key=[FILTERED]&other=value")
-        end
-
-        # 日本語誤マスク boundary spec(誤検出防止)
-        it "通常の日本語テキスト(passphrase は秘密です)は誤マスクしない(= 前置き必須)" do
-          input = "passphrase は秘密です"
-          expect(worker.send(:sanitize_log_message, input)).to eq("passphrase は秘密です")
-        end
-
-        it "key 名を含むがコンテキストが違う文(設計書の signature について)は誤マスクしない" do
-          input = "設計書の signature について追記する"
-          expect(worker.send(:sanitize_log_message, input))
-            .to eq("設計書の signature について追記する")
-        end
-
-        it "ws_disconnected reason 形式は影響を受けない" do
-          input = "ws_disconnected: public_ws=true private_ws=false"
-          expect(worker.send(:sanitize_log_message, input))
-            .to eq("ws_disconnected: public_ws=true private_ws=false")
-        end
-
-        it "nil 入力でも raise しない(空文字返却)" do
-          expect(worker.send(:sanitize_log_message, nil)).to eq("")
-        end
-
-        # 後方互換 alias の確認
-        it "sanitize_failure_reason alias でも同じ結果を返す" do
-          input = "api_key=ABC123"
-          expect(worker.send(:sanitize_failure_reason, input))
-            .to eq(worker.send(:sanitize_log_message, input))
-        end
-      end
-
+      # sanitize 詳細 spec は spec/domain/failure_reason_sanitizer_spec.rb に移動済.
+      # Worker の sanitize_log_message は Domain::FailureReasonSanitizer への 1 行委譲のため
+      # Worker spec での重複検証は不要(R-8 multi-agent review 反映).
       context "finalize_main_loop で lease.release! が raise した場合(連鎖失敗対策)" do
         before do
           allow(lease).to receive(:release!).and_raise(StandardError, "release timeout in finalize")
@@ -1042,39 +953,37 @@ RSpec.describe LiveTradingWorker do
       # R-8-5 反映: apply_account_push / apply_position_push の単体検証は
       # spec/domain/live_trading_state_cache_spec.rb に移動済.
       # Worker spec では handle_*_message が state_cache に正しく委譲することのみ検証.
-
-      describe "#handle_account_message が state_cache.apply_account_push に委譲" do
+      context "WS handler が state_cache に委譲する" do
         before do
           allow(LiveTrading::Session).to receive(:transaction).and_yield
           allow(worker).to receive(:run_in_db_thread)
+          worker.instance_variable_set(:@trading_symbol, session.symbol)
+          worker.instance_variable_set(:@trading_margin_coin, session.margin_coin)
         end
 
-        it "session.margin_coin に該当する row の available 値で state_cache.balance が更新される" do
-          data = [
-            { "marginCoin" => "USDT", "available" => "5000.0", "frozen" => "0.0" },
-            { "marginCoin" => "BTC", "available" => "0.5" }
-          ]
-          worker.send(:handle_account_message, data)
-          expect(state_cache.balance).to eq(BigDecimal("5000.0"))
-        end
-      end
-
-      describe "#handle_positions_message が state_cache.apply_position_push に委譲" do
-        before do
-          allow(LiveTrading::Session).to receive(:transaction).and_yield
-          allow(worker).to receive(:run_in_db_thread)
+        describe "#handle_account_message が state_cache.apply_account_push に委譲" do
+          it "@trading_margin_coin に該当する row の available 値で state_cache.balance が更新される" do
+            data = [
+              { "marginCoin" => "USDT", "available" => "5000.0", "frozen" => "0.0" },
+              { "marginCoin" => "BTC", "available" => "0.5" }
+            ]
+            worker.send(:handle_account_message, data)
+            expect(state_cache.balance).to eq(BigDecimal("5000.0"))
+          end
         end
 
-        it "session.symbol に該当する row で state_cache.position が更新される" do
-          data = [
-            { "symbol" => "BTCUSDT", "holdSide" => "long", "total" => "0.05", "openPriceAvg" => "50000" },
-            { "symbol" => "ETHUSDT", "holdSide" => "short", "total" => "1.0", "openPriceAvg" => "3000" }
-          ]
-          worker.send(:handle_positions_message, data)
-          pos = state_cache.position
-          expect(pos.side).to eq(:long)
-          expect(pos.size).to eq(BigDecimal("0.05"))
-          expect(pos.entry_price).to eq(BigDecimal("50000"))
+        describe "#handle_positions_message が state_cache.apply_position_push に委譲" do
+          it "@trading_symbol に該当する row で state_cache.position が更新される" do
+            data = [
+              { "symbol" => "BTCUSDT", "holdSide" => "long", "total" => "0.05", "openPriceAvg" => "50000" },
+              { "symbol" => "ETHUSDT", "holdSide" => "short", "total" => "1.0", "openPriceAvg" => "3000" }
+            ]
+            worker.send(:handle_positions_message, data)
+            pos = state_cache.position
+            expect(pos.side).to eq(:long)
+            expect(pos.size).to eq(BigDecimal("0.05"))
+            expect(pos.entry_price).to eq(BigDecimal("50000"))
+          end
         end
       end
 
@@ -1105,6 +1014,8 @@ RSpec.describe LiveTradingWorker do
 
       before do
         worker.send(:instance_variable_set, :@session, session)
+        worker.send(:instance_variable_set, :@trading_symbol, session.symbol)
+        worker.send(:instance_variable_set, :@trading_margin_coin, session.margin_coin)
         # run_in_db_thread を同期化(spec hang 回避)
         allow(worker).to receive(:run_in_db_thread) do |_label, &block|
           block.call

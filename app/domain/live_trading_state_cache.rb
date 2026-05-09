@@ -109,11 +109,15 @@ module Domain
       entry = parse_big_decimal(row["openPriceAvg"])
       return nil if size.nil? || entry.nil?
 
-      new_position = Domain::PositionValueObject.new(
-        side: side_str.to_sym,
-        size: size,
-        entry_price: entry
-      )
+      # close 完了直後の Bitget push は size=0 で来ることがある.
+      # その場合は flat VO(side=nil / size=0 / entry=0)に正規化し
+      # `side: :long, size: 0` のような曖昧な VO を持たない.
+      new_position =
+        if size.zero?
+          Domain::PositionValueObject.new
+        else
+          Domain::PositionValueObject.new(side: side_str.to_sym, size: size, entry_price: entry)
+        end
       @mutex.synchronize { @position = new_position }
       new_position
     rescue StandardError => e

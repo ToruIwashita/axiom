@@ -148,6 +148,11 @@ class LiveTradingWorker
 
   def bootstrap_session(session_id)
     @session = LiveTrading::Session.find(session_id)
+    # WS callback thread から @session.symbol / @session.margin_coin を都度参照すると
+    # AR reload との競合や @session 自体の差し替え時に整合性が崩れる懸念があるため,
+    # bootstrap 段階で immutable な値を local キャッシュしておく(WS push handler から参照).
+    @trading_symbol = @session.symbol
+    @trading_margin_coin = @session.margin_coin
     load_revision_with_consistency(@session)
     Risk::Policy.find(@session.risk_policy_id)
     @lease = process_manager.acquire_lease!(session: @session, worker_instance_id: @worker_instance_id)
@@ -837,7 +842,7 @@ class LiveTradingWorker
 
   # positions push: Domain::LiveTradingStateCache に反映(R-8-5)+ Exchange::PositionSnapshot upsert(後続 phase).
   def handle_positions_message(data)
-    @state_cache.apply_position_push(data, symbol: @session.symbol) if @session
+    @state_cache.apply_position_push(data, symbol: @trading_symbol) if @trading_symbol
     run_in_db_thread("positions_update") do
       LiveTrading::Session.transaction do
         Array(data).each do |_row|
@@ -860,7 +865,7 @@ class LiveTradingWorker
 
   # account push: Domain::LiveTradingStateCache に反映(R-8-5)+ BalanceSnapshot DB 反映(後続 phase).
   def handle_account_message(data)
-    @state_cache.apply_account_push(data, margin_coin: @session.margin_coin) if @session
+    @state_cache.apply_account_push(data, margin_coin: @trading_margin_coin) if @trading_margin_coin
     run_in_db_thread("account_update") do
       LiveTrading::Session.transaction do
         Array(data).each do |_row|
@@ -1043,7 +1048,7 @@ class LiveTradingWorker
 
     # R-6 #13 反映: failure_reason に credentials が漏れる経路を sanitize で遮断
     session.mark_failed_to_start!(
-      reason: sanitize_failure_reason("#{error.class.name}: #{error.message}")
+      reason: sanitize_log_message("#{error.class.name}: #{error.message}")
     )
   end
 
@@ -1051,9 +1056,6 @@ class LiveTradingWorker
   def sanitize_log_message(message)
     Domain::FailureReasonSanitizer.sanitize(message)
   end
-
-  # 後方互換 alias(failure_reason 専用呼出も sanitize_log_message 経由で Domain サービスへ).
-  alias_method :sanitize_failure_reason, :sanitize_log_message
 
   # WS disconnect で例外発生時に他の cleanup を妨げないよう logger.warn に落とす.
   # context は呼出元(cleanup_on_failure / finalize_main_loop)を logger メッセージで追跡可能にする.

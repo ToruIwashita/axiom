@@ -67,6 +67,47 @@ RSpec.describe Domain::FailureReasonSanitizer do
       end
     end
 
+    context "JSON value 内 unicode escape sequence" do
+      let(:input) { '{"signature": "ABC\\u003dDEF"}' }
+
+      it "unicode escape を含む value も全マスク" do
+        expect(subject).to eq('{"signature": "[FILTERED]"}')
+      end
+    end
+
+    context "Bitget HTTP header JSON 形式" do
+      let(:input) { '{"ACCESS-PASSPHRASE": "secret123"}' }
+
+      it "ACCESS-PASSPHRASE の JSON value もマスク" do
+        expect(subject).to eq('{"ACCESS-PASSPHRASE": "[FILTERED]"}')
+      end
+    end
+
+    context "key=value 連結代入(`=` 終端)" do
+      let(:input) { "api_key=ABC=DEF other=value" }
+
+      it "次の `=` で終端し後続トークンを呑み込まない" do
+        expect(subject).to start_with("api_key=[FILTERED]")
+        expect(subject).to include("other=value")
+      end
+    end
+
+    context "URL query string with `?` boundary" do
+      let(:input) { "api_key=ABC?next=value" }
+
+      it "`?` を終端と認識する" do
+        expect(subject).to eq("api_key=[FILTERED]?next=value")
+      end
+    end
+
+    context "URL fragment with `#` boundary" do
+      let(:input) { "api_key=ABC#fragment" }
+
+      it "`#` を終端と認識する" do
+        expect(subject).to eq("api_key=[FILTERED]#fragment")
+      end
+    end
+
     context "URL parameter 形式" do
       let(:input) { "?api_key=ABC123&other=value" }
 
@@ -75,15 +116,16 @@ RSpec.describe Domain::FailureReasonSanitizer do
       end
     end
 
-    context "通常の日本語テキスト(誤マスク防止)" do
-      it "passphrase は秘密です は不変(= 前置き必須)" do
-        expect(described_class.sanitize("passphrase は秘密です")).to eq("passphrase は秘密です")
-      end
+    context "通常の日本語テキスト「passphrase は秘密です」(= 前置き欠如で誤マスクしない)" do
+      let(:input) { "passphrase は秘密です" }
 
-      it "設計書の signature について追記する は不変" do
-        expect(described_class.sanitize("設計書の signature について追記する"))
-          .to eq("設計書の signature について追記する")
-      end
+      it { is_expected.to eq("passphrase は秘密です") }
+    end
+
+    context "通常の日本語テキスト「設計書の signature について追記する」" do
+      let(:input) { "設計書の signature について追記する" }
+
+      it { is_expected.to eq("設計書の signature について追記する") }
     end
 
     context "ws_disconnected reason 形式は影響なし" do

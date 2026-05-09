@@ -27,6 +27,10 @@ module Domain
 
     private_constant :FAILURE_SENTINELS, :PLAN_HISTORY_LOOKBACK_MS
 
+    # 注: 各 endpoint は Bitget 固有のメソッド名(orders_pending / orders_plan_pending / position_all 等)に
+    # 直接依存している. 将来 exchange 切替を検討する場合は Coordinator も改修対象になるため,
+    # その時点で `Domain::ReconciliationGateway` 等の抽象を別途検討する.
+    #
     # @param order_endpoint [Infrastructure::BitgetOrderEndpoint] orders_pending / orders_plan_pending / orders_plan_history
     # @param position_endpoint [Infrastructure::BitgetPositionEndpoint] position_all
     # @param account_endpoint [Infrastructure::BitgetAccountEndpoint] fill_history
@@ -51,44 +55,14 @@ module Domain
     end
 
     # WS reconnect / algo anomaly 検出後の reconciliation 再実行.
-    # bootstrap step 11 と異なり session 状態遷移は行わない(running 状態のまま 5 件 REST 突合のみ).
+    # bootstrap step 11 と異なり session 状態遷移は行わず結果集約も行わない
+    # (running 状態のまま 5 件 REST 突合のみ).
     #
     # @param session [LiveTrading::Session]
     # @return [void]
     def run_after_reconnect(session)
-      reconcile_orders_pending(session)
-      reconcile_orders_plan_pending(session)
-      reconcile_orders_plan_history(session)
-      reconcile_position_all(session)
-      reconcile_fill_history(session)
-    end
-
-    # 結果集約: 全成功 / 部分失敗 / 全失敗の 3 経路に振り分ける.
-    # - 全成功: 何もせず続行
-    # - 部分失敗: logger.warn でアラート + 続行(MVP 暫定 / 04_運用ガイド §6.2-2 で目視確認)
-    # - 全失敗: raise → bootstrap_session の rescue → cleanup_on_failure → mark_failed_to_start!
-    #
-    # R-8-3 #C-4 反映: failed 判定を明示化(nil / false / 例外 sentinel `:failed` を失敗扱い).
-    # 将来 false / Symbol 戻り値に変わっても silent 見逃しを防ぐ.
-    #
-    # @param results [Hash{Symbol => Object}]
-    # @return [void]
-    # @raise [StandardError] 全 result が failure sentinel に該当する場合
-    def evaluate_outcome(results)
-      failed = results.select { |_, v| FAILURE_SENTINELS.include?(v) }.keys
-      total = results.size
-      failed_count = failed.size
-
-      return if failed_count.zero?
-
-      if failed_count == total
-        raise StandardError, "reconciliation all failed: #{failed.inspect}"
-      else
-        logger.warn(
-          "[ReconciliationCoordinator] reconciliation partially failed " \
-          "(#{failed_count}/#{total}): failed=#{failed.inspect}"
-        )
-      end
+      collect_reconciliation_results(session)
+      nil
     end
 
     private
@@ -103,6 +77,32 @@ module Domain
         position_all: reconcile_position_all(session),
         fill_history: reconcile_fill_history(session)
       }
+    end
+
+    # 結果集約: 全成功 / 部分失敗 / 全失敗の 3 経路に振り分ける.
+    # - 全成功: 何もせず続行
+    # - 部分失敗: logger.warn でアラート + 続行(MVP 暫定 / 04_運用ガイド §6.2-2 で目視確認)
+    # - 全失敗: raise → bootstrap_session の rescue → cleanup_on_failure → mark_failed_to_start!
+    #
+    # R-8-3 #C-4 反映: failed 判定を明示化(nil / false / 例外 sentinel `:failed` を失敗扱い).
+    # 将来 false / Symbol 戻り値に変わっても silent 見逃しを防ぐ.
+    def evaluate_outcome(results)
+      raise ArgumentError, "results must not be empty" if results.empty?
+
+      failed = results.select { |_, v| FAILURE_SENTINELS.include?(v) }.keys
+      total = results.size
+      failed_count = failed.size
+
+      return if failed_count.zero?
+
+      if failed_count == total
+        raise StandardError, "reconciliation all failed: #{failed.inspect}"
+      else
+        logger.warn(
+          "[ReconciliationCoordinator] reconciliation partially failed " \
+          "(#{failed_count}/#{total}): failed=#{failed.inspect}"
+        )
+      end
     end
 
     def reconcile_orders_pending(session)

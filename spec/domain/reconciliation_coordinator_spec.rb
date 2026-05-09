@@ -1,7 +1,7 @@
 require "rails_helper"
 
 RSpec.describe Domain::ReconciliationCoordinator do
-  let(:logger) { instance_double(Logger, warn: nil) }
+  let(:logger) { instance_double(Logger, warn: nil, info: nil, error: nil, debug: nil) }
   let(:order_endpoint) { instance_double(Infrastructure::BitgetOrderEndpoint) }
   let(:position_endpoint) { instance_double(Infrastructure::BitgetPositionEndpoint) }
   let(:account_endpoint) { instance_double(Infrastructure::BitgetAccountEndpoint) }
@@ -32,30 +32,66 @@ RSpec.describe Domain::ReconciliationCoordinator do
     end
 
     it "5 件の reconcile_* を順序で呼ぶ(orders_pending → plan_pending → plan_history → position_all → fill_history)" do
-      expect(order_endpoint).to receive(:orders_pending).with(symbol: "BTCUSDT").ordered.and_return("data" => [])
-      expect(order_endpoint).to receive(:orders_plan_pending).with(symbol: "BTCUSDT").ordered.and_return("data" => [])
+      expect(order_endpoint).to receive(:orders_pending).with(symbol: "BTCUSDT").ordered
+      expect(order_endpoint).to receive(:orders_plan_pending).with(symbol: "BTCUSDT").ordered
       expect(order_endpoint).to receive(:orders_plan_history)
-        .with(hash_including(symbol: "BTCUSDT")).ordered.and_return("data" => [])
+        .with(hash_including(symbol: "BTCUSDT")).ordered
       expect(position_endpoint).to receive(:position_all)
-        .with(margin_coin: "USDT", symbol: "BTCUSDT").ordered.and_return("data" => [])
+        .with(margin_coin: "USDT", symbol: "BTCUSDT").ordered
       expect(account_endpoint).to receive(:fill_history)
-        .with(hash_including(symbol: "BTCUSDT")).ordered.and_return("data" => [])
+        .with(hash_including(symbol: "BTCUSDT")).ordered
 
       coordinator.run_for_bootstrap(session)
     end
 
-    context "全失敗時" do
-      before do
-        allow(order_endpoint).to receive(:orders_pending).and_raise(StandardError, "down")
-        allow(order_endpoint).to receive(:orders_plan_pending).and_raise(StandardError, "down")
-        allow(order_endpoint).to receive(:orders_plan_history).and_raise(StandardError, "down")
-        allow(position_endpoint).to receive(:position_all).and_raise(StandardError, "down")
-        allow(account_endpoint).to receive(:fill_history).and_raise(StandardError, "down")
+    # evaluate_outcome の振り分けは private のため run_for_bootstrap 経由で検証する.
+    context "結果集約" do
+      context "全成功(全 reconcile が non-nil 返却)" do
+        it "raise しない / warn しない" do
+          expect { coordinator.run_for_bootstrap(session) }.not_to raise_error
+          expect(logger).not_to have_received(:warn)
+        end
       end
 
-      it "raise StandardError(reconciliation all failed)" do
-        expect { coordinator.run_for_bootstrap(session) }
-          .to raise_error(StandardError, /reconciliation all failed/)
+      context "1 件失敗(部分失敗 1/5)" do
+        before do
+          allow(order_endpoint).to receive(:orders_plan_pending).and_raise(StandardError, "boom")
+        end
+
+        it "raise しない / warn する" do
+          expect { coordinator.run_for_bootstrap(session) }.not_to raise_error
+          expect(logger).to have_received(:warn)
+            .with(/reconciliation partially failed \(1\/5\).*orders_plan_pending/)
+        end
+      end
+
+      context "4 件失敗(部分失敗 4/5)" do
+        before do
+          allow(order_endpoint).to receive(:orders_pending).and_raise(StandardError, "boom")
+          allow(order_endpoint).to receive(:orders_plan_pending).and_raise(StandardError, "boom")
+          allow(order_endpoint).to receive(:orders_plan_history).and_raise(StandardError, "boom")
+          allow(position_endpoint).to receive(:position_all).and_raise(StandardError, "boom")
+        end
+
+        it "raise しない / warn する" do
+          expect { coordinator.run_for_bootstrap(session) }.not_to raise_error
+          expect(logger).to have_received(:warn).with(/reconciliation partially failed \(4\/5\)/)
+        end
+      end
+
+      context "全失敗" do
+        before do
+          allow(order_endpoint).to receive(:orders_pending).and_raise(StandardError, "down")
+          allow(order_endpoint).to receive(:orders_plan_pending).and_raise(StandardError, "down")
+          allow(order_endpoint).to receive(:orders_plan_history).and_raise(StandardError, "down")
+          allow(position_endpoint).to receive(:position_all).and_raise(StandardError, "down")
+          allow(account_endpoint).to receive(:fill_history).and_raise(StandardError, "down")
+        end
+
+        it "raise StandardError(reconciliation all failed)" do
+          expect { coordinator.run_for_bootstrap(session) }
+            .to raise_error(StandardError, /reconciliation all failed/)
+        end
       end
     end
   end
@@ -66,113 +102,56 @@ RSpec.describe Domain::ReconciliationCoordinator do
       expect(session).not_to have_received(:start_reconciling!)
     end
 
-    it "5 件の reconcile_* を呼ぶ" do
+    it "5 件の reconcile_* を順序で呼ぶ(bootstrap と同じ)" do
+      expect(order_endpoint).to receive(:orders_pending).with(symbol: "BTCUSDT").ordered
+      expect(order_endpoint).to receive(:orders_plan_pending).with(symbol: "BTCUSDT").ordered
+      expect(order_endpoint).to receive(:orders_plan_history)
+        .with(hash_including(symbol: "BTCUSDT")).ordered
+      expect(position_endpoint).to receive(:position_all)
+        .with(margin_coin: "USDT", symbol: "BTCUSDT").ordered
+      expect(account_endpoint).to receive(:fill_history)
+        .with(hash_including(symbol: "BTCUSDT")).ordered
+
       coordinator.run_after_reconnect(session)
-      expect(order_endpoint).to have_received(:orders_pending).with(symbol: "BTCUSDT")
-      expect(order_endpoint).to have_received(:orders_plan_pending).with(symbol: "BTCUSDT")
-      expect(order_endpoint).to have_received(:orders_plan_history).with(hash_including(symbol: "BTCUSDT"))
-      expect(position_endpoint).to have_received(:position_all).with(margin_coin: "USDT", symbol: "BTCUSDT")
-      expect(account_endpoint).to have_received(:fill_history).with(hash_including(symbol: "BTCUSDT"))
+    end
+
+    it "全失敗でも raise しない(running 維持 / 部分復旧志向)" do
+      allow(order_endpoint).to receive(:orders_pending).and_raise(StandardError, "down")
+      allow(order_endpoint).to receive(:orders_plan_pending).and_raise(StandardError, "down")
+      allow(order_endpoint).to receive(:orders_plan_history).and_raise(StandardError, "down")
+      allow(position_endpoint).to receive(:position_all).and_raise(StandardError, "down")
+      allow(account_endpoint).to receive(:fill_history).and_raise(StandardError, "down")
+      expect { coordinator.run_after_reconnect(session) }.not_to raise_error
+    end
+
+    context "個別 reconcile_* 失敗時の logger.warn" do
+      it "orders_pending 失敗で warn 落とし + 後続継続" do
+        allow(order_endpoint).to receive(:orders_pending).and_raise(StandardError, "API down")
+        coordinator.run_after_reconnect(session)
+        expect(logger).to have_received(:warn).with(/reconcile_orders_pending failed.*API down/)
+      end
+
+      it "fill_history 失敗で warn 落とし(機微情報 sanitize)" do
+        allow(account_endpoint).to receive(:fill_history)
+          .and_raise(StandardError, "Faraday error: api_key=ABC123 failed")
+        coordinator.run_after_reconnect(session)
+        expect(logger).to have_received(:warn).with(/api_key=\[FILTERED\]/)
+      end
     end
   end
 
-  describe "#evaluate_outcome" do
-    context "全成功" do
-      let(:results) do
-        {
-          orders_pending: { "data" => [] },
-          orders_plan_pending: { "data" => [] },
-          orders_plan_history: { "data" => [] },
-          position_all: { "data" => [] },
-          fill_history: { "data" => [] }
-        }
-      end
-
-      it "raise しない / warn しない" do
-        expect { coordinator.evaluate_outcome(results) }.not_to raise_error
-        expect(logger).not_to have_received(:warn)
-      end
-    end
-
-    context "1 件失敗(部分失敗)" do
-      let(:results) do
-        {
-          orders_pending: { "data" => [] },
-          orders_plan_pending: nil,
-          orders_plan_history: { "data" => [] },
-          position_all: { "data" => [] },
-          fill_history: { "data" => [] }
-        }
-      end
-
-      it "raise しない / warn する(部分失敗 1/5)" do
-        expect { coordinator.evaluate_outcome(results) }.not_to raise_error
-        expect(logger).to have_received(:warn)
-          .with(/reconciliation partially failed \(1\/5\).*orders_plan_pending/)
-      end
-    end
-
-    context "4 件失敗(部分失敗)" do
-      let(:results) do
-        {
-          orders_pending: nil,
-          orders_plan_pending: nil,
-          orders_plan_history: nil,
-          position_all: nil,
-          fill_history: { "data" => [] }
-        }
-      end
-
-      it "raise しない / warn する(部分失敗 4/5)" do
-        expect { coordinator.evaluate_outcome(results) }.not_to raise_error
-        expect(logger).to have_received(:warn).with(/reconciliation partially failed \(4\/5\)/)
-      end
-    end
-
-    context "全失敗" do
-      let(:results) do
-        {
-          orders_pending: nil, orders_plan_pending: nil, orders_plan_history: nil,
-          position_all: nil, fill_history: nil
-        }
-      end
-
-      it "raise StandardError(reconciliation all failed)" do
-        expect { coordinator.evaluate_outcome(results) }
-          .to raise_error(StandardError, /reconciliation all failed/)
-      end
-    end
-
+  # R-8-3 #C-4: failed 判定明示化(nil / false / :failed sentinel を失敗扱い).
+  describe "FAILURE_SENTINELS による failed 判定" do
     context "false / :failed sentinel が混在" do
-      let(:results) do
-        {
-          orders_pending: false,
-          orders_plan_pending: :failed,
-          orders_plan_history: { "data" => [] },
-          position_all: { "data" => [] },
-          fill_history: { "data" => [] }
-        }
+      before do
+        allow(order_endpoint).to receive(:orders_pending).and_return(false)
+        allow(order_endpoint).to receive(:orders_plan_pending).and_return(:failed)
       end
 
-      it "false / :failed も failure 扱いで warn する" do
-        expect { coordinator.evaluate_outcome(results) }.not_to raise_error
+      it "false / :failed も failure 扱いで warn する(部分失敗 2/5)" do
+        expect { coordinator.run_for_bootstrap(session) }.not_to raise_error
         expect(logger).to have_received(:warn).with(/reconciliation partially failed \(2\/5\)/)
       end
-    end
-  end
-
-  describe "個別 reconcile_* 失敗時の logger.warn" do
-    it "orders_pending 失敗で warn 落とし + nil 返却(後続継続)" do
-      allow(order_endpoint).to receive(:orders_pending).and_raise(StandardError, "API down")
-      coordinator.run_after_reconnect(session)
-      expect(logger).to have_received(:warn).with(/reconcile_orders_pending failed.*API down/)
-    end
-
-    it "fill_history 失敗で warn 落とし(機微情報 sanitize)" do
-      allow(account_endpoint).to receive(:fill_history)
-        .and_raise(StandardError, "Faraday error: api_key=ABC123 failed")
-      coordinator.run_after_reconnect(session)
-      expect(logger).to have_received(:warn).with(/api_key=\[FILTERED\]/)
     end
   end
 end

@@ -106,12 +106,12 @@ RSpec.describe Domain::RiskGuardService do
       end
     end
 
-    # Phase 3.4-pre-2 反映: balance ベースのセーフティネット
-    context "balance がゼロの場合(fetch_initial_balance 失敗時 / 残高不足)" do
+    # Phase 3.4-pre-2 反映: balance > 0 セーフティネット(fetch_initial_balance 失敗時 / 残高不足防御).
+    context "balance がゼロの場合(境界値)" do
       let(:balance) { BigDecimal("0") }
       let(:candidate_size) { BigDecimal("500") }
 
-      it "false を返す(balance ゼロでは entry しない)" do
+      it "false を返す(balance > 0 必須)" do
         expect(subject).to be false
       end
     end
@@ -125,12 +125,12 @@ RSpec.describe Domain::RiskGuardService do
       end
     end
 
-    context "balance がちょうど 0(境界値)" do
-      let(:balance) { BigDecimal("0") }
-      let(:candidate_size) { BigDecimal("500") }
+    context "balance が正の最小値(0.01)の場合" do
+      let(:balance) { BigDecimal("0.01") }
+      let(:candidate_size) { BigDecimal("0.001") }
 
-      it "false を返す(balance > 0 必須)" do
-        expect(subject).to be false
+      it "true を返す(正の値であれば exposure 判定に進む)" do
+        expect(subject).to be true
       end
     end
   end

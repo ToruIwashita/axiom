@@ -1,7 +1,7 @@
 require "rails_helper"
 
 RSpec.describe Domain::LiveTradingStateCache do
-  let(:logger) { instance_double(Logger, warn: nil) }
+  let(:logger) { instance_double(Logger, warn: nil, info: nil, error: nil, debug: nil) }
   let(:cache) { described_class.new(logger: logger) }
 
   describe "初期値" do
@@ -123,57 +123,81 @@ RSpec.describe Domain::LiveTradingStateCache do
       end
     end
 
+    context "size=0(close 完了直後の Bitget push)" do
+      it "flat VO(side=nil / size=0 / entry=0)に正規化される" do
+        cache.apply_position_push(
+          [ { "symbol" => "BTCUSDT", "holdSide" => "long", "total" => "0", "openPriceAvg" => "50000" } ],
+          symbol: "BTCUSDT"
+        )
+        pos = cache.position
+        expect(pos.side).to be_nil
+        expect(pos.size).to eq(BigDecimal("0"))
+        expect(pos.entry_price).to eq(BigDecimal("0"))
+      end
+    end
+
+    # cache 不変判定は属性比較で行う(オブジェクト同一性は VO 再生成耐性がないため避ける).
+    shared_examples "position 不変" do
+      it "side / size / entry_price のいずれも変化しない" do
+        before_attrs = [ cache.position.side, cache.position.size, cache.position.entry_price ]
+        subject_call.call
+        expect([ cache.position.side, cache.position.size, cache.position.entry_price ]).to eq(before_attrs)
+      end
+    end
+
     context "holdSide allow-list ガード" do
-      it "long / short 以外(net 等)で cache 不変 + logger.warn" do
-        original = cache.position
-        data = [ { "symbol" => "BTCUSDT", "holdSide" => "net", "total" => "0.05", "openPriceAvg" => "50000" } ]
-        cache.apply_position_push(data, symbol: "BTCUSDT")
-        expect(cache.position).to equal(original)
-        expect(logger).to have_received(:warn).with(/unknown holdSide=.*net/)
+      context "long / short 以外(net 等)" do
+        let(:subject_call) do
+          -> { cache.apply_position_push([ { "symbol" => "BTCUSDT", "holdSide" => "net", "total" => "0.05", "openPriceAvg" => "50000" } ], symbol: "BTCUSDT") }
+        end
+        it_behaves_like "position 不変"
+
+        it "logger.warn を出力する" do
+          subject_call.call
+          expect(logger).to have_received(:warn).with(/unknown holdSide=.*net/)
+        end
       end
 
-      it "holdSide nil で cache 不変" do
-        original = cache.position
-        data = [ { "symbol" => "BTCUSDT", "holdSide" => nil, "total" => "0.05", "openPriceAvg" => "50000" } ]
-        cache.apply_position_push(data, symbol: "BTCUSDT")
-        expect(cache.position).to equal(original)
+      context "holdSide nil" do
+        let(:subject_call) do
+          -> { cache.apply_position_push([ { "symbol" => "BTCUSDT", "holdSide" => nil, "total" => "0.05", "openPriceAvg" => "50000" } ], symbol: "BTCUSDT") }
+        end
+        it_behaves_like "position 不変"
       end
     end
 
     context "BigDecimal nil/不正値ガード" do
-      it "total nil で cache 不変" do
-        original = cache.position
-        data = [ { "symbol" => "BTCUSDT", "holdSide" => "long", "total" => nil, "openPriceAvg" => "50000" } ]
-        cache.apply_position_push(data, symbol: "BTCUSDT")
-        expect(cache.position).to equal(original)
+      context "total nil" do
+        let(:subject_call) do
+          -> { cache.apply_position_push([ { "symbol" => "BTCUSDT", "holdSide" => "long", "total" => nil, "openPriceAvg" => "50000" } ], symbol: "BTCUSDT") }
+        end
+        it_behaves_like "position 不変"
       end
 
-      it "openPriceAvg 空文字で cache 不変" do
-        original = cache.position
-        data = [ { "symbol" => "BTCUSDT", "holdSide" => "long", "total" => "0.05", "openPriceAvg" => "" } ]
-        cache.apply_position_push(data, symbol: "BTCUSDT")
-        expect(cache.position).to equal(original)
+      context "openPriceAvg 空文字" do
+        let(:subject_call) do
+          -> { cache.apply_position_push([ { "symbol" => "BTCUSDT", "holdSide" => "long", "total" => "0.05", "openPriceAvg" => "" } ], symbol: "BTCUSDT") }
+        end
+        it_behaves_like "position 不変"
       end
     end
 
     context "境界 / 不正 data" do
-      it "data nil で cache 不変" do
-        original = cache.position
-        cache.apply_position_push(nil, symbol: "BTCUSDT")
-        expect(cache.position).to equal(original)
+      context "data nil" do
+        let(:subject_call) { -> { cache.apply_position_push(nil, symbol: "BTCUSDT") } }
+        it_behaves_like "position 不変"
       end
 
-      it "data 空配列で cache 不変" do
-        original = cache.position
-        cache.apply_position_push([], symbol: "BTCUSDT")
-        expect(cache.position).to equal(original)
+      context "data 空配列" do
+        let(:subject_call) { -> { cache.apply_position_push([], symbol: "BTCUSDT") } }
+        it_behaves_like "position 不変"
       end
 
-      it "symbol 該当 row なしで cache 不変" do
-        original = cache.position
-        data = [ { "symbol" => "ETHUSDT", "holdSide" => "short", "total" => "1.0", "openPriceAvg" => "3000" } ]
-        cache.apply_position_push(data, symbol: "BTCUSDT")
-        expect(cache.position).to equal(original)
+      context "symbol 該当 row なし" do
+        let(:subject_call) do
+          -> { cache.apply_position_push([ { "symbol" => "ETHUSDT", "holdSide" => "short", "total" => "1.0", "openPriceAvg" => "3000" } ], symbol: "BTCUSDT") }
+        end
+        it_behaves_like "position 不変"
       end
     end
   end
@@ -188,6 +212,45 @@ RSpec.describe Domain::LiveTradingStateCache do
       balance, position = cache.snapshot
       expect(balance).to eq(BigDecimal("1000"))
       expect(position.side).to eq(:long)
+    end
+
+    # 並列更新と並列 snapshot を交錯させ Mutex 保護下で torn read / race が起きないことを検証.
+    it "並列 update / snapshot 中に整合性が壊れない(20 thread × 50 反復)" do
+      writer_count = 10
+      reader_count = 10
+      iterations = 50
+      observed = Queue.new
+
+      writers = writer_count.times.map do |i|
+        Thread.new do
+          iterations.times do |j|
+            balance_value = (i * 1000 + j).to_s
+            cache.update_balance(balance_value)
+            cache.apply_position_push(
+              [ { "symbol" => "BTCUSDT", "holdSide" => "long", "total" => "1", "openPriceAvg" => balance_value } ],
+              symbol: "BTCUSDT"
+            )
+          end
+        end
+      end
+
+      readers = reader_count.times.map do
+        Thread.new do
+          iterations.times do
+            balance, position = cache.snapshot
+            observed << [ balance, position ]
+          end
+        end
+      end
+
+      (writers + readers).each(&:join)
+
+      # snapshot で取得した [balance, position] のいずれも nil にならないこと.
+      observed.size.times do
+        balance, position = observed.pop
+        expect(balance).to be_a(BigDecimal)
+        expect(position).to be_a(Domain::PositionValueObject)
+      end
     end
   end
 end
