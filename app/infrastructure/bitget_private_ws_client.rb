@@ -79,7 +79,16 @@ module Infrastructure
       @login_completed = false
       @login_error = nil
       @last_pong_at = nil
+      @reconnect_count = 0
       @mutex = Mutex.new
+    end
+
+    # 自動再接続の累計回数(LiveTradingWorker が 24h 切断後 reconciliation 再実行検知に利用 / 設計書 02_§5.2.6 + Phase 1.3 引き継ぎ #13).
+    # `reconnect_with_backoff` が再接続成功するたびに increment される.
+    # multiple-agent review R-2 #4 反映: increment / read を mutex で保護し non-atomic race を防ぐ.
+    # @return [Integer]
+    def reconnect_count
+      mutex.synchronize { @reconnect_count }
     end
 
     # WebSocket 接続を確立し,login + 既存購読の resubscribe を行う。
@@ -291,7 +300,14 @@ module Infrastructure
         if result.login_success?
           @login_completed = true
         else
-          @login_error = "code=#{result.code} msg=#{result.message}"
+          # multi-agent review R-4 #10 反映: login error message に Bitget API key 等が
+          # 将来含まれる可能性があるため, 永続化経路(LoginFailedError → DB failure_reason)に
+          # 流す文字列は code のみに限定し, raw message は logger.warn のみに記録する.
+          @login_error = "code=#{result.code}"
+          logger.warn(
+            "[BitgetPrivateWsClient] login error detail (not persisted): " \
+            "code=#{result.code} msg=#{result.message}"
+          )
         end
         return
       end
@@ -362,6 +378,7 @@ module Infrastructure
           send_login
           wait_until_login
           send_subscribe(list_to_resubscribe) unless list_to_resubscribe.empty?
+          mutex.synchronize { @reconnect_count += 1 }
           return
         rescue StandardError => e
           cleanup_ws_after_open_failure

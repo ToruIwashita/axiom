@@ -66,6 +66,90 @@ RSpec.describe Infrastructure::BitgetMarketEndpoint do
     end
   end
 
+  describe "#contract_metadata" do
+    subject { endpoint.contract_metadata(symbol: "BTCUSDT") }
+
+    let(:bitget_response) do
+      {
+        "code" => "00000",
+        "data" => [
+          {
+            "symbol" => "BTCUSDT",
+            "baseCoin" => "BTC",
+            "quoteCoin" => "USDT",
+            "pricePlace" => "1",
+            "priceEndStep" => "1",
+            "volumePlace" => "3",
+            "sizeMultiplier" => "0.001",
+            "minTradeNum" => "0.001",
+            "minTradeUSDT" => "5",
+            "maxLever" => "125",
+            "minLever" => "1",
+            "symbolStatus" => "normal"
+          }
+        ]
+      }
+    end
+
+    before do
+      allow(rest_client).to receive(:request).and_return(bitget_response)
+    end
+
+    context "正常レスポンス(symbol 指定)を受信した場合" do
+      it "/api/v2/mix/market/contracts に productType + symbol で問合せる" do
+        subject
+        expect(rest_client).to have_received(:request).with(
+          :get,
+          "/api/v2/mix/market/contracts",
+          params: { productType: "usdt-futures", symbol: "BTCUSDT" },
+          auth: false,
+          endpoint_key: :contract_metadata
+        )
+      end
+
+      it "tick_size = priceEndStep / 10^pricePlace で計算した metadata Hash を返す" do
+        result = subject
+        expect(result[:symbol]).to eq("BTCUSDT")
+        expect(result[:price_place]).to eq(1)
+        expect(result[:price_end_step]).to eq(1)
+        expect(result[:tick_size]).to eq(BigDecimal("0.1"))
+        expect(result[:volume_place]).to eq(3)
+        expect(result[:size_multiplier]).to eq(BigDecimal("0.001"))
+        expect(result[:min_trade_num]).to eq(BigDecimal("0.001"))
+        expect(result[:base_coin]).to eq("BTC")
+        expect(result[:quote_coin]).to eq("USDT")
+      end
+    end
+
+    context "priceEndStep が 5, pricePlace が 0 の場合(整数 tick)" do
+      let(:bitget_response) do
+        {
+          "code" => "00000",
+          "data" => [
+            {
+              "symbol" => "BTCUSDT", "baseCoin" => "BTC", "quoteCoin" => "USDT",
+              "pricePlace" => "0", "priceEndStep" => "5",
+              "volumePlace" => "0", "sizeMultiplier" => "1",
+              "minTradeNum" => "1"
+            }
+          ]
+        }
+      end
+
+      it "tick_size = 5 を返す" do
+        expect(subject[:tick_size]).to eq(BigDecimal("5"))
+      end
+    end
+
+    context "data が空配列(symbol が見つからない)の場合" do
+      let(:bitget_response) { { "code" => "00000", "data" => [] } }
+
+      it "ArgumentError を raise する" do
+        expect { subject }.to raise_error(ArgumentError, /symbol not found/)
+      end
+    end
+  end
+
   describe "#history_spot_candles" do
     subject do
       endpoint.history_spot_candles(

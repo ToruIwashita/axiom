@@ -136,11 +136,18 @@ RSpec.describe Infrastructure::BitgetPrivateWsClient do
     context "login 失敗レスポンスを受信した場合" do
       let(:raw) { '{"event":"login","code":30005,"msg":"signature error"}' }
 
-      it "@login_error にエラー情報が記録される" do
+      # multi-agent review R-4 #10 反映: @login_error には code のみ記録し
+      # raw msg は logger.warn のみに残す(永続化経路 LoginFailedError → DB failure_reason から msg を分離).
+      it "@login_error には code のみが記録される(msg は除外)" do
         deliver_raw(raw)
         expect(client.instance_variable_get(:@login_completed)).to be false
-        expect(client.instance_variable_get(:@login_error)).to include("30005")
-        expect(client.instance_variable_get(:@login_error)).to include("signature error")
+        expect(client.instance_variable_get(:@login_error)).to eq("code=30005")
+        expect(client.instance_variable_get(:@login_error)).not_to include("signature error")
+      end
+
+      it "raw msg は logger.warn でのみ出力される" do
+        deliver_raw(raw)
+        expect(logger).to have_received(:warn).with(/login error detail.*signature error/)
       end
     end
 

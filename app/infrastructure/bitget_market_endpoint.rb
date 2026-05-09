@@ -7,11 +7,12 @@ module Infrastructure
     PATH_MARK_CANDLES = "/api/v2/mix/market/history-mark-candles".freeze
     PATH_INDEX_CANDLES = "/api/v2/mix/market/history-index-candles".freeze
     PATH_FUNDING_RATE = "/api/v2/mix/market/history-fund-rate".freeze
+    PATH_CONTRACTS = "/api/v2/mix/market/contracts".freeze
 
     private_constant :FUTURES_PRODUCT_TYPE,
                      :PATH_FUTURES_CANDLES, :PATH_SPOT_CANDLES,
                      :PATH_MARK_CANDLES, :PATH_INDEX_CANDLES,
-                     :PATH_FUNDING_RATE
+                     :PATH_FUNDING_RATE, :PATH_CONTRACTS
 
     # @param rest_client [Infrastructure::BitgetRestClient] HTTP リクエスト発行用クライアント
     def initialize(rest_client:)
@@ -106,6 +107,23 @@ module Infrastructure
       end
     end
 
+    # USDT-M 先物の symbol metadata(tick_size / price_place / volume_place 等)を取得する
+    # (LiveTradingWorker bootstrap step 6 で利用)
+    #
+    # @param symbol [String] 例: 'BTCUSDT'
+    # @return [Hash] { symbol:, price_place:, price_end_step:, tick_size:(BigDecimal),
+    #                  volume_place:, size_multiplier:(BigDecimal), min_trade_num:(BigDecimal),
+    #                  base_coin:, quote_coin: }
+    # @raise [ArgumentError] symbol が見つからない場合
+    def contract_metadata(symbol:)
+      params = { productType: FUTURES_PRODUCT_TYPE, symbol: symbol }
+      response = rest_client.request(:get, PATH_CONTRACTS, params:, auth: false, endpoint_key: :contract_metadata)
+      data = response.fetch("data", [])
+      raise ArgumentError, "contract_metadata: symbol not found (symbol=#{symbol})" if data.empty?
+
+      build_contract_metadata(data.first)
+    end
+
     private
 
     attr_reader :rest_client
@@ -142,6 +160,24 @@ module Infrastructure
         high: row[2],
         low: row[3],
         close: row[4]
+      }
+    end
+
+    def build_contract_metadata(row)
+      price_place = row["pricePlace"].to_i
+      price_end_step = row["priceEndStep"].to_i
+      tick_size = price_end_step.zero? ? BigDecimal("0") : BigDecimal(price_end_step) / (BigDecimal("10")**price_place)
+
+      {
+        symbol: row["symbol"],
+        price_place: price_place,
+        price_end_step: price_end_step,
+        tick_size: tick_size,
+        volume_place: row["volumePlace"].to_i,
+        size_multiplier: BigDecimal(row.fetch("sizeMultiplier", "0").to_s),
+        min_trade_num: BigDecimal(row.fetch("minTradeNum", "0").to_s),
+        base_coin: row["baseCoin"],
+        quote_coin: row["quoteCoin"]
       }
     end
   end
