@@ -666,13 +666,14 @@ class LiveTradingWorker
     result["enter"] == true
   end
 
-  # RiskGuard 通過判定(allow_entry?). balance は 3.3-10d 範囲では 0 placeholder
-  # (account_endpoint 経由の実 balance 取得は後続 phase で対応).
+  # RiskGuard 通過判定(allow_entry?). balance は @cached_balance(memory cache)から取得.
+  # Phase 3.4-pre-1 で cache 化, Phase 3.4-pre-2 で allow_entry? 内 balance > 0 必須化.
   def risk_guard_pass?(session, intent)
     candidate_size = BigDecimal(intent["size"].to_s)
+    balance = @cached_state_mutex.synchronize { @cached_balance }
     risk_guard_service.allow_entry?(
       session: session,
-      balance: BigDecimal("0"), # TODO(後続 phase): account_endpoint で実 balance 取得
+      balance: balance,
       candidate_size: candidate_size
     )
   end

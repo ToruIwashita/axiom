@@ -105,6 +105,34 @@ RSpec.describe Domain::RiskGuardService do
         expect(subject).to be true
       end
     end
+
+    # Phase 3.4-pre-2 反映: balance ベースのセーフティネット
+    context "balance がゼロの場合(fetch_initial_balance 失敗時 / 残高不足)" do
+      let(:balance) { BigDecimal("0") }
+      let(:candidate_size) { BigDecimal("500") }
+
+      it "false を返す(balance ゼロでは entry しない)" do
+        expect(subject).to be false
+      end
+    end
+
+    context "balance が負値の場合(理論上ありえないが防御)" do
+      let(:balance) { BigDecimal("-100") }
+      let(:candidate_size) { BigDecimal("500") }
+
+      it "false を返す" do
+        expect(subject).to be false
+      end
+    end
+
+    context "balance がちょうど 0(境界値)" do
+      let(:balance) { BigDecimal("0") }
+      let(:candidate_size) { BigDecimal("500") }
+
+      it "false を返す(balance > 0 必須)" do
+        expect(subject).to be false
+      end
+    end
   end
 
   describe "#should_cooldown?" do
