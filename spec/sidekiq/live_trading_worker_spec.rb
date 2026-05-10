@@ -29,6 +29,7 @@ RSpec.describe LiveTradingWorker do
   let(:state_cache) { Domain::LiveTradingStateCache.new(logger: logger) }
   let(:reconciliation_coordinator) { nil } # 個別 describe で instance_double 等に override
   let(:candle_confirm_detector) { Domain::CandleConfirmDetector.new }
+  let(:anomaly_reconcile_debouncer) { instance_double(Domain::AnomalyReconcileDebouncer, try_acquire: true, release: nil) }
   let(:worker) do
     described_class.new(
       process_manager: process_manager,
@@ -42,6 +43,7 @@ RSpec.describe LiveTradingWorker do
       state_cache: state_cache,
       reconciliation_coordinator: reconciliation_coordinator,
       candle_confirm_detector: candle_confirm_detector,
+      anomaly_reconcile_debouncer: anomaly_reconcile_debouncer,
       main_loop_poll_interval: 0, # spec ではループを sleep させない
       ws_disconnect_grace_seconds: 0, # R-6 #9: spec では grace なしで即時 :ws_disconnected return
       logger: logger
@@ -1109,85 +1111,46 @@ RSpec.describe LiveTradingWorker do
         end
       end
 
-      # Phase 3.4-pre-7 + R-8-2: trigger_reconciliation_for_algo_anomaly
+      # trigger_reconciliation_for_algo_anomaly: anomaly_reconcile_debouncer 経由の起動制御.
+      # debounce 詳細 spec は spec/domain/anomaly_reconcile_debouncer_spec.rb に集約済.
+      # Worker spec では debouncer への委譲と reconciliation 呼出経路のみ検証.
       describe "#trigger_reconciliation_for_algo_anomaly" do
-        before do
-          worker.instance_variable_set(:@session, session)
-          worker.instance_variable_set(:@anomaly_reconcile_in_progress, false)
-          worker.instance_variable_set(:@anomaly_reconcile_mutex, Mutex.new)
-          worker.instance_variable_set(:@last_anomaly_reconcile_at, nil)
-          worker.instance_variable_set(:@monotonic_clock, -> { @stub_now })
-          @stub_now = 1000.0
+        before { worker.instance_variable_set(:@session, session) }
+
+        context "debouncer.try_acquire = true(取得成功)" do
+          before { allow(anomaly_reconcile_debouncer).to receive(:try_acquire).and_return(true) }
+
+          it "run_in_db_thread('reconcile_after_algo_anomaly')で run_reconciliation_after_reconnect を呼ぶ" do
+            expect(worker).to receive(:run_reconciliation_after_reconnect).with(
+              an_object_having_attributes(id: session.id)
+            )
+            worker.send(:trigger_reconciliation_for_algo_anomaly)
+            expect(worker).to have_received(:run_in_db_thread).with("reconcile_after_algo_anomaly")
+          end
+
+          it "ensure 経路で debouncer.release を呼ぶ" do
+            expect(anomaly_reconcile_debouncer).to receive(:release)
+            allow(worker).to receive(:run_reconciliation_after_reconnect)
+            worker.send(:trigger_reconciliation_for_algo_anomaly)
+          end
         end
 
-        it "run_in_db_thread('reconcile_after_algo_anomaly')で run_reconciliation_after_reconnect を呼ぶ" do
-          expect(worker).to receive(:run_reconciliation_after_reconnect).with(
-            an_object_having_attributes(id: session.id)
-          )
-          worker.send(:trigger_reconciliation_for_algo_anomaly)
-          expect(worker).to have_received(:run_in_db_thread).with("reconcile_after_algo_anomaly")
+        context "debouncer.try_acquire = false(取得失敗 / debounce 中)" do
+          before { allow(anomaly_reconcile_debouncer).to receive(:try_acquire).and_return(false) }
+
+          it "run_in_db_thread を呼ばない / release も呼ばない" do
+            expect(anomaly_reconcile_debouncer).not_to receive(:release)
+            worker.send(:trigger_reconciliation_for_algo_anomaly)
+            expect(worker).not_to have_received(:run_in_db_thread)
+          end
         end
 
         context "@session が nil の場合(防御)" do
-          before do
-            worker.instance_variable_set(:@session, nil)
-          end
+          before { worker.instance_variable_set(:@session, nil) }
 
-          it "run_reconciliation_after_reconnect を呼ばない / raise しない" do
-            expect(worker).not_to receive(:run_reconciliation_after_reconnect)
+          it "debouncer.try_acquire を呼ばない / raise しない" do
+            expect(anomaly_reconcile_debouncer).not_to receive(:try_acquire)
             expect { worker.send(:trigger_reconciliation_for_algo_anomaly) }.not_to raise_error
-          end
-        end
-
-        # R-8-2: WS push burst での thread 爆発防止 debounce
-        context "debounce(B-1 #1 反映)" do
-          context "in-progress フラグが true の場合" do
-            before do
-              worker.instance_variable_set(:@anomaly_reconcile_in_progress, true)
-            end
-
-            it "run_in_db_thread を呼ばない(skip)" do
-              worker.send(:trigger_reconciliation_for_algo_anomaly)
-              expect(worker).not_to have_received(:run_in_db_thread)
-            end
-          end
-
-          context "前回起動から 30 秒未経過" do
-            before do
-              worker.instance_variable_set(:@last_anomaly_reconcile_at, 1000.0)
-              @stub_now = 1015.0 # 15 秒経過
-            end
-
-            it "run_in_db_thread を呼ばない(throttle)" do
-              worker.send(:trigger_reconciliation_for_algo_anomaly)
-              expect(worker).not_to have_received(:run_in_db_thread)
-            end
-          end
-
-          context "前回起動から 30 秒以上経過" do
-            before do
-              worker.instance_variable_set(:@last_anomaly_reconcile_at, 1000.0)
-              @stub_now = 1031.0 # 31 秒経過
-            end
-
-            it "run_in_db_thread を呼ぶ(再起動)" do
-              expect(worker).to receive(:run_reconciliation_after_reconnect)
-              worker.send(:trigger_reconciliation_for_algo_anomaly)
-              expect(worker).to have_received(:run_in_db_thread).with("reconcile_after_algo_anomaly")
-            end
-          end
-
-          context "reconciliation 完了後に in-progress = false にリリースされる" do
-            it "次回呼出が許可される(連続 2 回呼出可能)" do
-              # 1 回目: 起動 + run_reconciliation_after_reconnect 即時実行(stub 同期)
-              call_count = 0
-              allow(worker).to receive(:run_reconciliation_after_reconnect) { call_count += 1 }
-              worker.send(:trigger_reconciliation_for_algo_anomaly)
-              # 30 秒以上進めて 2 回目可能化
-              @stub_now = 1031.0
-              worker.send(:trigger_reconciliation_for_algo_anomaly)
-              expect(call_count).to eq(2)
-            end
           end
         end
       end

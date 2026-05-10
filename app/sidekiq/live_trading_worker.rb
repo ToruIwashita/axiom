@@ -62,6 +62,7 @@ class LiveTradingWorker
   # @param state_cache [Domain::LiveTradingStateCache, nil] balance / position memory cache(R-8-5 抽出)
   # @param reconciliation_coordinator [Domain::ReconciliationCoordinator, nil] reconciliation REST 突合(R-8-6 抽出)
   # @param candle_confirm_detector [Domain::CandleConfirmDetector, nil] WS candle 確定判定(Phase 3.4a Step 0a 抽出)
+  # @param anomaly_reconcile_debouncer [Domain::AnomalyReconcileDebouncer, nil] algo anomaly reconciliation 起動 debounce(Phase 3.4a Step 0b-1 抽出)
   # @param main_loop_poll_interval [Float] メインループ kill-switch / 状態 poll 間隔(秒). spec で 0 を渡して即時 break.
   # @param monotonic_clock [#call] heartbeat / lease renew の周期判定用 monotonic clock(R-2 #5 反映).
   #   デフォルトは `Process.clock_gettime(Process::CLOCK_MONOTONIC)`. 壁時計逆行(NTP step / 手動修正)による
@@ -83,6 +84,7 @@ class LiveTradingWorker
     state_cache: nil,
     reconciliation_coordinator: nil,
     candle_confirm_detector: nil,
+    anomaly_reconcile_debouncer: nil,
     main_loop_poll_interval: DEFAULT_MAIN_LOOP_POLL_INTERVAL,
     monotonic_clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) },
     ws_disconnect_grace_seconds: WS_DISCONNECT_GRACE_SECONDS,
@@ -102,6 +104,7 @@ class LiveTradingWorker
     @state_cache = state_cache
     @reconciliation_coordinator = reconciliation_coordinator
     @candle_confirm_detector = candle_confirm_detector
+    @anomaly_reconcile_debouncer = anomaly_reconcile_debouncer
     @main_loop_poll_interval = main_loop_poll_interval
     @monotonic_clock = monotonic_clock
     @ws_disconnect_grace_seconds = ws_disconnect_grace_seconds
@@ -129,10 +132,8 @@ class LiveTradingWorker
     @reconciliation_coordinator = reconciliation_coordinator_lazy
     # Phase 3.4a Step 0a 反映: candle 確定判定を Domain::CandleConfirmDetector に抽出.
     @candle_confirm_detector = candle_confirm_detector_lazy
-    # R-8-2: algo anomaly reconcile の debounce 用フラグ + 最終起動時刻.
-    @anomaly_reconcile_in_progress = false
-    @anomaly_reconcile_mutex = Mutex.new
-    @last_anomaly_reconcile_at = nil
+    # Phase 3.4a Step 0b-1 反映: algo anomaly reconcile debounce を Domain::AnomalyReconcileDebouncer に抽出.
+    @anomaly_reconcile_debouncer = anomaly_reconcile_debouncer_lazy
     # R-8-3 #C-1: WS reconnect_count の cross-thread mutex(main loop read / run_in_db_thread block write).
     @ws_reconnect_count_mutex = Mutex.new
 
@@ -766,43 +767,20 @@ class LiveTradingWorker
   # WS callback thread から DB 操作 + REST 呼出を直接実行すると thread block 化するため
   # run_in_db_thread 経由で隔離.session.reload で main loop と同じ最新状態取得.
   #
-  # R-8-2 反映: WS push burst での thread 爆発 / Bitget rate limit 抵触を防ぐため debounce 適用.
+  # R-8-2 反映 / Phase 3.4a Step 0b-1 で Domain::AnomalyReconcileDebouncer に委譲:
   # - in-progress フラグで重複起動防止
   # - 前回起動から ALGO_ANOMALY_RECONCILE_DEBOUNCE_SECONDS 未満なら skip
   def trigger_reconciliation_for_algo_anomaly
     return unless @session
-    return unless acquire_anomaly_reconcile_slot
+    return unless @anomaly_reconcile_debouncer.try_acquire
 
     run_in_db_thread("reconcile_after_algo_anomaly") do
       begin
         session_reloaded = LiveTrading::Session.find(@session.id)
         run_reconciliation_after_reconnect(session_reloaded)
       ensure
-        release_anomaly_reconcile_slot
+        @anomaly_reconcile_debouncer.release
       end
-    end
-  end
-
-  # debounce slot 取得: in-progress でなく前回から DEBOUNCE 以上経過していれば true.
-  # 取得時に in-progress = true + last_triggered_at 更新.
-  def acquire_anomaly_reconcile_slot
-    @anomaly_reconcile_mutex.synchronize do
-      return false if @anomaly_reconcile_in_progress
-
-      now = @monotonic_clock.call
-      if @last_anomaly_reconcile_at && (now - @last_anomaly_reconcile_at) < ALGO_ANOMALY_RECONCILE_DEBOUNCE_SECONDS
-        return false
-      end
-
-      @anomaly_reconcile_in_progress = true
-      @last_anomaly_reconcile_at = now
-      true
-    end
-  end
-
-  def release_anomaly_reconcile_slot
-    @anomaly_reconcile_mutex.synchronize do
-      @anomaly_reconcile_in_progress = false
     end
   end
 
@@ -956,6 +934,15 @@ class LiveTradingWorker
   # Phase 3.4a Step 0a: candle_confirm_detector が DI されていない場合の lazy init.
   def candle_confirm_detector_lazy
     @candle_confirm_detector || Domain::CandleConfirmDetector.new
+  end
+
+  # Phase 3.4a Step 0b-1: anomaly_reconcile_debouncer が DI されていない場合の lazy init.
+  # monotonic_clock は Worker と共有(壁時計逆行耐性).
+  def anomaly_reconcile_debouncer_lazy
+    @anomaly_reconcile_debouncer || Domain::AnomalyReconcileDebouncer.new(
+      monotonic_clock: @monotonic_clock,
+      debounce_seconds: ALGO_ANOMALY_RECONCILE_DEBOUNCE_SECONDS
+    )
   end
 
   # WS factory は Proc を保持し step 9/10 内で `.call` で遅延生成する
