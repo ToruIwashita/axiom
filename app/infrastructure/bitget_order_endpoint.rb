@@ -8,6 +8,7 @@ module Infrastructure
 
     PATH_PLACE_ORDER = "/api/v2/mix/order/place-order".freeze
     PATH_CANCEL_ORDER = "/api/v2/mix/order/cancel-order".freeze
+    PATH_CANCEL_PLAN_ORDER = "/api/v2/mix/order/cancel-plan-order".freeze
     PATH_MODIFY_ORDER = "/api/v2/mix/order/modify-order".freeze
     PATH_ORDERS_PENDING = "/api/v2/mix/order/orders-pending".freeze
     PATH_ORDERS_PLAN_PENDING = "/api/v2/mix/order/orders-plan-pending".freeze
@@ -17,7 +18,7 @@ module Infrastructure
     PATH_CLOSE_POSITIONS = "/api/v2/mix/order/close-positions".freeze
 
     private_constant :PRODUCT_TYPE,
-                     :PATH_PLACE_ORDER, :PATH_CANCEL_ORDER, :PATH_MODIFY_ORDER,
+                     :PATH_PLACE_ORDER, :PATH_CANCEL_ORDER, :PATH_CANCEL_PLAN_ORDER, :PATH_MODIFY_ORDER,
                      :PATH_ORDERS_PENDING, :PATH_ORDERS_PLAN_PENDING, :PATH_ORDERS_PLAN_HISTORY,
                      :PATH_PLAN_SUB_ORDER, :PATH_ORDER_DETAIL, :PATH_CLOSE_POSITIONS
 
@@ -83,6 +84,25 @@ module Infrastructure
         clientOid: client_oid
       }.compact
       post(PATH_CANCEL_ORDER, body: body, endpoint_key: :cancel_order)
+    end
+
+    # 未トリガー Algo 注文をキャンセルする(order_id か client_oid のいずれか必須).
+    # kill-switch cancel_only モードで未トリガー plan order を一括解除する用途.
+    #
+    # @param symbol [String]
+    # @param order_id [String, nil]
+    # @param client_oid [String, nil]
+    # @return [Hash]
+    def cancel_plan_order(symbol:, order_id: nil, client_oid: nil)
+      raise ArgumentError, "order_id or client_oid is required" if order_id.nil? && client_oid.nil?
+
+      body = {
+        symbol: symbol,
+        productType: PRODUCT_TYPE,
+        orderId: order_id,
+        clientOid: client_oid
+      }.compact
+      post(PATH_CANCEL_PLAN_ORDER, body: body, endpoint_key: :cancel_plan_order)
     end
 
     # 通常注文を修正する
