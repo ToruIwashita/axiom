@@ -23,11 +23,16 @@ module Domain
   class KillSwitchExecutorService
     SUPPORTED_MODES = %i[cancel_only cancel_and_market_close cancel_and_reduce_only].freeze
 
+    # 設計書 05_§5.1.1.1 line 892-895 準拠:
+    # - limit_offset_bps: 10(0.1% passive 寄せ / mark_price ± 10bps で約定確率と slippage バランス)
+    # - follow_interval_sec: 30(modify 頻度設計書整合 / Bitget rate limit 抵触リスク回避)
+    # - fallback_after_sec: 300(5 分 / market 流動性低下時の slippage 抑制 / 約定機会確保)
+    # - max_follow_iterations: 10(設計書 line 895「fallback_after_sec / follow_interval_sec から算出」式整合)
     DEFAULT_REDUCE_ONLY_PARAMS = {
-      limit_offset_bps: 0,
-      follow_interval_sec: 5,
-      fallback_after_sec: 60,
-      max_follow_iterations: 20
+      limit_offset_bps: 10,
+      follow_interval_sec: 30,
+      fallback_after_sec: 300,
+      max_follow_iterations: 10
     }.freeze
 
     private_constant :SUPPORTED_MODES, :DEFAULT_REDUCE_ONLY_PARAMS

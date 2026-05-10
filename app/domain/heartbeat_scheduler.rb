@@ -95,9 +95,9 @@ module Domain
 
     # lease nil 状態が周期(lease_renew_interval_seconds)以上連続した場合に warn 出力.
     # 初回 nil から記録し,以後周期到達ごとに 1 回ずつ通知(spam 防止).
+    # @last_lease_missing_warn_at は uninit 時 nil として参照可能(Ruby 仕様).
     def warn_lease_missing
       now = @monotonic_clock.call
-      @last_lease_missing_warn_at ||= nil
       if @last_lease_missing_warn_at.nil? ||
          (now - @last_lease_missing_warn_at) >= @lease_renew_interval_seconds
         logger.warn(

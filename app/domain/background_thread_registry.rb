@@ -1,5 +1,3 @@
-require "set"
-
 module Domain
   # WS callback / WS reconnect / algo anomaly 検出時に DB アクセスを別 thread で実行する際の
   # Thread 管理を担う Domain サービス.
