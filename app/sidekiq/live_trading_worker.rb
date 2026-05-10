@@ -40,13 +40,13 @@ class LiveTradingWorker
   # background thread sweep 周期(秒). R-7 #C 反映: 24h 稼働で @background_threads に
   # 完了済 thread が蓄積するメモリリークを定期的に reject! で解消する.
   BACKGROUND_THREAD_SWEEP_INTERVAL_SECONDS = 60
-  # R-6 #13 反映: failure_reason / log メッセージから credentials が漏れる経路を防ぐ
-  # Faraday error / Bitget API レスポンス msg に api_key 等が echo された場合の defense-in-depth.
-  SECRET_PATTERN = /(api_key|secret_key|passphrase|signature|token)[^\s,;}]*/i
-
+  # algo anomaly trigger debounce 期間(秒). R-8-2 反映: WS push burst で reconciliation thread が
+  # 大量起動し AR pool 枯渇 / Bitget rate limit 抵触するのを防ぐ.同期間中は in-progress フラグでスキップ.
+  ALGO_ANOMALY_RECONCILE_DEBOUNCE_SECONDS = 30
   private_constant :DEFAULT_MAIN_LOOP_POLL_INTERVAL, :HEARTBEAT_INTERVAL_SECONDS,
                    :LEASE_RENEW_INTERVAL_SECONDS, :WS_DISCONNECT_GRACE_SECONDS,
-                   :BACKGROUND_THREAD_SWEEP_INTERVAL_SECONDS, :SECRET_PATTERN
+                   :BACKGROUND_THREAD_SWEEP_INTERVAL_SECONDS,
+                   :ALGO_ANOMALY_RECONCILE_DEBOUNCE_SECONDS
 
   # @param process_manager [Domain::LiveTradingProcessManager]
   # @param clock_sync [Infrastructure::BitgetClockSync, nil] step 5 で server_time 同期に利用
@@ -58,6 +58,9 @@ class LiveTradingWorker
   # @param ai_filter_service [Domain::AiFilterService, nil] order_intent 評価用 AI フィルタ
   # @param risk_guard_service [Domain::RiskGuardService, nil] entry / cooldown / halt 判定
   # @param order_endpoint [Infrastructure::BitgetOrderEndpoint, nil] 発注
+  # @param account_endpoint [Infrastructure::BitgetAccountEndpoint, nil] 残高 / fill_history 取得(3.4-pre-1 + 3.4-pre-4)
+  # @param state_cache [Domain::LiveTradingStateCache, nil] balance / position memory cache(R-8-5 抽出)
+  # @param reconciliation_coordinator [Domain::ReconciliationCoordinator, nil] reconciliation REST 突合(R-8-6 抽出)
   # @param main_loop_poll_interval [Float] メインループ kill-switch / 状態 poll 間隔(秒). spec で 0 を渡して即時 break.
   # @param monotonic_clock [#call] heartbeat / lease renew の周期判定用 monotonic clock(R-2 #5 反映).
   #   デフォルトは `Process.clock_gettime(Process::CLOCK_MONOTONIC)`. 壁時計逆行(NTP step / 手動修正)による
@@ -75,6 +78,9 @@ class LiveTradingWorker
     ai_filter_service: nil,
     risk_guard_service: nil,
     order_endpoint: nil,
+    account_endpoint: nil,
+    state_cache: nil,
+    reconciliation_coordinator: nil,
     main_loop_poll_interval: DEFAULT_MAIN_LOOP_POLL_INTERVAL,
     monotonic_clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) },
     ws_disconnect_grace_seconds: WS_DISCONNECT_GRACE_SECONDS,
@@ -90,6 +96,9 @@ class LiveTradingWorker
     @ai_filter_service = ai_filter_service
     @risk_guard_service = risk_guard_service
     @order_endpoint = order_endpoint
+    @account_endpoint = account_endpoint
+    @state_cache = state_cache
+    @reconciliation_coordinator = reconciliation_coordinator
     @main_loop_poll_interval = main_loop_poll_interval
     @monotonic_clock = monotonic_clock
     @ws_disconnect_grace_seconds = ws_disconnect_grace_seconds
@@ -111,6 +120,16 @@ class LiveTradingWorker
     @private_ws = nil
     @background_threads = []
     @background_threads_mutex = Mutex.new
+    # R-8-5 反映: balance / position memory cache を Domain::LiveTradingStateCache に抽出.
+    @state_cache = state_cache_lazy
+    # R-8-6 反映: reconciliation を Domain::ReconciliationCoordinator に抽出.
+    @reconciliation_coordinator = reconciliation_coordinator_lazy
+    # R-8-2: algo anomaly reconcile の debounce 用フラグ + 最終起動時刻.
+    @anomaly_reconcile_in_progress = false
+    @anomaly_reconcile_mutex = Mutex.new
+    @last_anomaly_reconcile_at = nil
+    # R-8-3 #C-1: WS reconnect_count の cross-thread mutex(main loop read / run_in_db_thread block write).
+    @ws_reconnect_count_mutex = Mutex.new
 
     bootstrap_session(session_id)
     enter_main_loop
@@ -129,12 +148,18 @@ class LiveTradingWorker
 
   def bootstrap_session(session_id)
     @session = LiveTrading::Session.find(session_id)
+    # WS callback thread から @session.symbol / @session.margin_coin を都度参照すると
+    # AR reload との競合や @session 自体の差し替え時に整合性が崩れる懸念があるため,
+    # bootstrap 段階で immutable な値を local キャッシュしておく(WS push handler から参照).
+    @trading_symbol = @session.symbol
+    @trading_margin_coin = @session.margin_coin
     load_revision_with_consistency(@session)
     Risk::Policy.find(@session.risk_policy_id)
     @lease = process_manager.acquire_lease!(session: @session, worker_instance_id: @worker_instance_id)
     sync_clock_or_raise!
     fetch_contract_metadata(@session)
     apply_account_settings(@session)
+    fetch_initial_balance(@session) # Phase 3.4-pre-1: bootstrap step 7 後に initial balance 取得
     fetch_warmup_candles(@session)
     @public_ws = connect_public_ws(@session)
     @private_ws = connect_private_ws(@session)
@@ -181,13 +206,19 @@ class LiveTradingWorker
   # WS Client の reconnect_count から増分を検知し, 増えていれば reconciliation を再実行する
   # (Phase 1.3 引き継ぎ #13: 24h 切断後 reconciliation / 設計書 02_§5.2.6).
   # 別 thread + AR pool で実行(WS callback thread は触らないため main loop thread から起動).
+  #
+  # R-8-3 #C-1 反映: @last_*_reconnect_count の cross-thread 読書きを @anomaly_reconcile_mutex 流用で
+  # 保護する(別 mutex を増やすと初期化箇所が増えるため流用 / read main loop / write run_in_db_thread block).
   def detect_ws_reconnect_and_reconcile
     return unless @session
 
     public_count = ws_reconnect_count(@public_ws)
     private_count = ws_reconnect_count(@private_ws)
-    public_reconnected = public_count > @last_public_ws_reconnect_count
-    private_reconnected = private_count > @last_private_ws_reconnect_count
+    last_public, last_private = @ws_reconnect_count_mutex.synchronize do
+      [ @last_public_ws_reconnect_count, @last_private_ws_reconnect_count ]
+    end
+    public_reconnected = public_count > last_public
+    private_reconnected = private_count > last_private
 
     return unless public_reconnected || private_reconnected
 
@@ -206,19 +237,18 @@ class LiveTradingWorker
       run_reconciliation_after_reconnect(session_reloaded)
       # R-6 #10 反映: count 更新は reconciliation 完了後に行う.
       # thread 例外時は count 未更新 → 次 main loop iteration で再試行可能(carry 漏れ防止).
-      @last_public_ws_reconnect_count = public_count
-      @last_private_ws_reconnect_count = private_count
+      # R-8-3 #C-1: mutex 保護で main loop thread の read と整合性確保.
+      @ws_reconnect_count_mutex.synchronize do
+        @last_public_ws_reconnect_count = public_count
+        @last_private_ws_reconnect_count = private_count
+      end
     end
   end
 
   # reconnect 後の reconciliation 再実行.
-  # bootstrap step 11 と異なり session 状態遷移(start_reconciling!)は行わない
-  # (running 状態のまま 6 件 REST 突合のみ実施).
+  # R-8-6 反映: Domain::ReconciliationCoordinator に委譲.
   def run_reconciliation_after_reconnect(session)
-    reconcile_orders_pending(session)
-    reconcile_orders_plan_pending(session)
-    reconcile_orders_plan_history(session)
-    reconcile_position_all(session)
+    @reconciliation_coordinator.run_after_reconnect(session)
   end
 
   # WS Client の reconnect_count を安全に取得する(nil 防御 + respond_to? 防御).
@@ -240,7 +270,7 @@ class LiveTradingWorker
     @last_heartbeat_at = now
   rescue StandardError => e
     logger.warn(
-      "[LiveTradingWorker] pulse_heartbeat! failed: #{e.class.name}: #{e.message}"
+      "[LiveTradingWorker] pulse_heartbeat! failed: #{e.class.name}: #{sanitize_log_message(e.message)}"
     )
   end
 
@@ -257,7 +287,7 @@ class LiveTradingWorker
     @last_lease_renew_at = now
   rescue StandardError => e
     logger.warn(
-      "[LiveTradingWorker] renew_lease! failed: #{e.class.name}: #{e.message}"
+      "[LiveTradingWorker] renew_lease! failed: #{e.class.name}: #{sanitize_log_message(e.message)}"
     )
   end
 
@@ -335,7 +365,7 @@ class LiveTradingWorker
   rescue StandardError => release_error
     logger.warn(
       "[LiveTradingWorker] lease.release! failed during #{context}: " \
-      "#{release_error.class.name}: #{release_error.message}"
+      "#{release_error.class.name}: #{sanitize_log_message(release_error.message)}"
     )
   end
 
@@ -391,6 +421,22 @@ class LiveTradingWorker
     )
   end
 
+  # Phase 3.4-pre-1 + R-8-5 反映: bootstrap step 7 後に initial balance を取得して
+  # Domain::LiveTradingStateCache に保存する.以降は handle_account_message で WS push を反映.
+  # 失敗時は logger.warn 落とし + cache 不変(bootstrap は中断しない).
+  def fetch_initial_balance(session)
+    response = account_endpoint.account(margin_coin: session.margin_coin, symbol: session.symbol)
+    data = response.is_a?(Hash) ? response["data"] : nil
+    available = data.is_a?(Hash) ? data["available"] : nil
+    return if available.nil?
+
+    @state_cache.update_balance(available)
+  rescue StandardError => e
+    logger.warn(
+      "[LiveTradingWorker] fetch_initial_balance failed: #{e.class.name}: #{sanitize_log_message(e.message)}"
+    )
+  end
+
   # step 9: Public WS subscribe(ticker / candle1m / books5)→ connect.
   # WS instance は public_ws_factory.call で遅延生成(設計書 02_§5.2.6 / 3.3-9a peer review 重要 obs 2 反映).
   # subscribe callback は (data, result) の 2 引数で BitgetPublicWsClient から呼ばれる.
@@ -421,7 +467,7 @@ class LiveTradingWorker
   rescue StandardError => e
     logger.warn(
       "[LiveTradingWorker] handle_public_ws_message failed in channel=#{sub.channel}: " \
-      "#{e.class.name}: #{e.message}"
+      "#{e.class.name}: #{sanitize_log_message(e.message)}"
     )
   end
 
@@ -502,7 +548,7 @@ class LiveTradingWorker
     rescue StandardError => e
       logger.error(
         "[LiveTradingWorker] background task '#{label}' failed: " \
-        "#{e.class.name}: #{e.message}"
+        "#{e.class.name}: #{sanitize_log_message(e.message)}"
       )
     end
 
@@ -581,14 +627,13 @@ class LiveTradingWorker
   end
 
   # Domain::LiveContext.build_ctx_input に委譲して子プロセスへ渡す形式を構築する.
-  # MVP では position / balance を placeholder(no-position / 残高 0)で送信する
-  # (multiple-agent review R-1 #1 反映: LiveContext.from_ctx_input の必須キー満たす契約整合).
-  # TODO(後続 phase): account_endpoint で実 balance + position を取得して付与
+  # R-8-5 反映: balance / position は Domain::LiveTradingStateCache.snapshot から取得(thread-safe).
   def build_runner_ctx_input(_session, candle, state)
+    balance, position = @state_cache.snapshot
     Domain::LiveContext.build_ctx_input(
       candle: candle,
-      position: Domain::PositionValueObject.new,
-      balance: BigDecimal("0"),
+      position: position,
+      balance: balance,
       state: state.state_data
     )
   end
@@ -619,7 +664,7 @@ class LiveTradingWorker
   rescue StandardError => e
     logger.warn(
       "[LiveTradingWorker] process_order_intent failed (intent=#{intent.inspect}): " \
-      "#{e.class.name}: #{e.message}"
+      "#{e.class.name}: #{sanitize_log_message(e.message)}"
     )
   end
 
@@ -640,13 +685,13 @@ class LiveTradingWorker
     result["enter"] == true
   end
 
-  # RiskGuard 通過判定(allow_entry?). balance は 3.3-10d 範囲では 0 placeholder
-  # (account_endpoint 経由の実 balance 取得は後続 phase で対応).
+  # RiskGuard 通過判定(allow_entry?). balance は Domain::LiveTradingStateCache から取得.
+  # R-8-5 反映: state_cache.balance で thread-safe read.
   def risk_guard_pass?(session, intent)
     candidate_size = BigDecimal(intent["size"].to_s)
     risk_guard_service.allow_entry?(
       session: session,
-      balance: BigDecimal("0"), # TODO(後続 phase): account_endpoint で実 balance 取得
+      balance: @state_cache.balance,
       candidate_size: candidate_size
     )
   end
@@ -700,7 +745,7 @@ class LiveTradingWorker
   rescue StandardError => e
     logger.warn(
       "[LiveTradingWorker] handle_private_ws_message failed in channel=#{sub.channel}: " \
-      "#{e.class.name}: #{e.message}"
+      "#{e.class.name}: #{sanitize_log_message(e.message)}"
     )
   end
 
@@ -718,21 +763,69 @@ class LiveTradingWorker
 
   # orders-algo push: Exchange::AlgoOrder の状態更新 + algo_anomaly? なら reconciliation 起動.
   # result.algo_anomaly? の場合 設計書 05_§3.6 でアラート + reconciliation 起動と規定.
+  # Phase 3.4-pre-7 反映: anomaly 検出時に run_reconciliation_after_reconnect を別 thread で起動して
+  # exchange 側との状態整合を即時確認する(reconnect 経路と同じ reconcile 5 件を走らせる).
   def handle_orders_algo_message(data, result)
     if result.respond_to?(:algo_anomaly?) && result.algo_anomaly?
+      # R-8 反映: data.inspect の sanitize 適用 + 巨大 data の inspect 抑制
+      data_repr = data.is_a?(Array) ? "rows=#{data.size}" : data.class.name
       logger.warn(
         "[LiveTradingWorker] orders-algo anomaly detected (state outside known set): " \
-        "data=#{data.inspect}"
+        "data=#{sanitize_log_message(data_repr)}"
       )
-      # TODO(後続 phase): reconciliation 起動 trigger
+      trigger_reconciliation_for_algo_anomaly
     end
 
     run_in_db_thread("orders_algo_update") do
       LiveTrading::Session.transaction do
         Array(data).each do |_row|
-          # TODO(後続 phase): Exchange::AlgoOrder upsert(plan_id / state / trigger_price / callback_ratio 等)
+          # TODO(Phase 3.4 本体): Exchange::AlgoOrder upsert(plan_id / state / trigger_price / callback_ratio 等)
         end
       end
+    end
+  end
+
+  # Phase 3.4-pre-7 追加: algo_anomaly 検出時に reconciliation を別 thread で起動する.
+  # WS callback thread から DB 操作 + REST 呼出を直接実行すると thread block 化するため
+  # run_in_db_thread 経由で隔離.session.reload で main loop と同じ最新状態取得.
+  #
+  # R-8-2 反映: WS push burst での thread 爆発 / Bitget rate limit 抵触を防ぐため debounce 適用.
+  # - in-progress フラグで重複起動防止
+  # - 前回起動から ALGO_ANOMALY_RECONCILE_DEBOUNCE_SECONDS 未満なら skip
+  def trigger_reconciliation_for_algo_anomaly
+    return unless @session
+    return unless acquire_anomaly_reconcile_slot
+
+    run_in_db_thread("reconcile_after_algo_anomaly") do
+      begin
+        session_reloaded = LiveTrading::Session.find(@session.id)
+        run_reconciliation_after_reconnect(session_reloaded)
+      ensure
+        release_anomaly_reconcile_slot
+      end
+    end
+  end
+
+  # debounce slot 取得: in-progress でなく前回から DEBOUNCE 以上経過していれば true.
+  # 取得時に in-progress = true + last_triggered_at 更新.
+  def acquire_anomaly_reconcile_slot
+    @anomaly_reconcile_mutex.synchronize do
+      return false if @anomaly_reconcile_in_progress
+
+      now = @monotonic_clock.call
+      if @last_anomaly_reconcile_at && (now - @last_anomaly_reconcile_at) < ALGO_ANOMALY_RECONCILE_DEBOUNCE_SECONDS
+        return false
+      end
+
+      @anomaly_reconcile_in_progress = true
+      @last_anomaly_reconcile_at = now
+      true
+    end
+  end
+
+  def release_anomaly_reconcile_slot
+    @anomaly_reconcile_mutex.synchronize do
+      @anomaly_reconcile_in_progress = false
     end
   end
 
@@ -747,12 +840,13 @@ class LiveTradingWorker
     end
   end
 
-  # positions push: Exchange::PositionSnapshot を最新値で upsert(snapshot 系 channel).
+  # positions push: Domain::LiveTradingStateCache に反映(R-8-5)+ Exchange::PositionSnapshot upsert(後続 phase).
   def handle_positions_message(data)
+    @state_cache.apply_position_push(data, symbol: @trading_symbol) if @trading_symbol
     run_in_db_thread("positions_update") do
       LiveTrading::Session.transaction do
         Array(data).each do |_row|
-          # TODO(後続 phase): Exchange::PositionSnapshot upsert(symbol / hold_side / size / margin / pnl 等)
+          # TODO(Phase 3.4 本体): Exchange::PositionSnapshot upsert(symbol / hold_side / size / margin / pnl 等)
         end
       end
     end
@@ -769,14 +863,13 @@ class LiveTradingWorker
     end
   end
 
-  # account push: account 残高(margin balance / available 等)更新.
-  # MVP では BalanceSnapshot モデルがないため skeleton(後続 phase で対応モデル追加 + 反映).
-  # R-6 #8 反映: 他 5 ハンドラと整合する形で transaction 隔離を先に整える(後続 phase の書き忘れリスク防止).
+  # account push: Domain::LiveTradingStateCache に反映(R-8-5)+ BalanceSnapshot DB 反映(後続 phase).
   def handle_account_message(data)
+    @state_cache.apply_account_push(data, margin_coin: @trading_margin_coin) if @trading_margin_coin
     run_in_db_thread("account_update") do
       LiveTrading::Session.transaction do
         Array(data).each do |_row|
-          # TODO(後続 phase): account balance snapshot model 追加後に反映
+          # TODO(Phase 3.4 本体): account balance snapshot model 追加後に反映
         end
       end
     end
@@ -809,80 +902,10 @@ class LiveTradingWorker
     end
   end
 
-  # step 11: reconciliation(starting → reconciling 遷移 + 6 件 REST 突合).
-  # 各 REST 呼出は失敗時に logger.warn に落として後続 reconcile を継続する(部分復旧志向).
-  # 各結果からの DB upsert は後続 phase で実装(現状は呼出構造のみ確立).
-  #
-  # MVP 範囲(5 件):
-  # - orders_pending: 未約定通常注文
-  # - orders_plan_pending: 未起動 plan order
-  # - orders_plan_history: 履歴 plan order(直近 24h)
-  # - position_all: 全 position
-  # - plan_sub_order: orders_plan_pending 取得後に各 plan_id について(現状 skeleton)
-  # 範囲外(将来 phase):
-  # - fill_history: BitgetOrderEndpoint に対応 endpoint 未実装のため将来追加候補
+  # step 11: reconciliation(starting → reconciling 遷移 + 5 件 REST 突合 + 結果集約).
+  # R-8-6 反映: 詳細実装は Domain::ReconciliationCoordinator に委譲.
   def run_reconciliation(session)
-    session.start_reconciling!
-
-    reconcile_orders_pending(session)
-    reconcile_orders_plan_pending(session)
-    reconcile_orders_plan_history(session)
-    reconcile_position_all(session)
-    # TODO(将来 phase): reconcile_fill_history(BitgetOrderEndpoint#fill_history 追加後)
-  end
-
-  def reconcile_orders_pending(session)
-    response = order_endpoint.orders_pending(symbol: session.symbol)
-    # TODO(後続 phase): response["data"] から Exchange::Order upsert
-    response
-  rescue StandardError => e
-    logger.warn(
-      "[LiveTradingWorker] reconcile_orders_pending failed: #{e.class.name}: #{e.message}"
-    )
-    nil
-  end
-
-  def reconcile_orders_plan_pending(session)
-    response = order_endpoint.orders_plan_pending(symbol: session.symbol)
-    # TODO(後続 phase): response["data"] から Exchange::AlgoOrder upsert
-    #   + 各 plan_id について order_endpoint.plan_sub_order(plan_id:) を呼んで sub-order を反映
-    response
-  rescue StandardError => e
-    logger.warn(
-      "[LiveTradingWorker] reconcile_orders_plan_pending failed: #{e.class.name}: #{e.message}"
-    )
-    nil
-  end
-
-  # 直近 24h の履歴 plan order を取得する(MVP デフォルト範囲 / 設計書明示なしのため固定値).
-  RECONCILE_PLAN_HISTORY_LOOKBACK_MS = 24 * 60 * 60 * 1000
-  private_constant :RECONCILE_PLAN_HISTORY_LOOKBACK_MS
-
-  def reconcile_orders_plan_history(session)
-    end_time = (Time.current.to_f * 1000).to_i
-    start_time = end_time - RECONCILE_PLAN_HISTORY_LOOKBACK_MS
-
-    response = order_endpoint.orders_plan_history(
-      symbol: session.symbol, start_time: start_time, end_time: end_time
-    )
-    # TODO(後続 phase): response["data"] から AlgoOrder 履歴 upsert
-    response
-  rescue StandardError => e
-    logger.warn(
-      "[LiveTradingWorker] reconcile_orders_plan_history failed: #{e.class.name}: #{e.message}"
-    )
-    nil
-  end
-
-  def reconcile_position_all(session)
-    response = position_endpoint.position_all(margin_coin: session.margin_coin, symbol: session.symbol)
-    # TODO(後続 phase): response["data"] から Exchange::PositionSnapshot upsert
-    response
-  rescue StandardError => e
-    logger.warn(
-      "[LiveTradingWorker] reconcile_position_all failed: #{e.class.name}: #{e.message}"
-    )
-    nil
+    @reconciliation_coordinator.run_for_bootstrap(session)
   end
 
   # step 12: SessionState 復元(初回起動時は空 state_data で create, 再起動時は既存をロード).
@@ -931,6 +954,26 @@ class LiveTradingWorker
 
   def order_endpoint
     @order_endpoint ||= Infrastructure::BitgetOrderEndpoint.new(rest_client: build_rest_client)
+  end
+
+  def account_endpoint
+    @account_endpoint ||= Infrastructure::BitgetAccountEndpoint.new(rest_client: build_rest_client)
+  end
+
+  # R-8-5: state_cache が DI されていない場合の lazy init(perform 内で呼ばれる).
+  def state_cache_lazy
+    @state_cache || Domain::LiveTradingStateCache.new(logger: logger)
+  end
+
+  # R-8-6: reconciliation_coordinator が DI されていない場合の lazy init.
+  # endpoint 依存は lazy 解決(REST client 認証情報の評価を perform 時点まで遅延).
+  def reconciliation_coordinator_lazy
+    @reconciliation_coordinator || Domain::ReconciliationCoordinator.new(
+      order_endpoint: order_endpoint,
+      position_endpoint: position_endpoint,
+      account_endpoint: account_endpoint,
+      logger: logger
+    )
   end
 
   # WS factory は Proc を保持し step 9/10 内で `.call` で遅延生成する
@@ -1005,14 +1048,13 @@ class LiveTradingWorker
 
     # R-6 #13 反映: failure_reason に credentials が漏れる経路を sanitize で遮断
     session.mark_failed_to_start!(
-      reason: sanitize_failure_reason("#{error.class.name}: #{error.message}")
+      reason: sanitize_log_message("#{error.class.name}: #{error.message}")
     )
   end
 
-  # failure_reason / log message から credentials を [FILTERED] に置換する.
-  # Faraday error や Bitget API レスポンスに api_key 等が含まれる場合の defense-in-depth.
-  def sanitize_failure_reason(reason)
-    reason.to_s.gsub(SECRET_PATTERN, '\1=[FILTERED]')
+  # R-8-4 反映: sanitize 機能を Domain::FailureReasonSanitizer に抽出.Worker 内 helper は委譲のみ.
+  def sanitize_log_message(message)
+    Domain::FailureReasonSanitizer.sanitize(message)
   end
 
   # WS disconnect で例外発生時に他の cleanup を妨げないよう logger.warn に落とす.
@@ -1025,7 +1067,7 @@ class LiveTradingWorker
   rescue StandardError => disconnect_error
     logger.warn(
       "[LiveTradingWorker] #{name}.disconnect failed during #{context}: " \
-      "#{disconnect_error.class.name}: #{disconnect_error.message}"
+      "#{disconnect_error.class.name}: #{sanitize_log_message(disconnect_error.message)}"
     )
   end
 end

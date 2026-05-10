@@ -4,12 +4,19 @@ module Domain
   class RiskGuardService
     # エントリー前の許可判定
     #
+    # Phase 3.4-pre-2 反映: balance 引数を実際に使うセーフティネット判定追加.
+    # balance ゼロ未満では entry しない(account_endpoint で取得失敗時 / 残高不足の防御).
+    # これにより API contract と実装の乖離を解消する.
+    #
     # @param session [LiveTrading::Session] 対象 Session(risk_policy 経由で制限値取得)
-    # @param balance [BigDecimal] 現在残高(将来的な拡張用,現状は未使用)
+    # @param balance [BigDecimal] 現在残高. ゼロ以下の場合は entry を拒否する(Worker の
+    #   fetch_initial_balance 失敗時 / 残高不足時のセーフティネット).
     # @param candidate_size [BigDecimal] エントリー候補サイズ(USDT 換算)
-    # @return [Boolean] candidate_size が max_position_exposure_usdt 以下 かつ
+    # @return [Boolean] balance > 0 かつ candidate_size が max_position_exposure_usdt 以下 かつ
     #   session.leverage が max_leverage 以下なら true
     def allow_entry?(session:, balance:, candidate_size:)
+      return false if balance <= 0
+
       policy = session.risk_policy
       candidate_size <= policy.max_position_exposure_usdt &&
         session.leverage <= policy.max_leverage

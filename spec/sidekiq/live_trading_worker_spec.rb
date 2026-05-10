@@ -8,6 +8,7 @@ RSpec.describe LiveTradingWorker do
   let(:market_endpoint) { instance_double(Infrastructure::BitgetMarketEndpoint) }
   let(:position_endpoint) { instance_double(Infrastructure::BitgetPositionEndpoint) }
   let(:order_endpoint_di) { instance_double(Infrastructure::BitgetOrderEndpoint) }
+  let(:account_endpoint_di) { instance_double(Infrastructure::BitgetAccountEndpoint) }
   let(:contract_metadata_response) do
     {
       symbol: "BTCUSDT", price_place: 1, price_end_step: 1, tick_size: BigDecimal("0.1"),
@@ -25,6 +26,8 @@ RSpec.describe LiveTradingWorker do
   let(:private_ws) { instance_double(Infrastructure::BitgetPrivateWsClient) }
   let(:public_ws_factory) { -> { public_ws } }
   let(:private_ws_factory) { -> { private_ws } }
+  let(:state_cache) { Domain::LiveTradingStateCache.new(logger: logger) }
+  let(:reconciliation_coordinator) { nil } # 個別 describe で instance_double 等に override
   let(:worker) do
     described_class.new(
       process_manager: process_manager,
@@ -34,6 +37,9 @@ RSpec.describe LiveTradingWorker do
       public_ws_factory: public_ws_factory,
       private_ws_factory: private_ws_factory,
       order_endpoint: order_endpoint_di,
+      account_endpoint: account_endpoint_di,
+      state_cache: state_cache,
+      reconciliation_coordinator: reconciliation_coordinator,
       main_loop_poll_interval: 0, # spec ではループを sleep させない
       ws_disconnect_grace_seconds: 0, # R-6 #9: spec では grace なしで即時 :ws_disconnected return
       logger: logger
@@ -126,6 +132,10 @@ RSpec.describe LiveTradingWorker do
     allow(order_endpoint_di).to receive(:orders_plan_pending).and_return("data" => [])
     allow(order_endpoint_di).to receive(:orders_plan_history).and_return("data" => [])
     allow(position_endpoint).to receive(:position_all).and_return("data" => [])
+    # Phase 3.4-pre-1: account_endpoint default stub(initial balance 取得)
+    allow(account_endpoint_di).to receive(:account).and_return("data" => { "available" => "1000.0" })
+    # Phase 3.4-pre-4: reconcile_fill_history default stub
+    allow(account_endpoint_di).to receive(:fill_history).and_return("data" => [])
   end
 
   describe "Sidekiq options" do
@@ -732,6 +742,9 @@ RSpec.describe LiveTradingWorker do
         end
       end
 
+      # sanitize 詳細 spec は spec/domain/failure_reason_sanitizer_spec.rb に移動済.
+      # Worker の sanitize_log_message は Domain::FailureReasonSanitizer への 1 行委譲のため
+      # Worker spec での重複検証は不要(R-8 multi-agent review 反映).
       context "finalize_main_loop で lease.release! が raise した場合(連鎖失敗対策)" do
         before do
           allow(lease).to receive(:release!).and_raise(StandardError, "release timeout in finalize")
@@ -747,7 +760,7 @@ RSpec.describe LiveTradingWorker do
       end
     end
 
-    describe "Public WS callback(3.3-10b)" do
+    describe "Public WS callback" do
       let(:candle1m_sub) do
         Infrastructure::BitgetPublicWsSubscription.new(
           channel: "candle1m", inst_type: "USDT-FUTURES", inst_id: "BTCUSDT"
@@ -895,12 +908,114 @@ RSpec.describe LiveTradingWorker do
       end
     end
 
-    describe "Private WS callback(3.3-10c)" do
+    describe "balance / position memory cache(Domain::LiveTradingStateCache 委譲)" do
+      before do
+        worker.instance_variable_set(:@session, session)
+      end
+
+      describe "#fetch_initial_balance(bootstrap step 7 後)" do
+        it "account_endpoint.account を margin_coin + symbol で呼ぶ" do
+          worker.send(:fetch_initial_balance, session)
+          expect(account_endpoint_di).to have_received(:account).with(margin_coin: "USDT", symbol: "BTCUSDT")
+        end
+
+        it "state_cache.balance が API レスポンスの available 値で更新される" do
+          allow(account_endpoint_di).to receive(:account)
+            .and_return("data" => { "available" => "12345.67" })
+          worker.send(:fetch_initial_balance, session)
+          expect(state_cache.balance).to eq(BigDecimal("12345.67"))
+        end
+
+        context "API 呼出が失敗した場合" do
+          before do
+            allow(account_endpoint_di).to receive(:account).and_raise(StandardError, "API down")
+          end
+
+          it "logger.warn 落とし + state_cache.balance は変更されない(0 のまま)" do
+            worker.send(:fetch_initial_balance, session)
+            expect(state_cache.balance).to eq(BigDecimal("0"))
+            expect(logger).to have_received(:warn).with(/fetch_initial_balance failed.*API down/)
+          end
+        end
+
+        context "available フィールドが存在しないレスポンスの場合" do
+          before do
+            allow(account_endpoint_di).to receive(:account).and_return("data" => {})
+          end
+
+          it "state_cache.balance は変更されない(0 のまま)" do
+            worker.send(:fetch_initial_balance, session)
+            expect(state_cache.balance).to eq(BigDecimal("0"))
+          end
+        end
+      end
+
+      # R-8-5 反映: apply_account_push / apply_position_push の単体検証は
+      # spec/domain/live_trading_state_cache_spec.rb に移動済.
+      # Worker spec では handle_*_message が state_cache に正しく委譲することのみ検証.
+      context "WS handler が state_cache に委譲する" do
+        before do
+          allow(LiveTrading::Session).to receive(:transaction).and_yield
+          allow(worker).to receive(:run_in_db_thread)
+          worker.instance_variable_set(:@trading_symbol, session.symbol)
+          worker.instance_variable_set(:@trading_margin_coin, session.margin_coin)
+        end
+
+        describe "#handle_account_message が state_cache.apply_account_push に委譲" do
+          it "@trading_margin_coin に該当する row の available 値で state_cache.balance が更新される" do
+            data = [
+              { "marginCoin" => "USDT", "available" => "5000.0", "frozen" => "0.0" },
+              { "marginCoin" => "BTC", "available" => "0.5" }
+            ]
+            worker.send(:handle_account_message, data)
+            expect(state_cache.balance).to eq(BigDecimal("5000.0"))
+          end
+        end
+
+        describe "#handle_positions_message が state_cache.apply_position_push に委譲" do
+          it "@trading_symbol に該当する row で state_cache.position が更新される" do
+            data = [
+              { "symbol" => "BTCUSDT", "holdSide" => "long", "total" => "0.05", "openPriceAvg" => "50000" },
+              { "symbol" => "ETHUSDT", "holdSide" => "short", "total" => "1.0", "openPriceAvg" => "3000" }
+            ]
+            worker.send(:handle_positions_message, data)
+            pos = state_cache.position
+            expect(pos.side).to eq(:long)
+            expect(pos.size).to eq(BigDecimal("0.05"))
+            expect(pos.entry_price).to eq(BigDecimal("50000"))
+          end
+        end
+      end
+
+      describe "build_runner_ctx_input が state_cache snapshot を反映" do
+        before do
+          state_cache.update_balance("3500")
+          state_cache.apply_position_push(
+            [ { "symbol" => "BTCUSDT", "holdSide" => "long", "total" => "0.02", "openPriceAvg" => "48500" } ],
+            symbol: "BTCUSDT"
+          )
+        end
+
+        it "ctx_input の balance / position が state_cache 値を反映する" do
+          state = double("state", state_data: { "ema" => 50_000 })
+          ctx = worker.send(:build_runner_ctx_input, session, { "ts" => 1 }, state)
+
+          expect(ctx["balance"]).to eq("3500.0")
+          expect(ctx["position"]).to eq(
+            "side" => "long", "size" => "0.02", "entry_price" => "48500.0"
+          )
+        end
+      end
+    end
+
+    describe "Private WS callback" do
       # Result::Push は private constant のため duck typing で double 化
       let(:result_double) { double("Push", algo_anomaly?: false) }
 
       before do
         worker.send(:instance_variable_set, :@session, session)
+        worker.send(:instance_variable_set, :@trading_symbol, session.symbol)
+        worker.send(:instance_variable_set, :@trading_margin_coin, session.margin_coin)
         # run_in_db_thread を同期化(spec hang 回避)
         allow(worker).to receive(:run_in_db_thread) do |_label, &block|
           block.call
@@ -972,10 +1087,22 @@ RSpec.describe LiveTradingWorker do
         context "algo_anomaly? = true(設計書 05_§3.6 異常状態)" do
           let(:anomaly_result) { double("Push", algo_anomaly?: true) }
 
+          before do
+            # R-8-2: trigger_reconciliation_for_algo_anomaly が debounce instance variable を参照するため mock 化
+            allow(worker).to receive(:trigger_reconciliation_for_algo_anomaly)
+          end
+
           it "logger.warn でアラート出力" do
             allow(LiveTrading::Session).to receive(:transaction).and_yield
             worker.send(:handle_orders_algo_message, [], anomaly_result)
             expect(logger).to have_received(:warn).with(/orders-algo anomaly detected/)
+          end
+
+          # Phase 3.4-pre-7: anomaly 検出時 reconciliation trigger
+          it "trigger_reconciliation_for_algo_anomaly が呼ばれる" do
+            allow(LiveTrading::Session).to receive(:transaction).and_yield
+            worker.send(:handle_orders_algo_message, [], anomaly_result)
+            expect(worker).to have_received(:trigger_reconciliation_for_algo_anomaly)
           end
         end
 
@@ -985,6 +1112,96 @@ RSpec.describe LiveTradingWorker do
             worker.send(:handle_orders_algo_message, [], result_double)
             expect(logger).not_to have_received(:warn)
             expect(worker).to have_received(:run_in_db_thread).with("orders_algo_update")
+          end
+
+          # Phase 3.4-pre-7: anomaly でない場合は trigger を呼ばない
+          it "trigger_reconciliation_for_algo_anomaly を呼ばない" do
+            expect(LiveTrading::Session).to receive(:transaction).and_yield
+            expect(worker).not_to receive(:trigger_reconciliation_for_algo_anomaly)
+            worker.send(:handle_orders_algo_message, [], result_double)
+          end
+        end
+      end
+
+      # Phase 3.4-pre-7 + R-8-2: trigger_reconciliation_for_algo_anomaly
+      describe "#trigger_reconciliation_for_algo_anomaly" do
+        before do
+          worker.instance_variable_set(:@session, session)
+          worker.instance_variable_set(:@anomaly_reconcile_in_progress, false)
+          worker.instance_variable_set(:@anomaly_reconcile_mutex, Mutex.new)
+          worker.instance_variable_set(:@last_anomaly_reconcile_at, nil)
+          worker.instance_variable_set(:@monotonic_clock, -> { @stub_now })
+          @stub_now = 1000.0
+        end
+
+        it "run_in_db_thread('reconcile_after_algo_anomaly')で run_reconciliation_after_reconnect を呼ぶ" do
+          expect(worker).to receive(:run_reconciliation_after_reconnect).with(
+            an_object_having_attributes(id: session.id)
+          )
+          worker.send(:trigger_reconciliation_for_algo_anomaly)
+          expect(worker).to have_received(:run_in_db_thread).with("reconcile_after_algo_anomaly")
+        end
+
+        context "@session が nil の場合(防御)" do
+          before do
+            worker.instance_variable_set(:@session, nil)
+          end
+
+          it "run_reconciliation_after_reconnect を呼ばない / raise しない" do
+            expect(worker).not_to receive(:run_reconciliation_after_reconnect)
+            expect { worker.send(:trigger_reconciliation_for_algo_anomaly) }.not_to raise_error
+          end
+        end
+
+        # R-8-2: WS push burst での thread 爆発防止 debounce
+        context "debounce(B-1 #1 反映)" do
+          context "in-progress フラグが true の場合" do
+            before do
+              worker.instance_variable_set(:@anomaly_reconcile_in_progress, true)
+            end
+
+            it "run_in_db_thread を呼ばない(skip)" do
+              worker.send(:trigger_reconciliation_for_algo_anomaly)
+              expect(worker).not_to have_received(:run_in_db_thread)
+            end
+          end
+
+          context "前回起動から 30 秒未経過" do
+            before do
+              worker.instance_variable_set(:@last_anomaly_reconcile_at, 1000.0)
+              @stub_now = 1015.0 # 15 秒経過
+            end
+
+            it "run_in_db_thread を呼ばない(throttle)" do
+              worker.send(:trigger_reconciliation_for_algo_anomaly)
+              expect(worker).not_to have_received(:run_in_db_thread)
+            end
+          end
+
+          context "前回起動から 30 秒以上経過" do
+            before do
+              worker.instance_variable_set(:@last_anomaly_reconcile_at, 1000.0)
+              @stub_now = 1031.0 # 31 秒経過
+            end
+
+            it "run_in_db_thread を呼ぶ(再起動)" do
+              expect(worker).to receive(:run_reconciliation_after_reconnect)
+              worker.send(:trigger_reconciliation_for_algo_anomaly)
+              expect(worker).to have_received(:run_in_db_thread).with("reconcile_after_algo_anomaly")
+            end
+          end
+
+          context "reconciliation 完了後に in-progress = false にリリースされる" do
+            it "次回呼出が許可される(連続 2 回呼出可能)" do
+              # 1 回目: 起動 + run_reconciliation_after_reconnect 即時実行(stub 同期)
+              call_count = 0
+              allow(worker).to receive(:run_reconciliation_after_reconnect) { call_count += 1 }
+              worker.send(:trigger_reconciliation_for_algo_anomaly)
+              # 30 秒以上進めて 2 回目可能化
+              @stub_now = 1031.0
+              worker.send(:trigger_reconciliation_for_algo_anomaly)
+              expect(call_count).to eq(2)
+            end
           end
         end
       end
@@ -1015,7 +1232,7 @@ RSpec.describe LiveTradingWorker do
       end
     end
 
-    describe "run_runner_child_for_tick(3.3-10d)" do
+    describe "run_runner_child_for_tick" do
       let(:spawner) { instance_double(Infrastructure::StrategyRunnerChildSpawner) }
       let(:ai_filter_service) { instance_double(Domain::AiFilterService) }
       let(:risk_guard_service) { instance_double(Domain::RiskGuardService) }
@@ -1032,6 +1249,7 @@ RSpec.describe LiveTradingWorker do
           ai_filter_service: ai_filter_service,
           risk_guard_service: risk_guard_service,
           order_endpoint: order_endpoint_di,
+          state_cache: state_cache,
           main_loop_poll_interval: 0,
           ws_disconnect_grace_seconds: 0,
           logger: logger
@@ -1239,113 +1457,22 @@ RSpec.describe LiveTradingWorker do
       end
     end
 
-    describe "reconciliation(3.3-11 / bootstrap step 11)" do
-      before do
-        worker.send(:instance_variable_set, :@session, session)
-        session.update_column(:status, "starting")
-      end
+    # R-8-6 反映: reconciliation 詳細 spec は spec/domain/reconciliation_coordinator_spec.rb に移動済.
+    # Worker spec では Domain::ReconciliationCoordinator への委譲のみ検証する.
+    describe "reconciliation(bootstrap step 11)" do
+      let(:reconciliation_coordinator) { instance_double(Domain::ReconciliationCoordinator) }
 
-      describe "#run_reconciliation" do
-        it "session を starting → reconciling に遷移させる" do
+      before { worker.instance_variable_set(:@session, session) }
+
+      describe "#run_reconciliation が reconciliation_coordinator.run_for_bootstrap に委譲" do
+        it "session を渡して run_for_bootstrap を呼ぶ" do
+          expect(reconciliation_coordinator).to receive(:run_for_bootstrap).with(session)
           worker.send(:run_reconciliation, session)
-          expect(session.reload.state_reconciling?).to be true
-        end
-
-        it "4 件の reconcile 系 method を順次呼び出す" do
-          expect(worker).to receive(:reconcile_orders_pending).with(session).ordered
-          expect(worker).to receive(:reconcile_orders_plan_pending).with(session).ordered
-          expect(worker).to receive(:reconcile_orders_plan_history).with(session).ordered
-          expect(worker).to receive(:reconcile_position_all).with(session).ordered
-
-          worker.send(:run_reconciliation, session)
-        end
-      end
-
-      describe "#reconcile_orders_pending" do
-        it "order_endpoint.orders_pending を session.symbol で呼ぶ" do
-          worker.send(:reconcile_orders_pending, session)
-          expect(order_endpoint_di).to have_received(:orders_pending).with(symbol: "BTCUSDT")
-        end
-
-        context "REST 呼出が失敗した場合" do
-          before do
-            allow(order_endpoint_di).to receive(:orders_pending).and_raise(StandardError, "API down")
-          end
-
-          it "logger.warn 落とし + nil 返却(後続 reconcile 継続)" do
-            result = worker.send(:reconcile_orders_pending, session)
-            expect(result).to be_nil
-            expect(logger).to have_received(:warn).with(/reconcile_orders_pending failed.*API down/)
-          end
-        end
-      end
-
-      describe "#reconcile_orders_plan_pending" do
-        it "order_endpoint.orders_plan_pending を symbol で呼ぶ" do
-          worker.send(:reconcile_orders_plan_pending, session)
-          expect(order_endpoint_di).to have_received(:orders_plan_pending).with(symbol: "BTCUSDT")
-        end
-
-        context "REST 失敗時" do
-          before do
-            allow(order_endpoint_di).to receive(:orders_plan_pending).and_raise(StandardError, "boom")
-          end
-
-          it "logger.warn + nil 返却" do
-            expect(worker.send(:reconcile_orders_plan_pending, session)).to be_nil
-            expect(logger).to have_received(:warn).with(/reconcile_orders_plan_pending failed/)
-          end
-        end
-      end
-
-      describe "#reconcile_orders_plan_history" do
-        it "直近 24h 範囲(start_time / end_time)で symbol を指定して呼ぶ" do
-          fixed_now = Time.utc(2026, 5, 7, 12, 0, 0)
-          allow(Time).to receive(:current).and_return(fixed_now)
-          end_time_ms = (fixed_now.to_f * 1000).to_i
-          start_time_ms = end_time_ms - (24 * 60 * 60 * 1000)
-
-          worker.send(:reconcile_orders_plan_history, session)
-
-          expect(order_endpoint_di).to have_received(:orders_plan_history).with(
-            symbol: "BTCUSDT", start_time: start_time_ms, end_time: end_time_ms
-          )
-        end
-
-        context "REST 失敗時" do
-          before do
-            allow(order_endpoint_di).to receive(:orders_plan_history).and_raise(StandardError, "boom")
-          end
-
-          it "logger.warn + nil 返却" do
-            expect(worker.send(:reconcile_orders_plan_history, session)).to be_nil
-            expect(logger).to have_received(:warn).with(/reconcile_orders_plan_history failed/)
-          end
-        end
-      end
-
-      describe "#reconcile_position_all" do
-        it "position_endpoint.position_all を margin_coin + symbol で呼ぶ" do
-          worker.send(:reconcile_position_all, session)
-          expect(position_endpoint).to have_received(:position_all).with(
-            margin_coin: "USDT", symbol: "BTCUSDT"
-          )
-        end
-
-        context "REST 失敗時" do
-          before do
-            allow(position_endpoint).to receive(:position_all).and_raise(StandardError, "boom")
-          end
-
-          it "logger.warn + nil 返却" do
-            expect(worker.send(:reconcile_position_all, session)).to be_nil
-            expect(logger).to have_received(:warn).with(/reconcile_position_all failed/)
-          end
         end
       end
     end
 
-    describe "heartbeat / lease renew(3.3-12)" do
+    describe "heartbeat / lease renew" do
       before do
         worker.send(:instance_variable_set, :@session, session)
         worker.send(:instance_variable_set, :@lease, lease)
@@ -1502,7 +1629,7 @@ RSpec.describe LiveTradingWorker do
     end
 
     # R-7 #C 反映: background thread leak 対策の sweep
-    describe "background thread sweep(R-7 #C)" do
+    describe "background thread sweep" do
       before do
         worker.send(:instance_variable_set, :@session, session)
         worker.send(:instance_variable_set, :@background_threads, [])
@@ -1580,13 +1707,15 @@ RSpec.describe LiveTradingWorker do
       end
     end
 
-    describe "WS reconnect detection + reconciliation 再実行(3.3-13)" do
+    describe "WS reconnect detection + reconciliation 再実行" do
       before do
         worker.send(:instance_variable_set, :@session, session)
         worker.send(:instance_variable_set, :@public_ws, public_ws)
         worker.send(:instance_variable_set, :@private_ws, private_ws)
         worker.send(:instance_variable_set, :@last_public_ws_reconnect_count, 0)
         worker.send(:instance_variable_set, :@last_private_ws_reconnect_count, 0)
+        # R-8-3 #C-1: cross-thread mutex 初期化
+        worker.send(:instance_variable_set, :@ws_reconnect_count_mutex, Mutex.new)
         # run_in_db_thread を同期化(spec hang 回避)
         allow(worker).to receive(:run_in_db_thread) do |_label, &block|
           block.call
@@ -1665,14 +1794,11 @@ RSpec.describe LiveTradingWorker do
         end
       end
 
-      describe "#run_reconciliation_after_reconnect" do
-        it "session.start_reconciling! は呼ばずに 4 件 reconcile を呼び出す" do
-          expect(session).not_to receive(:start_reconciling!)
-          expect(worker).to receive(:reconcile_orders_pending).with(session)
-          expect(worker).to receive(:reconcile_orders_plan_pending).with(session)
-          expect(worker).to receive(:reconcile_orders_plan_history).with(session)
-          expect(worker).to receive(:reconcile_position_all).with(session)
+      describe "#run_reconciliation_after_reconnect が reconciliation_coordinator.run_after_reconnect に委譲" do
+        let(:reconciliation_coordinator) { instance_double(Domain::ReconciliationCoordinator) }
 
+        it "session を渡して run_after_reconnect を呼ぶ" do
+          expect(reconciliation_coordinator).to receive(:run_after_reconnect).with(session)
           worker.send(:run_reconciliation_after_reconnect, session)
         end
       end

@@ -105,6 +105,34 @@ RSpec.describe Domain::RiskGuardService do
         expect(subject).to be true
       end
     end
+
+    # Phase 3.4-pre-2 反映: balance > 0 セーフティネット(fetch_initial_balance 失敗時 / 残高不足防御).
+    context "balance がゼロの場合(境界値)" do
+      let(:balance) { BigDecimal("0") }
+      let(:candidate_size) { BigDecimal("500") }
+
+      it "false を返す(balance > 0 必須)" do
+        expect(subject).to be false
+      end
+    end
+
+    context "balance が負値の場合(理論上ありえないが防御)" do
+      let(:balance) { BigDecimal("-100") }
+      let(:candidate_size) { BigDecimal("500") }
+
+      it "false を返す" do
+        expect(subject).to be false
+      end
+    end
+
+    context "balance が正の最小値(0.01)の場合" do
+      let(:balance) { BigDecimal("0.01") }
+      let(:candidate_size) { BigDecimal("0.001") }
+
+      it "true を返す(正の値であれば exposure 判定に進む)" do
+        expect(subject).to be true
+      end
+    end
   end
 
   describe "#should_cooldown?" do
