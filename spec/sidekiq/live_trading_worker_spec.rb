@@ -28,6 +28,7 @@ RSpec.describe LiveTradingWorker do
   let(:private_ws_factory) { -> { private_ws } }
   let(:state_cache) { Domain::LiveTradingStateCache.new(logger: logger) }
   let(:reconciliation_coordinator) { nil } # 個別 describe で instance_double 等に override
+  let(:candle_confirm_detector) { Domain::CandleConfirmDetector.new }
   let(:worker) do
     described_class.new(
       process_manager: process_manager,
@@ -40,6 +41,7 @@ RSpec.describe LiveTradingWorker do
       account_endpoint: account_endpoint_di,
       state_cache: state_cache,
       reconciliation_coordinator: reconciliation_coordinator,
+      candle_confirm_detector: candle_confirm_detector,
       main_loop_poll_interval: 0, # spec ではループを sleep させない
       ws_disconnect_grace_seconds: 0, # R-6 #9: spec では grace なしで即時 :ws_disconnected return
       logger: logger
@@ -775,7 +777,6 @@ RSpec.describe LiveTradingWorker do
       before do
         # bootstrap で session を作成しておくが main loop 内処理は不要
         worker.send(:instance_variable_set, :@session, session)
-        worker.send(:instance_variable_set, :@last_candle_row, nil)
         # run_in_db_thread を同期化(spec hang 回避)
         allow(worker).to receive(:run_in_db_thread) do |_label, &block|
           block.call
@@ -817,35 +818,18 @@ RSpec.describe LiveTradingWorker do
         end
       end
 
-      describe "#handle_candle_message + #detect_confirmed_candle(確定判定)" do
+      describe "#handle_candle_message が candle_confirm_detector に委譲" do
         let(:row1) { [ 1_700_000_000_000, "50000", "50100", "49900", "50050", "10", "500000", "500000" ] }
         let(:row2) { [ 1_700_000_060_000, "50050", "50200", "50000", "50150", "12", "601800", "601800" ] }
 
-        context "初回 candle1m 受信 update(@last_candle_row が nil)" do
-          it "確定 candle なし(spawn を呼ばない)" do
+        context "確定判定なし(detector.observe が nil 返却)" do
+          it "spawn を呼ばない" do
             expect(worker).not_to receive(:spawn_runner_child_for_tick)
             worker.send(:handle_candle_message, [ row1 ], snapshot: false)
           end
-
-          it "@last_candle_row が更新される" do
-            worker.send(:handle_candle_message, [ row1 ], snapshot: false)
-            expect(worker.instance_variable_get(:@last_candle_row)).to eq(row1)
-          end
         end
 
-        context "同一 ts の candle1m 再受信(更新中)" do
-          before do
-            worker.send(:handle_candle_message, [ row1 ], snapshot: false)
-          end
-
-          it "確定 candle なし(spawn を呼ばない)" do
-            updated_row1 = [ row1[0], "50000", "50500", "49800", "50300", "20", "1000000", "1000000" ]
-            expect(worker).not_to receive(:spawn_runner_child_for_tick)
-            worker.send(:handle_candle_message, [ updated_row1 ], snapshot: false)
-          end
-        end
-
-        context "ts が進んだ candle1m 受信(前 candle 確定)" do
+        context "確定判定あり(ts が進んだ row 受信)" do
           before do
             worker.send(:handle_candle_message, [ row1 ], snapshot: false)
           end
@@ -873,9 +857,11 @@ RSpec.describe LiveTradingWorker do
             worker.send(:handle_candle_message, snapshot_rows, snapshot: true)
           end
 
-          it "@last_candle_row が末尾 row(最新)で初期化される" do
+          it "snapshot 末尾 row が detector に保持され, 次の update update で確定判定の起点になる" do
             worker.send(:handle_candle_message, snapshot_rows, snapshot: true)
-            expect(worker.instance_variable_get(:@last_candle_row)).to eq(row2)
+            row3 = [ 1_700_000_120_000, "50150", "50250", "50100", "50200", "5", "250000", "250000" ]
+            expect(worker).to receive(:spawn_runner_child_for_tick).with(a_hash_including("ts" => row2[0]))
+            worker.send(:handle_candle_message, [ row3 ], snapshot: false)
           end
         end
 
@@ -1757,13 +1743,12 @@ RSpec.describe LiveTradingWorker do
             expect(worker.instance_variable_get(:@last_public_ws_reconnect_count)).to eq(2)
           end
 
-          # R-2 #6 反映: public_ws reconnect 検知時は @last_candle_row を nil リセットして
+          # R-2 #6 反映: public_ws reconnect 検知時は candle_confirm_detector を reset して
           # 新旧受信 thread の race window を回避する
-          it "@last_candle_row を nil にリセットする" do
+          it "candle_confirm_detector.reset を呼ぶ" do
             allow(worker).to receive(:run_reconciliation_after_reconnect)
-            worker.send(:instance_variable_set, :@last_candle_row, [ 1_700_000_000_000, "50000" ])
+            expect(candle_confirm_detector).to receive(:reset)
             worker.send(:detect_ws_reconnect_and_reconcile)
-            expect(worker.instance_variable_get(:@last_candle_row)).to be_nil
           end
         end
 

@@ -61,6 +61,7 @@ class LiveTradingWorker
   # @param account_endpoint [Infrastructure::BitgetAccountEndpoint, nil] 残高 / fill_history 取得(3.4-pre-1 + 3.4-pre-4)
   # @param state_cache [Domain::LiveTradingStateCache, nil] balance / position memory cache(R-8-5 抽出)
   # @param reconciliation_coordinator [Domain::ReconciliationCoordinator, nil] reconciliation REST 突合(R-8-6 抽出)
+  # @param candle_confirm_detector [Domain::CandleConfirmDetector, nil] WS candle 確定判定(Phase 3.4a Step 0a 抽出)
   # @param main_loop_poll_interval [Float] メインループ kill-switch / 状態 poll 間隔(秒). spec で 0 を渡して即時 break.
   # @param monotonic_clock [#call] heartbeat / lease renew の周期判定用 monotonic clock(R-2 #5 反映).
   #   デフォルトは `Process.clock_gettime(Process::CLOCK_MONOTONIC)`. 壁時計逆行(NTP step / 手動修正)による
@@ -81,6 +82,7 @@ class LiveTradingWorker
     account_endpoint: nil,
     state_cache: nil,
     reconciliation_coordinator: nil,
+    candle_confirm_detector: nil,
     main_loop_poll_interval: DEFAULT_MAIN_LOOP_POLL_INTERVAL,
     monotonic_clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) },
     ws_disconnect_grace_seconds: WS_DISCONNECT_GRACE_SECONDS,
@@ -99,6 +101,7 @@ class LiveTradingWorker
     @account_endpoint = account_endpoint
     @state_cache = state_cache
     @reconciliation_coordinator = reconciliation_coordinator
+    @candle_confirm_detector = candle_confirm_detector
     @main_loop_poll_interval = main_loop_poll_interval
     @monotonic_clock = monotonic_clock
     @ws_disconnect_grace_seconds = ws_disconnect_grace_seconds
@@ -124,6 +127,8 @@ class LiveTradingWorker
     @state_cache = state_cache_lazy
     # R-8-6 反映: reconciliation を Domain::ReconciliationCoordinator に抽出.
     @reconciliation_coordinator = reconciliation_coordinator_lazy
+    # Phase 3.4a Step 0a 反映: candle 確定判定を Domain::CandleConfirmDetector に抽出.
+    @candle_confirm_detector = candle_confirm_detector_lazy
     # R-8-2: algo anomaly reconcile の debounce 用フラグ + 最終起動時刻.
     @anomaly_reconcile_in_progress = false
     @anomaly_reconcile_mutex = Mutex.new
@@ -228,9 +233,9 @@ class LiveTradingWorker
     )
 
     # R-2 #6 反映: WS reconnect 後は新旧受信 thread の race window が論理上発生し得るため,
-    # @last_candle_row を nil リセットして次の確定判定を新 thread の最初の row から再開する
+    # candle confirm detector を reset して次の確定判定を新 thread の最初の row から再開する
     # (snapshot 受信時と同様の振る舞い).
-    @last_candle_row = nil if public_reconnected
+    @candle_confirm_detector.reset if public_reconnected
 
     run_in_db_thread("reconcile_after_ws_reconnect") do
       session_reloaded = LiveTrading::Session.find(@session.id)
@@ -477,7 +482,7 @@ class LiveTradingWorker
   # snapshot 時は最新 row(末尾)で @last_candle_row を初期化するのみ(spawn しない /
   # warmup_candles は別途 step 8 で REST 取得済 + snapshot 内 row 全件 spawn は二重発注事故になるため).
   # update 時は data の各 row を順次確定判定する.
-  # multiple-agent review R-1 #2 反映.
+  # multiple-agent review R-1 #2 反映 / Phase 3.4a Step 0a で Domain::CandleConfirmDetector に委譲.
   #
   # @param data [Array<Array>, nil] WS push data 部分(各要素は OHLCV row)
   # @param snapshot [Boolean] result.snapshot? 由来 / true なら確定判定スキップ
@@ -485,44 +490,16 @@ class LiveTradingWorker
     return unless data.is_a?(Array) && data.any?
 
     if snapshot
-      @last_candle_row = data.last
+      @candle_confirm_detector.snapshot_init(data.last)
       return
     end
 
     data.each do |row|
-      confirmed = detect_confirmed_candle(row)
+      confirmed = @candle_confirm_detector.observe(row)
       next unless confirmed
 
       spawn_runner_child_for_tick(confirmed)
     end
-  end
-
-  # 受信 row から確定 candle を判定する.
-  # 直前に保持した row より ts が進んでいたら 直前 row が確定 candle として返る.
-  # 初回受信(@last_candle_row が nil)の場合は確定なし.
-  def detect_confirmed_candle(row)
-    new_ts = row[0].to_i
-    prev_row = @last_candle_row
-    @last_candle_row = row
-
-    return nil if prev_row.nil?
-
-    prev_ts = prev_row[0].to_i
-    return nil if prev_ts == new_ts
-
-    build_candle_payload(prev_row)
-  end
-
-  def build_candle_payload(row)
-    {
-      "ts" => row[0].to_i,
-      "open" => row[1],
-      "high" => row[2],
-      "low" => row[3],
-      "close" => row[4],
-      "base_volume" => row[5],
-      "quote_volume" => row[6]
-    }
   end
 
   # 確定 candle を子プロセスで処理するため別 thread + AR pool を確保して実行する
@@ -974,6 +951,11 @@ class LiveTradingWorker
       account_endpoint: account_endpoint,
       logger: logger
     )
+  end
+
+  # Phase 3.4a Step 0a: candle_confirm_detector が DI されていない場合の lazy init.
+  def candle_confirm_detector_lazy
+    @candle_confirm_detector || Domain::CandleConfirmDetector.new
   end
 
   # WS factory は Proc を保持し step 9/10 内で `.call` で遅延生成する
