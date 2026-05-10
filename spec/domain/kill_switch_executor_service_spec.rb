@@ -129,6 +129,155 @@ RSpec.describe Domain::KillSwitchExecutorService do
     end
   end
 
+  describe "#execute(mode: :cancel_and_market_close)" do
+    before do
+      allow(order_endpoint).to receive(:orders_pending).and_return("data" => [])
+      allow(order_endpoint).to receive(:orders_plan_pending).and_return("data" => [])
+      allow(order_endpoint).to receive(:cancel_order)
+      allow(order_endpoint).to receive(:cancel_plan_order)
+      allow(order_endpoint).to receive(:close_positions)
+      allow(position_endpoint).to receive(:position_all).and_return("data" => [])
+    end
+
+    context "one_way_mode の場合" do
+      let(:session) do
+        instance_double(LiveTrading::Session,
+          symbol: "BTCUSDT", margin_coin: "USDT", position_mode: "one_way_mode")
+      end
+
+      context "ポジション保有(total > 0)" do
+        before do
+          allow(position_endpoint).to receive(:position_all).and_return(
+            "data" => [ { "symbol" => "BTCUSDT", "holdSide" => "long", "total" => "0.05" } ]
+          )
+        end
+
+        it "全 pending order 取消後に close_positions(hold_side: nil)を呼ぶ" do
+          expect(order_endpoint).to receive(:close_positions).with(symbol: "BTCUSDT", hold_side: nil)
+          service.execute(session: session, mode: :cancel_and_market_close)
+        end
+
+        it ":stopped を返す" do
+          expect(service.execute(session: session, mode: :cancel_and_market_close)).to eq(:stopped)
+        end
+      end
+
+      context "ポジションなし(total=0)" do
+        before do
+          allow(position_endpoint).to receive(:position_all).and_return(
+            "data" => [ { "symbol" => "BTCUSDT", "holdSide" => "long", "total" => "0" } ]
+          )
+        end
+
+        it "close_positions を呼ばず :stopped を返す(no-op)" do
+          expect(order_endpoint).not_to receive(:close_positions)
+          expect(service.execute(session: session, mode: :cancel_and_market_close)).to eq(:stopped)
+        end
+      end
+    end
+
+    context "hedge_mode の場合" do
+      let(:session) do
+        instance_double(LiveTrading::Session,
+          symbol: "BTCUSDT", margin_coin: "USDT", position_mode: "hedge_mode")
+      end
+
+      context "long + short 両方保有" do
+        before do
+          allow(position_endpoint).to receive(:position_all).and_return(
+            "data" => [
+              { "symbol" => "BTCUSDT", "holdSide" => "long", "total" => "0.05" },
+              { "symbol" => "BTCUSDT", "holdSide" => "short", "total" => "0.03" }
+            ]
+          )
+        end
+
+        it "close_positions を long と short の 2 回呼ぶ" do
+          expect(order_endpoint).to receive(:close_positions).with(symbol: "BTCUSDT", hold_side: "long")
+          expect(order_endpoint).to receive(:close_positions).with(symbol: "BTCUSDT", hold_side: "short")
+          service.execute(session: session, mode: :cancel_and_market_close)
+        end
+
+        it ":stopped を返す" do
+          expect(service.execute(session: session, mode: :cancel_and_market_close)).to eq(:stopped)
+        end
+      end
+
+      context "long のみ保有 + short=0" do
+        before do
+          allow(position_endpoint).to receive(:position_all).and_return(
+            "data" => [
+              { "symbol" => "BTCUSDT", "holdSide" => "long", "total" => "0.05" },
+              { "symbol" => "BTCUSDT", "holdSide" => "short", "total" => "0" }
+            ]
+          )
+        end
+
+        it "close_positions を long の 1 回のみ呼ぶ" do
+          expect(order_endpoint).to receive(:close_positions).with(symbol: "BTCUSDT", hold_side: "long").once
+          expect(order_endpoint).not_to receive(:close_positions).with(symbol: "BTCUSDT", hold_side: "short")
+          service.execute(session: session, mode: :cancel_and_market_close)
+        end
+      end
+    end
+
+    context "全 pending order 取消も実施される" do
+      let(:session) do
+        instance_double(LiveTrading::Session,
+          symbol: "BTCUSDT", margin_coin: "USDT", position_mode: "one_way_mode")
+      end
+
+      before do
+        allow(order_endpoint).to receive(:orders_pending).and_return(
+          "data" => [ { "orderId" => "ord-1" } ]
+        )
+        allow(order_endpoint).to receive(:orders_plan_pending).and_return(
+          "data" => [ { "orderId" => "plan-1" } ]
+        )
+      end
+
+      it "通常注文 + plan 注文両方取消" do
+        expect(order_endpoint).to receive(:cancel_order).with(symbol: "BTCUSDT", order_id: "ord-1")
+        expect(order_endpoint).to receive(:cancel_plan_order).with(symbol: "BTCUSDT", order_id: "plan-1")
+        service.execute(session: session, mode: :cancel_and_market_close)
+      end
+    end
+
+    context "close_positions が raise した場合(致命エラー)" do
+      let(:session) do
+        instance_double(LiveTrading::Session,
+          symbol: "BTCUSDT", margin_coin: "USDT", position_mode: "one_way_mode")
+      end
+
+      before do
+        allow(position_endpoint).to receive(:position_all).and_return(
+          "data" => [ { "symbol" => "BTCUSDT", "holdSide" => "long", "total" => "0.05" } ]
+        )
+        allow(order_endpoint).to receive(:close_positions).and_raise(StandardError, "Bitget down")
+      end
+
+      it ":halted を返す + logger.error" do
+        expect(service.execute(session: session, mode: :cancel_and_market_close)).to eq(:halted)
+        expect(logger).to have_received(:error).with(/cancel_and_market_close failed.*Bitget down/)
+      end
+    end
+
+    context "position_all が raise した場合(致命エラー)" do
+      let(:session) do
+        instance_double(LiveTrading::Session,
+          symbol: "BTCUSDT", margin_coin: "USDT", position_mode: "one_way_mode")
+      end
+
+      before do
+        allow(position_endpoint).to receive(:position_all).and_raise(StandardError, "API timeout")
+      end
+
+      it ":halted を返す" do
+        expect(service.execute(session: session, mode: :cancel_and_market_close)).to eq(:halted)
+      end
+    end
+  end
+
   describe "#execute(mode: :unknown_mode)" do
     it "ArgumentError raise(unsupported mode)" do
       expect { service.execute(session: session, mode: :unknown) }

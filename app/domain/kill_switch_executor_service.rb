@@ -1,3 +1,5 @@
+require "bigdecimal"
+
 module Domain
   # ユーザー指示の kill-switch(stop / emergency_stop)実行を担う Domain サービス.
   #
@@ -47,8 +49,7 @@ module Domain
       when :cancel_only
         execute_cancel_only(session)
       when :cancel_and_market_close
-        # Step 2 で実装予定
-        raise NotImplementedError, "cancel_and_market_close is planned for Phase 3.4a Step 2"
+        execute_cancel_and_market_close(session)
       when :cancel_and_reduce_only
         # Step 3 で実装予定
         raise NotImplementedError, "cancel_and_reduce_only is planned for Phase 3.4a Step 3"
@@ -67,6 +68,22 @@ module Domain
     rescue StandardError => e
       logger.error(
         "[KillSwitchExecutorService] cancel_only failed: " \
+        "#{e.class.name}: #{Domain::FailureReasonSanitizer.sanitize(e.message)}"
+      )
+      :halted
+    end
+
+    # cancel_and_market_close モード: 全 pending order 取消 + close_positions 即時成行.
+    # one_way_mode: hold_side: nil で 1 回呼ぶ / hedge_mode: long + short の各 side を呼ぶ.
+    # close_positions 失敗は致命エラーとして :halted 返却(ポジション残存の運用リスク回避).
+    def execute_cancel_and_market_close(session)
+      cancel_all_pending_normal_orders(session)
+      cancel_all_pending_plan_orders(session)
+      close_all_positions(session)
+      :stopped
+    rescue StandardError => e
+      logger.error(
+        "[KillSwitchExecutorService] cancel_and_market_close failed: " \
         "#{e.class.name}: #{Domain::FailureReasonSanitizer.sanitize(e.message)}"
       )
       :halted
@@ -105,6 +122,27 @@ module Domain
             "#{e.class.name}: #{Domain::FailureReasonSanitizer.sanitize(e.message)}"
           )
         end
+      end
+    end
+
+    # 全 position を close_positions 即時成行で解除する.
+    # session.position_mode で one_way / hedge を判別:
+    # - one_way_mode: 該当 symbol で total > 0 の position が 1 件でもあれば 1 回 close_positions(hold_side: nil)
+    # - hedge_mode: total > 0 の各 holdSide ごとに close_positions(hold_side: side)
+    def close_all_positions(session)
+      response = position_endpoint.position_all(margin_coin: session.margin_coin, symbol: session.symbol)
+      positions = extract_data_array(response)
+        .select { |p| p.is_a?(Hash) && p["symbol"] == session.symbol }
+      active = positions.select { |p| BigDecimal(p["total"].to_s).positive? }
+      return if active.empty?
+
+      if session.position_mode == "hedge_mode"
+        active.each do |position|
+          order_endpoint.close_positions(symbol: session.symbol, hold_side: position["holdSide"])
+        end
+      else
+        # one_way_mode(または unset): hold_side: nil で 1 回呼出
+        order_endpoint.close_positions(symbol: session.symbol, hold_side: nil)
       end
     end
 
