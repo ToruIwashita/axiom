@@ -22,16 +22,28 @@ module Domain
   class KillSwitchExecutorService
     SUPPORTED_MODES = %i[cancel_only cancel_and_market_close cancel_and_reduce_only].freeze
 
-    private_constant :SUPPORTED_MODES
+    DEFAULT_REDUCE_ONLY_PARAMS = {
+      limit_offset_bps: 0,
+      follow_interval_sec: 5,
+      fallback_after_sec: 60,
+      max_follow_iterations: 20
+    }.freeze
+
+    private_constant :SUPPORTED_MODES, :DEFAULT_REDUCE_ONLY_PARAMS
 
     # @param order_endpoint [Infrastructure::BitgetOrderEndpoint] 全注文 cancel + close_positions
-    # @param position_endpoint [Infrastructure::BitgetPositionEndpoint] reduce_only 追従ループでの position 取得(Step 3)
-    # @param clock [#call] reduce_only 追従ループの elapsed 判定(Step 3)
+    # @param position_endpoint [Infrastructure::BitgetPositionEndpoint] reduce_only 追従ループでの position 取得
+    # @param clock [#call] reduce_only 追従ループの elapsed 判定(monotonic clock 推奨 / 壁時計逆行耐性)
+    # @param sleep_proc [#call] reduce_only 追従ループの sleep 注入(spec で no-op 化用)
     # @param logger [Logger] 部分失敗 warn / 致命エラー error 出力先
-    def initialize(order_endpoint:, position_endpoint:, clock: -> { Time.current }, logger: Rails.logger)
+    def initialize(order_endpoint:, position_endpoint:,
+                   clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) },
+                   sleep_proc: ->(sec) { sleep(sec) },
+                   logger: Rails.logger)
       @order_endpoint = order_endpoint
       @position_endpoint = position_endpoint
       @clock = clock
+      @sleep_proc = sleep_proc
       @logger = logger
     end
 
@@ -51,14 +63,13 @@ module Domain
       when :cancel_and_market_close
         execute_cancel_and_market_close(session)
       when :cancel_and_reduce_only
-        # Step 3 で実装予定
-        raise NotImplementedError, "cancel_and_reduce_only is planned for Phase 3.4a Step 3"
+        execute_cancel_and_reduce_only(session, params || {})
       end
     end
 
     private
 
-    attr_reader :order_endpoint, :position_endpoint, :clock, :logger
+    attr_reader :order_endpoint, :position_endpoint, :clock, :sleep_proc, :logger
 
     # cancel_only モード: 全 pending order(通常 + plan)を取消し,ポジションは保持.
     def execute_cancel_only(session)
@@ -123,6 +134,139 @@ module Domain
           )
         end
       end
+    end
+
+    # cancel_and_reduce_only モード: 全 pending order 取消 + reduce_only 指値追従ループ +
+    # fallback close_positions 成行クローズ.
+    #
+    # レビュー重要 3 反映:
+    # (a) fallback 直前に reduce_only 指値を必ずキャンセル(設計書原文)
+    # (b) elapsed_sec の起点 started_at = clock.call を冒頭で明示
+    # (c) 戻り値は :stopped / :halted Symbol(Worker 側で session.update! する責務分担)
+    # (d) ループ条件は時刻ベース fallback と iterations 上限の両方適用(時刻優先 / iterations は安全網)
+    def execute_cancel_and_reduce_only(session, params)
+      cancel_all_pending_normal_orders(session)
+      cancel_all_pending_plan_orders(session)
+      run_reduce_only_follow_loop(session, DEFAULT_REDUCE_ONLY_PARAMS.merge(params))
+    rescue StandardError => e
+      logger.error(
+        "[KillSwitchExecutorService] cancel_and_reduce_only failed: " \
+        "#{e.class.name}: #{Domain::FailureReasonSanitizer.sanitize(e.message)}"
+      )
+      :halted
+    end
+
+    def run_reduce_only_follow_loop(session, config)
+      started_at = clock.call # 重要 3-(b): elapsed 起点
+      iterations = 0
+      reduce_only_order_id = nil
+
+      # 重要 3-(d): 時刻ベース fallback と iterations 上限の両方適用
+      while (clock.call - started_at) < config[:fallback_after_sec] && iterations < config[:max_follow_iterations]
+        position = fetch_active_position(session)
+        return :stopped if position.nil?
+
+        desired_price = calculate_desired_price(position, config[:limit_offset_bps])
+        reduce_only_order_id = place_or_modify_reduce_only(
+          session, position, desired_price, reduce_only_order_id
+        )
+
+        sleep_proc.call(config[:follow_interval_sec])
+        iterations += 1
+      end
+
+      # ループ終了後の最終確認: position が消えていれば :stopped
+      position = fetch_active_position(session)
+      return :stopped if position.nil?
+
+      # 重要 3-(a): fallback 直前に reduce_only 指値を必ずキャンセル
+      cancel_reduce_only_order_if_exists(session, reduce_only_order_id)
+      execute_fallback_close(session, position)
+    end
+
+    def fetch_active_position(session)
+      response = position_endpoint.position_all(margin_coin: session.margin_coin, symbol: session.symbol)
+      positions = extract_data_array(response)
+        .select { |p| p.is_a?(Hash) && p["symbol"] == session.symbol }
+      positions.find { |p| BigDecimal(p["total"].to_s).positive? }
+    end
+
+    def calculate_desired_price(position, limit_offset_bps)
+      mark_price = BigDecimal(position["markPrice"].to_s)
+      offset_factor = BigDecimal(limit_offset_bps.to_s) / BigDecimal("10000")
+      # close long → 売却 → mark_price * (1 + offset)(passive 寄り)
+      # close short → 買戻 → mark_price * (1 - offset)
+      offset_factor = -offset_factor if position["holdSide"] == "short"
+      mark_price * (BigDecimal("1") + offset_factor)
+    end
+
+    def place_or_modify_reduce_only(session, position, desired_price, existing_order_id)
+      if existing_order_id
+        begin
+          order_endpoint.modify_order(
+            symbol: session.symbol,
+            order_id: existing_order_id,
+            new_price: desired_price
+          )
+          return existing_order_id
+        rescue StandardError => e
+          logger.warn(
+            "[KillSwitchExecutorService] modify_order failed (order_id=#{existing_order_id}): " \
+            "#{e.class.name}: #{Domain::FailureReasonSanitizer.sanitize(e.message)}"
+          )
+        end
+      end
+
+      response = order_endpoint.place_order(build_reduce_only_params(session, position, desired_price))
+      data = response.is_a?(Hash) ? response["data"] : nil
+      data.is_a?(Hash) ? data["orderId"] : nil
+    end
+
+    def build_reduce_only_params(session, position, desired_price)
+      hold_side = position["holdSide"]
+      params = {
+        symbol: session.symbol,
+        margin_mode: session.margin_mode,
+        margin_coin: session.margin_coin,
+        side: opposite_side(hold_side),
+        order_type: "limit",
+        size: position["total"],
+        price: desired_price,
+        force: "gtc",
+        reduce_only: "yes",
+        client_oid: "reduce_only_close-#{session.id}-#{clock.call.to_i}"
+      }
+      params[:trade_side] = "close" if session.position_mode == "hedge_mode"
+      params
+    end
+
+    def opposite_side(hold_side)
+      hold_side == "short" ? "buy" : "sell"
+    end
+
+    def cancel_reduce_only_order_if_exists(session, order_id)
+      return if order_id.nil?
+
+      begin
+        order_endpoint.cancel_order(symbol: session.symbol, order_id: order_id)
+      rescue StandardError => e
+        logger.warn(
+          "[KillSwitchExecutorService] cancel_order (reduce_only fallback) failed: " \
+          "#{e.class.name}: #{Domain::FailureReasonSanitizer.sanitize(e.message)}"
+        )
+      end
+    end
+
+    def execute_fallback_close(session, position)
+      hold_side = session.position_mode == "hedge_mode" ? position["holdSide"] : nil
+      order_endpoint.close_positions(symbol: session.symbol, hold_side: hold_side)
+      :stopped
+    rescue StandardError => e
+      logger.error(
+        "[KillSwitchExecutorService] cancel_and_reduce_only fallback close_positions failed: " \
+        "#{e.class.name}: #{Domain::FailureReasonSanitizer.sanitize(e.message)}"
+      )
+      :halted
     end
 
     # 全 position を close_positions 即時成行で解除する.

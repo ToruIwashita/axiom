@@ -278,6 +278,245 @@ RSpec.describe Domain::KillSwitchExecutorService do
     end
   end
 
+  describe "#execute(mode: :cancel_and_reduce_only)" do
+    let(:clock_value) { [ 1000.0 ] }
+    let(:clock) { -> { clock_value.first } }
+    let(:sleep_calls) { [] }
+    let(:sleep_proc) { ->(sec) { sleep_calls << sec; clock_value[0] += sec } }
+    let(:service) do
+      described_class.new(
+        order_endpoint: order_endpoint,
+        position_endpoint: position_endpoint,
+        clock: clock,
+        sleep_proc: sleep_proc,
+        logger: logger
+      )
+    end
+    let(:session) do
+      instance_double(LiveTrading::Session,
+        id: 42, symbol: "BTCUSDT", margin_coin: "USDT",
+        margin_mode: "isolated", position_mode: "one_way_mode")
+    end
+    let(:params) do
+      {
+        limit_offset_bps: 0,
+        follow_interval_sec: 1,
+        fallback_after_sec: 5,
+        max_follow_iterations: 100
+      }
+    end
+
+    before do
+      allow(order_endpoint).to receive(:orders_pending).and_return("data" => [])
+      allow(order_endpoint).to receive(:orders_plan_pending).and_return("data" => [])
+      allow(order_endpoint).to receive(:cancel_order)
+      allow(order_endpoint).to receive(:cancel_plan_order)
+      allow(order_endpoint).to receive(:close_positions)
+      allow(order_endpoint).to receive(:place_order).and_return("data" => { "orderId" => "ro-1" })
+      allow(order_endpoint).to receive(:modify_order)
+    end
+
+    # 重要 3-(b): elapsed_sec の起点を冒頭で明示
+    context "started_at = clock.now の起点で elapsed 判定が動作" do
+      before do
+        allow(position_endpoint).to receive(:position_all).and_return(
+          "data" => [ { "symbol" => "BTCUSDT", "holdSide" => "long", "total" => "0", "markPrice" => "50000" } ]
+        )
+      end
+
+      it "ループ開始時刻を clock.call で取得 + elapsed が fallback_after_sec を超えたら break" do
+        # position.total = 0 即終了 → place_order 呼ばれない / :stopped 返却
+        expect(service.execute(session: session, mode: :cancel_and_reduce_only, params: params)).to eq(:stopped)
+        expect(order_endpoint).not_to have_received(:place_order)
+      end
+    end
+
+    # 重要 3-(c): execute の戻り値が :stopped / :halted Symbol で返却される(Worker 側で session.update! する責務分担)
+    context "戻り値が :stopped / :halted Symbol(session.update! は service 内で行わない)" do
+      before do
+        allow(position_endpoint).to receive(:position_all).and_return(
+          "data" => [ { "symbol" => "BTCUSDT", "holdSide" => "long", "total" => "0", "markPrice" => "50000" } ]
+        )
+      end
+
+      it "session.update! / save 等を呼ばない(session は instance_double で stub なし)" do
+        # session に update!/save を stub していない → 呼ばれたら NoMethodError
+        expect { service.execute(session: session, mode: :cancel_and_reduce_only, params: params) }.not_to raise_error
+      end
+    end
+
+    context "1 iteration 内でポジション close 完了(reduce_only 即時約定相当)" do
+      before do
+        # 1 回目: position あり / 2 回目: position closed
+        responses = [
+          { "data" => [ { "symbol" => "BTCUSDT", "holdSide" => "long", "total" => "0.05", "markPrice" => "50000" } ] },
+          { "data" => [ { "symbol" => "BTCUSDT", "holdSide" => "long", "total" => "0", "markPrice" => "50000" } ] }
+        ]
+        call_count = 0
+        allow(position_endpoint).to receive(:position_all) do
+          response = responses[call_count] || responses.last
+          call_count += 1
+          response
+        end
+      end
+
+      it "place_order(reduce_only)を 1 回呼び :stopped を返す" do
+        expect(order_endpoint).to receive(:place_order).with(
+          hash_including(
+            symbol: "BTCUSDT", side: "sell", reduce_only: "yes", order_type: "limit"
+          )
+        ).once.and_return("data" => { "orderId" => "ro-1" })
+
+        expect(service.execute(session: session, mode: :cancel_and_reduce_only, params: params)).to eq(:stopped)
+      end
+
+      it "follow_interval_sec で sleep する" do
+        service.execute(session: session, mode: :cancel_and_reduce_only, params: params)
+        expect(sleep_calls).to include(1)
+      end
+    end
+
+    # 重要 3-(d): ループ条件 `(clock.call - started_at) < fallback_after_sec && iterations < max_follow_iterations` の両方適用
+    context "ループ条件: 時刻ベース fallback と iterations 上限の両方適用" do
+      before do
+        allow(position_endpoint).to receive(:position_all).and_return(
+          "data" => [ { "symbol" => "BTCUSDT", "holdSide" => "long", "total" => "0.05", "markPrice" => "50000" } ]
+        )
+      end
+
+      it "fallback_after_sec=2 + follow_interval_sec=1 → 2 iterations で fallback 経路に入る" do
+        custom_params = params.merge(fallback_after_sec: 2, follow_interval_sec: 1, max_follow_iterations: 100)
+        # fallback で close_positions が呼ばれる
+        expect(order_endpoint).to receive(:close_positions).with(symbol: "BTCUSDT", hold_side: nil)
+        service.execute(session: session, mode: :cancel_and_reduce_only, params: custom_params)
+      end
+
+      it "max_follow_iterations=2 + fallback_after_sec=10000 → 2 iterations で iterations 上限到達して fallback 経路" do
+        custom_params = params.merge(max_follow_iterations: 2, follow_interval_sec: 1, fallback_after_sec: 10_000)
+        expect(order_endpoint).to receive(:close_positions).with(symbol: "BTCUSDT", hold_side: nil)
+        service.execute(session: session, mode: :cancel_and_reduce_only, params: custom_params)
+      end
+    end
+
+    # 重要 3-(a): fallback 直前に reduce_only 指値を必ずキャンセル(設計書原文)
+    context "fallback 直前に reduce_only 指値をキャンセル" do
+      before do
+        allow(position_endpoint).to receive(:position_all).and_return(
+          "data" => [ { "symbol" => "BTCUSDT", "holdSide" => "long", "total" => "0.05", "markPrice" => "50000" } ]
+        )
+      end
+
+      it "place_order で得た orderId を fallback で cancel_order する" do
+        custom_params = params.merge(max_follow_iterations: 1, fallback_after_sec: 10_000)
+        expect(order_endpoint).to receive(:cancel_order).with(symbol: "BTCUSDT", order_id: "ro-1")
+        expect(order_endpoint).to receive(:close_positions)
+        service.execute(session: session, mode: :cancel_and_reduce_only, params: custom_params)
+      end
+
+      it "place_order が一度も成功していない場合は cancel_order を skip(防御)" do
+        # 初回 position が即 total=0 → place_order に到達しない
+        allow(position_endpoint).to receive(:position_all).and_return(
+          "data" => [ { "symbol" => "BTCUSDT", "holdSide" => "long", "total" => "0" } ]
+        )
+        expect(order_endpoint).not_to receive(:cancel_order).with(hash_including(order_id: anything))
+        expect(service.execute(session: session, mode: :cancel_and_reduce_only, params: params)).to eq(:stopped)
+      end
+    end
+
+    context "2 iteration 目以降は modify_order で価格改定" do
+      before do
+        allow(position_endpoint).to receive(:position_all).and_return(
+          "data" => [ { "symbol" => "BTCUSDT", "holdSide" => "long", "total" => "0.05", "markPrice" => "50000" } ]
+        )
+      end
+
+      it "1 回目 place_order / 2 回目以降 modify_order" do
+        custom_params = params.merge(max_follow_iterations: 3, fallback_after_sec: 10_000)
+        expect(order_endpoint).to receive(:place_order).once.and_return("data" => { "orderId" => "ro-1" })
+        expect(order_endpoint).to receive(:modify_order).with(
+          hash_including(symbol: "BTCUSDT", order_id: "ro-1")
+        ).twice
+        expect(order_endpoint).to receive(:cancel_order)
+        expect(order_endpoint).to receive(:close_positions)
+        service.execute(session: session, mode: :cancel_and_reduce_only, params: custom_params)
+      end
+    end
+
+    context "fallback close_positions が成功した場合" do
+      before do
+        allow(position_endpoint).to receive(:position_all).and_return(
+          "data" => [ { "symbol" => "BTCUSDT", "holdSide" => "long", "total" => "0.05", "markPrice" => "50000" } ]
+        )
+      end
+
+      it ":stopped を返す" do
+        custom_params = params.merge(max_follow_iterations: 1, fallback_after_sec: 10_000)
+        expect(service.execute(session: session, mode: :cancel_and_reduce_only, params: custom_params)).to eq(:stopped)
+      end
+    end
+
+    context "fallback close_positions が raise した場合" do
+      before do
+        allow(position_endpoint).to receive(:position_all).and_return(
+          "data" => [ { "symbol" => "BTCUSDT", "holdSide" => "long", "total" => "0.05", "markPrice" => "50000" } ]
+        )
+        allow(order_endpoint).to receive(:close_positions).and_raise(StandardError, "Bitget down")
+      end
+
+      it ":halted を返す + logger.error" do
+        custom_params = params.merge(max_follow_iterations: 1, fallback_after_sec: 10_000)
+        expect(service.execute(session: session, mode: :cancel_and_reduce_only, params: custom_params)).to eq(:halted)
+        expect(logger).to have_received(:error).with(/cancel_and_reduce_only.*close_positions.*Bitget down/)
+      end
+    end
+
+    context "hedge_mode で long position の場合" do
+      let(:session) do
+        instance_double(LiveTrading::Session,
+          id: 42, symbol: "BTCUSDT", margin_coin: "USDT",
+          margin_mode: "isolated", position_mode: "hedge_mode")
+      end
+
+      before do
+        allow(position_endpoint).to receive(:position_all).and_return(
+          "data" => [ { "symbol" => "BTCUSDT", "holdSide" => "long", "total" => "0.05", "markPrice" => "50000" } ]
+        )
+      end
+
+      it "place_order に trade_side: 'close' + hold_side で fallback close_positions" do
+        custom_params = params.merge(max_follow_iterations: 1, fallback_after_sec: 10_000)
+        expect(order_endpoint).to receive(:place_order).with(
+          hash_including(side: "sell", trade_side: "close", reduce_only: "yes")
+        ).and_return("data" => { "orderId" => "ro-1" })
+        expect(order_endpoint).to receive(:close_positions).with(symbol: "BTCUSDT", hold_side: "long")
+        service.execute(session: session, mode: :cancel_and_reduce_only, params: custom_params)
+      end
+    end
+
+    context "modify_order が raise した場合(部分失敗)" do
+      before do
+        allow(position_endpoint).to receive(:position_all).and_return(
+          "data" => [ { "symbol" => "BTCUSDT", "holdSide" => "long", "total" => "0.05", "markPrice" => "50000" } ]
+        )
+        call_count = 0
+        allow(order_endpoint).to receive(:modify_order) do
+          call_count += 1
+          raise StandardError, "modify failed" if call_count == 1
+        end
+      end
+
+      it "logger.warn 落とし + 新規 place_order を再実行" do
+        custom_params = params.merge(max_follow_iterations: 3, fallback_after_sec: 10_000)
+        # 1 回目 place + 2 回目 modify(raise) + 再 place + 3 回目 modify
+        expect(order_endpoint).to receive(:place_order).at_least(:twice).and_return("data" => { "orderId" => "ro-1" })
+        allow(order_endpoint).to receive(:cancel_order)
+        allow(order_endpoint).to receive(:close_positions)
+        service.execute(session: session, mode: :cancel_and_reduce_only, params: custom_params)
+        expect(logger).to have_received(:warn).with(/modify_order failed/)
+      end
+    end
+  end
+
   describe "#execute(mode: :unknown_mode)" do
     it "ArgumentError raise(unsupported mode)" do
       expect { service.execute(session: session, mode: :unknown) }
