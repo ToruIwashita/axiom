@@ -30,6 +30,8 @@ class LiveTradingWorker
   # メインループ poll 間隔(設計書 02_§5.2.6).
   DEFAULT_MAIN_LOOP_POLL_INTERVAL = 1.0
   # heartbeat 周期(設計書 02_§5.2.6 / 05_§7.2: 60 秒推奨).
+  # heartbeat / lease renew 周期定数(秒). Phase 3.4a Step 0b-4 で
+  # Domain::HeartbeatScheduler に委譲(本定数は lazy init で渡す).
   HEARTBEAT_INTERVAL_SECONDS = 60
   # lease renew 周期(設計書 02_§5.2.6 / 05_§7.2: 2 分推奨 / TTL 5 分の余裕を持たせた更新).
   LEASE_RENEW_INTERVAL_SECONDS = 120
@@ -62,6 +64,7 @@ class LiveTradingWorker
   # @param anomaly_reconcile_debouncer [Domain::AnomalyReconcileDebouncer, nil] algo anomaly reconciliation 起動 debounce(Phase 3.4a Step 0b-1 抽出)
   # @param background_thread_registry [Domain::BackgroundThreadRegistry, nil] WS callback 経由の DB 操作 thread 管理(Phase 3.4a Step 0b-2 抽出)
   # @param ws_reconnect_detector [Domain::WsReconnectDetector, nil] WS Client reconnect 検知(Phase 3.4a Step 0b-3 抽出)
+  # @param heartbeat_scheduler [Domain::HeartbeatScheduler, nil] heartbeat / lease renew 周期管理(Phase 3.4a Step 0b-4 抽出)
   # @param main_loop_poll_interval [Float] メインループ kill-switch / 状態 poll 間隔(秒). spec で 0 を渡して即時 break.
   # @param monotonic_clock [#call] heartbeat / lease renew の周期判定用 monotonic clock(R-2 #5 反映).
   #   デフォルトは `Process.clock_gettime(Process::CLOCK_MONOTONIC)`. 壁時計逆行(NTP step / 手動修正)による
@@ -86,6 +89,7 @@ class LiveTradingWorker
     anomaly_reconcile_debouncer: nil,
     background_thread_registry: nil,
     ws_reconnect_detector: nil,
+    heartbeat_scheduler: nil,
     main_loop_poll_interval: DEFAULT_MAIN_LOOP_POLL_INTERVAL,
     monotonic_clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) },
     ws_disconnect_grace_seconds: WS_DISCONNECT_GRACE_SECONDS,
@@ -108,6 +112,7 @@ class LiveTradingWorker
     @anomaly_reconcile_debouncer = anomaly_reconcile_debouncer
     @background_thread_registry = background_thread_registry
     @ws_reconnect_detector = ws_reconnect_detector
+    @heartbeat_scheduler = heartbeat_scheduler
     @main_loop_poll_interval = main_loop_poll_interval
     @monotonic_clock = monotonic_clock
     @ws_disconnect_grace_seconds = ws_disconnect_grace_seconds
@@ -139,6 +144,8 @@ class LiveTradingWorker
     @background_thread_registry = background_thread_registry_lazy
     # Phase 3.4a Step 0b-3 反映: WS reconnect 検知を Domain::WsReconnectDetector に抽出.
     @ws_reconnect_detector = ws_reconnect_detector_lazy
+    # Phase 3.4a Step 0b-4 反映: heartbeat / lease renew を Domain::HeartbeatScheduler に抽出.
+    @heartbeat_scheduler = heartbeat_scheduler_lazy
 
     bootstrap_session(session_id)
     enter_main_loop
@@ -191,8 +198,7 @@ class LiveTradingWorker
   #   - WS 切断検知: mark_halted!(reason: ws_disconnected)
   def enter_main_loop
     exit_reason = nil
-    @last_heartbeat_at = nil
-    @last_lease_renew_at = nil
+    @heartbeat_scheduler.reset
     @ws_reconnect_detector.reset(public_ws: @public_ws, private_ws: @private_ws)
     @ws_disconnected_since = nil # R-6 #9: WS_DISCONNECT_GRACE_SECONDS 計測用
 
@@ -200,8 +206,8 @@ class LiveTradingWorker
       exit_reason = check_loop_exit_condition
       break if exit_reason
 
-      pulse_heartbeat_if_due
-      renew_lease_if_due
+      @heartbeat_scheduler.pulse_heartbeat_if_due(session: @session, worker_instance_id: @worker_instance_id)
+      @heartbeat_scheduler.renew_lease_if_due(lease: @lease)
       detect_ws_reconnect_and_reconcile
       @background_thread_registry.sweep_if_due
       sleep(@main_loop_poll_interval)
@@ -244,39 +250,6 @@ class LiveTradingWorker
   # R-8-6 反映: Domain::ReconciliationCoordinator に委譲.
   def run_reconciliation_after_reconnect(session)
     @reconciliation_coordinator.run_after_reconnect(session)
-  end
-
-  # heartbeat 周期到達時に process_manager.pulse_heartbeat! を呼ぶ.
-  # 初回は @last_heartbeat_at が nil のため即時実行.
-  # 失敗時は logger.warn 落とし(main loop を止めない).
-  # 周期判定は monotonic clock を使用し壁時計逆行による heartbeat 停止事故を防ぐ(R-2 #5 反映).
-  def pulse_heartbeat_if_due
-    now = @monotonic_clock.call
-    return if @last_heartbeat_at && (now - @last_heartbeat_at) < HEARTBEAT_INTERVAL_SECONDS
-
-    process_manager.pulse_heartbeat!(session: @session, worker_instance_id: @worker_instance_id)
-    @last_heartbeat_at = now
-  rescue StandardError => e
-    logger.warn(
-      "[LiveTradingWorker] pulse_heartbeat! failed: #{e.class.name}: #{sanitize_log_message(e.message)}"
-    )
-  end
-
-  # lease renew 周期到達時に process_manager.renew_lease! を呼ぶ.
-  # 初回は @last_lease_renew_at が nil のため即時実行.
-  # 失敗時は logger.warn 落とし.
-  # 周期判定は monotonic clock を使用(R-2 #5 反映).
-  def renew_lease_if_due
-    now = @monotonic_clock.call
-    return if @last_lease_renew_at && (now - @last_lease_renew_at) < LEASE_RENEW_INTERVAL_SECONDS
-    return unless @lease
-
-    process_manager.renew_lease!(lease: @lease)
-    @last_lease_renew_at = now
-  rescue StandardError => e
-    logger.warn(
-      "[LiveTradingWorker] renew_lease! failed: #{e.class.name}: #{sanitize_log_message(e.message)}"
-    )
   end
 
   # 終了条件判定: terminal / kill_switch / ws_disconnected の 3 経路.
@@ -885,6 +858,18 @@ class LiveTradingWorker
   # Phase 3.4a Step 0b-3: ws_reconnect_detector が DI されていない場合の lazy init.
   def ws_reconnect_detector_lazy
     @ws_reconnect_detector || Domain::WsReconnectDetector.new
+  end
+
+  # Phase 3.4a Step 0b-4: heartbeat_scheduler が DI されていない場合の lazy init.
+  # process_manager + monotonic_clock を共有 / heartbeat 60s + lease renew 120s 既定.
+  def heartbeat_scheduler_lazy
+    @heartbeat_scheduler || Domain::HeartbeatScheduler.new(
+      process_manager: process_manager,
+      monotonic_clock: @monotonic_clock,
+      logger: logger,
+      heartbeat_interval_seconds: HEARTBEAT_INTERVAL_SECONDS,
+      lease_renew_interval_seconds: LEASE_RENEW_INTERVAL_SECONDS
+    )
   end
 
   # WS factory は Proc を保持し step 9/10 内で `.call` で遅延生成する
