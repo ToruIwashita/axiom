@@ -30,6 +30,7 @@ RSpec.describe LiveTradingWorker do
   let(:reconciliation_coordinator) { nil } # 個別 describe で instance_double 等に override
   let(:candle_confirm_detector) { Domain::CandleConfirmDetector.new }
   let(:anomaly_reconcile_debouncer) { instance_double(Domain::AnomalyReconcileDebouncer, try_acquire: true, release: nil) }
+  let(:ws_reconnect_detector) { Domain::WsReconnectDetector.new }
   let(:worker) do
     described_class.new(
       process_manager: process_manager,
@@ -44,6 +45,7 @@ RSpec.describe LiveTradingWorker do
       reconciliation_coordinator: reconciliation_coordinator,
       candle_confirm_detector: candle_confirm_detector,
       anomaly_reconcile_debouncer: anomaly_reconcile_debouncer,
+      ws_reconnect_detector: ws_reconnect_detector,
       main_loop_poll_interval: 0, # spec ではループを sleep させない
       ws_disconnect_grace_seconds: 0, # R-6 #9: spec では grace なしで即時 :ws_disconnected return
       logger: logger
@@ -1601,6 +1603,7 @@ RSpec.describe LiveTradingWorker do
           candle_confirm_detector: candle_confirm_detector,
           anomaly_reconcile_debouncer: anomaly_reconcile_debouncer,
           background_thread_registry: background_thread_registry,
+          ws_reconnect_detector: ws_reconnect_detector,
           main_loop_poll_interval: 0,
           ws_disconnect_grace_seconds: 0,
           logger: logger
@@ -1615,15 +1618,13 @@ RSpec.describe LiveTradingWorker do
       end
     end
 
+    # WS reconnect 検知の詳細 spec は spec/domain/ws_reconnect_detector_spec.rb に集約済.
+    # Worker spec では detector への委譲経路と reconciliation 起動を検証.
     describe "WS reconnect detection + reconciliation 再実行" do
       before do
         worker.send(:instance_variable_set, :@session, session)
         worker.send(:instance_variable_set, :@public_ws, public_ws)
         worker.send(:instance_variable_set, :@private_ws, private_ws)
-        worker.send(:instance_variable_set, :@last_public_ws_reconnect_count, 0)
-        worker.send(:instance_variable_set, :@last_private_ws_reconnect_count, 0)
-        # R-8-3 #C-1: cross-thread mutex 初期化
-        worker.send(:instance_variable_set, :@ws_reconnect_count_mutex, Mutex.new)
         # run_in_db_thread を同期化(spec hang 回避)
         allow(worker).to receive(:run_in_db_thread) do |_label, &block|
           block.call
@@ -1631,7 +1632,9 @@ RSpec.describe LiveTradingWorker do
       end
 
       describe "#detect_ws_reconnect_and_reconcile" do
-        context "public_ws.reconnect_count が増えていない場合" do
+        before { ws_reconnect_detector.reset(public_ws: public_ws, private_ws: private_ws) }
+
+        context "reconnect 検知なし" do
           before do
             allow(public_ws).to receive(:reconnect_count).and_return(0)
             allow(private_ws).to receive(:reconnect_count).and_return(0)
@@ -1643,46 +1646,32 @@ RSpec.describe LiveTradingWorker do
           end
         end
 
-        context "public_ws.reconnect_count が増えた(1 → 2)場合" do
+        context "public_ws のみ reconnect 検知" do
           before do
-            worker.send(:instance_variable_set, :@last_public_ws_reconnect_count, 1)
             allow(public_ws).to receive(:reconnect_count).and_return(2)
             allow(private_ws).to receive(:reconnect_count).and_return(0)
           end
 
-          it "reconciliation 再実行 + logger.info ログ出力" do
+          it "reconciliation 再実行 + logger.info(public=true) + candle_confirm_detector.reset" do
             expect(worker).to receive(:run_reconciliation_after_reconnect).with(
               an_object_having_attributes(id: session.id)
             )
+            expect(candle_confirm_detector).to receive(:reset)
 
             worker.send(:detect_ws_reconnect_and_reconcile)
             expect(logger).to have_received(:info).with(/WS reconnect detected.*public=true/)
           end
-
-          it "@last_public_ws_reconnect_count が更新される" do
-            allow(worker).to receive(:run_reconciliation_after_reconnect)
-            worker.send(:detect_ws_reconnect_and_reconcile)
-            expect(worker.instance_variable_get(:@last_public_ws_reconnect_count)).to eq(2)
-          end
-
-          # R-2 #6 反映: public_ws reconnect 検知時は candle_confirm_detector を reset して
-          # 新旧受信 thread の race window を回避する
-          it "candle_confirm_detector.reset を呼ぶ" do
-            allow(worker).to receive(:run_reconciliation_after_reconnect)
-            expect(candle_confirm_detector).to receive(:reset)
-            worker.send(:detect_ws_reconnect_and_reconcile)
-          end
         end
 
-        context "private_ws.reconnect_count のみ増えた場合" do
+        context "private_ws のみ reconnect 検知" do
           before do
-            worker.send(:instance_variable_set, :@last_private_ws_reconnect_count, 0)
             allow(public_ws).to receive(:reconnect_count).and_return(0)
             allow(private_ws).to receive(:reconnect_count).and_return(1)
           end
 
-          it "reconciliation 再実行 + logger.info で private=true 表示" do
+          it "reconciliation 再実行 + logger.info(private=true) / candle reset しない" do
             expect(worker).to receive(:run_reconciliation_after_reconnect)
+            expect(candle_confirm_detector).not_to receive(:reset)
             worker.send(:detect_ws_reconnect_and_reconcile)
             expect(logger).to have_received(:info).with(/private=true/)
           end
@@ -1707,22 +1696,6 @@ RSpec.describe LiveTradingWorker do
         it "session を渡して run_after_reconnect を呼ぶ" do
           expect(reconciliation_coordinator).to receive(:run_after_reconnect).with(session)
           worker.send(:run_reconciliation_after_reconnect, session)
-        end
-      end
-
-      describe "#ws_reconnect_count(防御 helper)" do
-        it "ws が nil なら 0" do
-          expect(worker.send(:ws_reconnect_count, nil)).to eq(0)
-        end
-
-        it "ws が reconnect_count に respond しない場合は 0" do
-          ws = double("Ws")
-          expect(worker.send(:ws_reconnect_count, ws)).to eq(0)
-        end
-
-        it "ws.reconnect_count を to_i で返す" do
-          ws = double("Ws", reconnect_count: 3)
-          expect(worker.send(:ws_reconnect_count, ws)).to eq(3)
         end
       end
     end

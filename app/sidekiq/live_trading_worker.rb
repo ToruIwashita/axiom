@@ -61,6 +61,7 @@ class LiveTradingWorker
   # @param candle_confirm_detector [Domain::CandleConfirmDetector, nil] WS candle 確定判定(Phase 3.4a Step 0a 抽出)
   # @param anomaly_reconcile_debouncer [Domain::AnomalyReconcileDebouncer, nil] algo anomaly reconciliation 起動 debounce(Phase 3.4a Step 0b-1 抽出)
   # @param background_thread_registry [Domain::BackgroundThreadRegistry, nil] WS callback 経由の DB 操作 thread 管理(Phase 3.4a Step 0b-2 抽出)
+  # @param ws_reconnect_detector [Domain::WsReconnectDetector, nil] WS Client reconnect 検知(Phase 3.4a Step 0b-3 抽出)
   # @param main_loop_poll_interval [Float] メインループ kill-switch / 状態 poll 間隔(秒). spec で 0 を渡して即時 break.
   # @param monotonic_clock [#call] heartbeat / lease renew の周期判定用 monotonic clock(R-2 #5 反映).
   #   デフォルトは `Process.clock_gettime(Process::CLOCK_MONOTONIC)`. 壁時計逆行(NTP step / 手動修正)による
@@ -84,6 +85,7 @@ class LiveTradingWorker
     candle_confirm_detector: nil,
     anomaly_reconcile_debouncer: nil,
     background_thread_registry: nil,
+    ws_reconnect_detector: nil,
     main_loop_poll_interval: DEFAULT_MAIN_LOOP_POLL_INTERVAL,
     monotonic_clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) },
     ws_disconnect_grace_seconds: WS_DISCONNECT_GRACE_SECONDS,
@@ -105,6 +107,7 @@ class LiveTradingWorker
     @candle_confirm_detector = candle_confirm_detector
     @anomaly_reconcile_debouncer = anomaly_reconcile_debouncer
     @background_thread_registry = background_thread_registry
+    @ws_reconnect_detector = ws_reconnect_detector
     @main_loop_poll_interval = main_loop_poll_interval
     @monotonic_clock = monotonic_clock
     @ws_disconnect_grace_seconds = ws_disconnect_grace_seconds
@@ -134,8 +137,8 @@ class LiveTradingWorker
     @anomaly_reconcile_debouncer = anomaly_reconcile_debouncer_lazy
     # Phase 3.4a Step 0b-2 反映: background thread 管理を Domain::BackgroundThreadRegistry に抽出.
     @background_thread_registry = background_thread_registry_lazy
-    # R-8-3 #C-1: WS reconnect_count の cross-thread mutex(main loop read / run_in_db_thread block write).
-    @ws_reconnect_count_mutex = Mutex.new
+    # Phase 3.4a Step 0b-3 反映: WS reconnect 検知を Domain::WsReconnectDetector に抽出.
+    @ws_reconnect_detector = ws_reconnect_detector_lazy
 
     bootstrap_session(session_id)
     enter_main_loop
@@ -190,8 +193,7 @@ class LiveTradingWorker
     exit_reason = nil
     @last_heartbeat_at = nil
     @last_lease_renew_at = nil
-    @last_public_ws_reconnect_count = ws_reconnect_count(@public_ws)
-    @last_private_ws_reconnect_count = ws_reconnect_count(@private_ws)
+    @ws_reconnect_detector.reset(public_ws: @public_ws, private_ws: @private_ws)
     @ws_disconnected_since = nil # R-6 #9: WS_DISCONNECT_GRACE_SECONDS 計測用
 
     loop do
@@ -212,41 +214,29 @@ class LiveTradingWorker
   # (Phase 1.3 引き継ぎ #13: 24h 切断後 reconciliation / 設計書 02_§5.2.6).
   # 別 thread + AR pool で実行(WS callback thread は触らないため main loop thread から起動).
   #
-  # R-8-3 #C-1 反映: @last_*_reconnect_count の cross-thread 読書きを @anomaly_reconcile_mutex 流用で
-  # 保護する(別 mutex を増やすと初期化箇所が増えるため流用 / read main loop / write run_in_db_thread block).
+  # WS reconnect 検知 + reconciliation 再実行.
+  # Phase 3.4a Step 0b-3 で Domain::WsReconnectDetector に検知ロジックを委譲.
+  # R-6 #10 反映: count update は reconciliation 完了後(carry 漏れ防止).
   def detect_ws_reconnect_and_reconcile
     return unless @session
 
-    public_count = ws_reconnect_count(@public_ws)
-    private_count = ws_reconnect_count(@private_ws)
-    last_public, last_private = @ws_reconnect_count_mutex.synchronize do
-      [ @last_public_ws_reconnect_count, @last_private_ws_reconnect_count ]
-    end
-    public_reconnected = public_count > last_public
-    private_reconnected = private_count > last_private
-
-    return unless public_reconnected || private_reconnected
+    result = @ws_reconnect_detector.snapshot(public_ws: @public_ws, private_ws: @private_ws)
+    return unless result.any?
 
     logger.info(
-      "[LiveTradingWorker] WS reconnect detected (public=#{public_reconnected}, " \
-      "private=#{private_reconnected}), re-running reconciliation"
+      "[LiveTradingWorker] WS reconnect detected (public=#{result.public_reconnected}, " \
+      "private=#{result.private_reconnected}), re-running reconciliation"
     )
 
     # R-2 #6 反映: WS reconnect 後は新旧受信 thread の race window が論理上発生し得るため,
     # candle confirm detector を reset して次の確定判定を新 thread の最初の row から再開する
     # (snapshot 受信時と同様の振る舞い).
-    @candle_confirm_detector.reset if public_reconnected
+    @candle_confirm_detector.reset if result.public_reconnected
 
     run_in_db_thread("reconcile_after_ws_reconnect") do
       session_reloaded = LiveTrading::Session.find(@session.id)
       run_reconciliation_after_reconnect(session_reloaded)
-      # R-6 #10 反映: count 更新は reconciliation 完了後に行う.
-      # thread 例外時は count 未更新 → 次 main loop iteration で再試行可能(carry 漏れ防止).
-      # R-8-3 #C-1: mutex 保護で main loop thread の read と整合性確保.
-      @ws_reconnect_count_mutex.synchronize do
-        @last_public_ws_reconnect_count = public_count
-        @last_private_ws_reconnect_count = private_count
-      end
+      @ws_reconnect_detector.update_to(public_count: result.public_count, private_count: result.private_count)
     end
   end
 
@@ -254,13 +244,6 @@ class LiveTradingWorker
   # R-8-6 反映: Domain::ReconciliationCoordinator に委譲.
   def run_reconciliation_after_reconnect(session)
     @reconciliation_coordinator.run_after_reconnect(session)
-  end
-
-  # WS Client の reconnect_count を安全に取得する(nil 防御 + respond_to? 防御).
-  def ws_reconnect_count(ws)
-    return 0 unless ws&.respond_to?(:reconnect_count)
-
-    ws.reconnect_count.to_i
   end
 
   # heartbeat 周期到達時に process_manager.pulse_heartbeat! を呼ぶ.
@@ -897,6 +880,11 @@ class LiveTradingWorker
       monotonic_clock: @monotonic_clock,
       logger: logger
     )
+  end
+
+  # Phase 3.4a Step 0b-3: ws_reconnect_detector が DI されていない場合の lazy init.
+  def ws_reconnect_detector_lazy
+    @ws_reconnect_detector || Domain::WsReconnectDetector.new
   end
 
   # WS factory は Proc を保持し step 9/10 内で `.call` で遅延生成する
