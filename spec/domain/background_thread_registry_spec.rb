@@ -102,18 +102,20 @@ RSpec.describe Domain::BackgroundThreadRegistry do
 
   describe "thread-safety" do
     # 並列 spawn / sweep / join_all を交錯させ raise しないことを検証.
+    # RSpec の let は thread-safe ではないため registry を local 変数にキャプチャしてから spawn する.
     it "並列 spawn 中に sweep_if_due が走っても整合性維持" do
+      target_registry = registry
       writers = 10.times.map do
         Thread.new do
-          5.times { registry.spawn("task") { :ok } }
+          5.times { target_registry.spawn("task") { :ok } }
         end
       end
       sweeper = Thread.new do
-        10.times { registry.sweep_if_due; sleep 0.001 }
+        10.times { target_registry.sweep_if_due; sleep 0.001 }
       end
-      (writers + [ sweeper ]).each(&:join)
-      registry.join_all
-      expect(registry.size).to eq(0)
+      expect { (writers + [ sweeper ]).each(&:join) }.not_to raise_error
+      target_registry.join_all
+      expect(target_registry.size).to eq(0)
     end
   end
 end

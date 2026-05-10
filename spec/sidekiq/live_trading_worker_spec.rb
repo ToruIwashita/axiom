@@ -742,14 +742,34 @@ RSpec.describe LiveTradingWorker do
 
       # R-3 #7 反映: background thread leak 対策(Phase 3.4a Step 0b-2 で Domain 委譲)
       context "finalize_main_loop で background thread を join する" do
+        let(:background_thread_registry) do
+          instance_double(Domain::BackgroundThreadRegistry, sweep_if_due: nil, join_all: nil, spawn: nil)
+        end
+        let(:worker) do
+          described_class.new(
+            process_manager: process_manager,
+            clock_sync: clock_sync,
+            market_endpoint: market_endpoint,
+            position_endpoint: position_endpoint,
+            public_ws_factory: public_ws_factory,
+            private_ws_factory: private_ws_factory,
+            order_endpoint: order_endpoint_di,
+            account_endpoint: account_endpoint_di,
+            state_cache: state_cache,
+            reconciliation_coordinator: reconciliation_coordinator,
+            candle_confirm_detector: candle_confirm_detector,
+            anomaly_reconcile_debouncer: anomaly_reconcile_debouncer,
+            background_thread_registry: background_thread_registry,
+            ws_reconnect_detector: ws_reconnect_detector,
+            main_loop_poll_interval: 0,
+            ws_disconnect_grace_seconds: 0,
+            logger: logger
+          )
+        end
+
         it "background_thread_registry.join_all が呼ばれる" do
-          expect(worker.send(:instance_variable_get, :@background_thread_registry) ||
-                 Domain::BackgroundThreadRegistry).to be_truthy
-          # registry を spy するため lazy init 後に置換
+          expect(background_thread_registry).to receive(:join_all)
           worker.perform(session.id)
-          # perform 完了後は registry が初期化済 + join_all 実行済
-          # (内部状態の検証はせず, perform 全体が raise しないことで委譲動作確認)
-          expect(worker.send(:instance_variable_get, :@background_thread_registry)).to be_a(Domain::BackgroundThreadRegistry)
         end
       end
 

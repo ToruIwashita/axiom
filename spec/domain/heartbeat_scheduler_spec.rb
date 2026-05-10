@@ -91,9 +91,24 @@ RSpec.describe Domain::HeartbeatScheduler do
     end
 
     context "lease が nil の場合" do
-      it "renew_lease! を呼ばない / raise しない" do
+      it "renew_lease! を呼ばない / raise しない / 初回 warn 出力" do
         scheduler.renew_lease_if_due(lease: nil)
         expect(process_manager).not_to have_received(:renew_lease!)
+        expect(logger).to have_received(:warn).with(/lease is nil; lease renew skipped/)
+      end
+
+      it "周期(lease_renew_interval_seconds)未満の連続 nil で warn は重複出力しない(spam 防止)" do
+        scheduler.renew_lease_if_due(lease: nil)
+        clock_value[0] = 1010.0 # 10s 経過(< 120s)
+        scheduler.renew_lease_if_due(lease: nil)
+        expect(logger).to have_received(:warn).once
+      end
+
+      it "周期以上経過後の連続 nil で warn が再出力される" do
+        scheduler.renew_lease_if_due(lease: nil)
+        clock_value[0] = 1121.0 # 121s 経過(>= 120s)
+        scheduler.renew_lease_if_due(lease: nil)
+        expect(logger).to have_received(:warn).twice
       end
     end
 
@@ -130,6 +145,18 @@ RSpec.describe Domain::HeartbeatScheduler do
       it "logger.warn 落とし + 再 raise しない" do
         expect { scheduler.renew_lease_if_due(lease: lease) }.not_to raise_error
         expect(logger).to have_received(:warn).with(/renew_lease! failed.*lease conflict/)
+      end
+    end
+
+    context "raise メッセージに credentials が含まれる場合" do
+      before do
+        allow(process_manager).to receive(:renew_lease!)
+          .and_raise(StandardError, "Faraday error: api_key=ABC123")
+      end
+
+      it "logger.warn メッセージは sanitize される(pulse_heartbeat_if_due と対称)" do
+        scheduler.renew_lease_if_due(lease: lease)
+        expect(logger).to have_received(:warn).with(/api_key=\[FILTERED\]/)
       end
     end
   end

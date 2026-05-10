@@ -94,7 +94,9 @@ module Infrastructure
     # @param client_oid [String, nil]
     # @return [Hash]
     def cancel_plan_order(symbol:, order_id: nil, client_oid: nil)
-      raise ArgumentError, "order_id or client_oid is required" if order_id.nil? && client_oid.nil?
+      if order_id.to_s.empty? && client_oid.to_s.empty?
+        raise ArgumentError, "order_id or client_oid is required"
+      end
 
       body = {
         symbol: symbol,

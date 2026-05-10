@@ -57,6 +57,11 @@ module Domain
     # in-progress フラグを解除する.
     # release のみでは debounce_seconds 内の再取得は許可されない(意図的 / burst 抑止).
     #
+    # 注意: reconciliation 自体が debounce_seconds(既定 30s)を超えて長引いた場合,
+    # release 直後の try_acquire は `last_acquired_at` 起点判定で即取得可能になる.
+    # これは reconciliation 終了時点で「直前の起動から十分時間が経過済」とみなす意図的設計.
+    # 連続 reconciliation を確実に間隔空けたい場合は呼出側で別途間隔を入れること.
+    #
     # @return [void]
     def release
       @mutex.synchronize { @in_progress = false }

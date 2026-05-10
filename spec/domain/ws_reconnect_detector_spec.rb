@@ -113,25 +113,30 @@ RSpec.describe Domain::WsReconnectDetector do
   end
 
   describe "thread-safety" do
-    it "並列 snapshot / update_to / reset を交錯させても raise しない" do
-      detector.reset(public_ws: ws_double(0), private_ws: ws_double(0))
+    it "並列 snapshot / update_to / reset を交錯させても raise しない + 最終 snapshot 整合性確認" do
+      target_detector = detector
+      target_detector.reset(public_ws: ws_double(0), private_ws: ws_double(0))
 
+      reader_pub = ws_double(1)
+      reader_pri = ws_double(1)
       readers = 10.times.map do
         Thread.new do
-          50.times do
-            detector.snapshot(public_ws: ws_double(1), private_ws: ws_double(1))
-          end
+          50.times { target_detector.snapshot(public_ws: reader_pub, private_ws: reader_pri) }
         end
       end
 
       writers = 10.times.map do |i|
         Thread.new do
-          50.times { detector.update_to(public_count: i, private_count: i) }
+          50.times { target_detector.update_to(public_count: i, private_count: i) }
         end
       end
 
-      (readers + writers).each(&:join)
-      expect(true).to be true # 完走 = race-free
+      expect { (readers + writers).each(&:join) }.not_to raise_error
+
+      # 最終 snapshot で last_*_count が monotonic 更新済(reset 起点 0 から進んでいる)を確認.
+      result = target_detector.snapshot(public_ws: ws_double(100), private_ws: ws_double(100))
+      expect(result.public_count).to eq(100)
+      expect(result.private_count).to eq(100)
     end
   end
 end

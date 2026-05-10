@@ -1,3 +1,5 @@
+require "set"
+
 module Domain
   # WS callback / WS reconnect / algo anomaly 検出時に DB アクセスを別 thread で実行する際の
   # Thread 管理を担う Domain サービス.
@@ -59,19 +61,22 @@ module Domain
 
     # main loop iteration 内で sweep_interval_seconds 周期で完了済 thread を除去.
     # 周期未到達時は no-op.
+    # `@last_sweep_at` の read-modify-write も Mutex 内で行い JIT / 将来の複数 caller への耐性を確保.
     #
     # @return [void]
     def sweep_if_due
-      now = @monotonic_clock.call
-      return if @last_sweep_at && (now - @last_sweep_at) < @sweep_interval_seconds
+      @mutex.synchronize do
+        now = @monotonic_clock.call
+        return if @last_sweep_at && (now - @last_sweep_at) < @sweep_interval_seconds
 
-      sweep
-      @last_sweep_at = now
+        @threads.select!(&:alive?)
+        @last_sweep_at = now
+      end
       nil
     end
 
     # finalize 時の thread 解放: 残存 thread を timeout 付きで join + 超過時は kill.
-    # 終了後は内部配列を clear する.
+    # 終了後は内部配列から「dup 取得分のみ」を削除する(join 中に spawn された新規 thread は保持).
     #
     # @return [void]
     def join_all
@@ -89,7 +94,8 @@ module Domain
         thread.kill
       end
 
-      @mutex.synchronize { @threads.clear }
+      target_set = threads.to_set
+      @mutex.synchronize { @threads.delete_if { |t| target_set.include?(t) } }
       nil
     end
 
@@ -103,9 +109,5 @@ module Domain
     private
 
     attr_reader :logger
-
-    def sweep
-      @mutex.synchronize { @threads.select!(&:alive?) }
-    end
   end
 end

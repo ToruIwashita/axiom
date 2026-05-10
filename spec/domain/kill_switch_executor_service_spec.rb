@@ -124,7 +124,7 @@ RSpec.describe Domain::KillSwitchExecutorService do
         allow(order_endpoint).to receive(:orders_pending)
           .and_raise(StandardError, "Faraday: api_key=ABC123 down")
         service.execute(session: session, mode: :cancel_only)
-        expect(logger).to have_received(:error).with(/cancel_only failed.*api_key=\[FILTERED\]/)
+        expect(logger).to have_received(:error).with(/orders_pending fetch failed.*api_key=\[FILTERED\]/)
       end
     end
   end
@@ -262,7 +262,7 @@ RSpec.describe Domain::KillSwitchExecutorService do
       end
     end
 
-    context "position_all が raise した場合(致命エラー)" do
+    context "position_all が raise した場合(fail-safe)" do
       let(:session) do
         instance_double(LiveTrading::Session,
           symbol: "BTCUSDT", margin_coin: "USDT", position_mode: "one_way_mode")
@@ -272,7 +272,14 @@ RSpec.describe Domain::KillSwitchExecutorService do
         allow(position_endpoint).to receive(:position_all).and_raise(StandardError, "API timeout")
       end
 
-      it ":halted を返す" do
+      it "close_positions(hold_side: nil)を fail-safe で呼ぶ + :stopped 返却(close は idempotent)" do
+        expect(order_endpoint).to receive(:close_positions).with(symbol: "BTCUSDT", hold_side: nil)
+        expect(service.execute(session: session, mode: :cancel_and_market_close)).to eq(:stopped)
+        expect(logger).to have_received(:warn).with(/position_all failed.*fail-safe.*API timeout/)
+      end
+
+      it "fail-safe close_positions も raise した場合は :halted" do
+        allow(order_endpoint).to receive(:close_positions).and_raise(StandardError, "Bitget down")
         expect(service.execute(session: session, mode: :cancel_and_market_close)).to eq(:halted)
       end
     end
@@ -280,14 +287,14 @@ RSpec.describe Domain::KillSwitchExecutorService do
 
   describe "#execute(mode: :cancel_and_reduce_only)" do
     let(:clock_value) { [ 1000.0 ] }
-    let(:clock) { -> { clock_value.first } }
+    let(:monotonic_clock) { -> { clock_value.first } }
     let(:sleep_calls) { [] }
     let(:sleep_proc) { ->(sec) { sleep_calls << sec; clock_value[0] += sec } }
     let(:service) do
       described_class.new(
         order_endpoint: order_endpoint,
         position_endpoint: position_endpoint,
-        clock: clock,
+        monotonic_clock: monotonic_clock,
         sleep_proc: sleep_proc,
         logger: logger
       )
@@ -342,6 +349,24 @@ RSpec.describe Domain::KillSwitchExecutorService do
       it "session.update! / save 等を呼ばない(session は instance_double で stub なし)" do
         # session に update!/save を stub していない → 呼ばれたら NoMethodError
         expect { service.execute(session: session, mode: :cancel_and_reduce_only, params: params) }.not_to raise_error
+      end
+    end
+
+    context "client_oid 形式" do
+      before do
+        allow(position_endpoint).to receive(:position_all).and_return(
+          "data" => [ { "symbol" => "BTCUSDT", "holdSide" => "long", "total" => "0.05", "markPrice" => "50000" } ]
+        )
+      end
+
+      it "client_oid は `reduce_only_close-<session.id>-<秒>-<hex16>` 形式で生成される(衝突回避)" do
+        custom_params = params.merge(max_follow_iterations: 1, fallback_after_sec: 10_000)
+        expect(order_endpoint).to receive(:place_order).with(
+          hash_including(client_oid: a_string_matching(/\Areduce_only_close-42-\d+-[0-9a-f]{16}\z/))
+        ).and_return("data" => { "orderId" => "ro-1" })
+        allow(order_endpoint).to receive(:cancel_order)
+        allow(order_endpoint).to receive(:close_positions)
+        service.execute(session: session, mode: :cancel_and_reduce_only, params: custom_params)
       end
     end
 
@@ -490,6 +515,42 @@ RSpec.describe Domain::KillSwitchExecutorService do
         ).and_return("data" => { "orderId" => "ro-1" })
         expect(order_endpoint).to receive(:close_positions).with(symbol: "BTCUSDT", hold_side: "long")
         service.execute(session: session, mode: :cancel_and_reduce_only, params: custom_params)
+      end
+    end
+
+    context "ループ途中で position が消えた場合 + reduce_only 指値が残存" do
+      before do
+        responses = [
+          { "data" => [ { "symbol" => "BTCUSDT", "holdSide" => "long", "total" => "0.05", "markPrice" => "50000" } ] },
+          { "data" => [ { "symbol" => "BTCUSDT", "holdSide" => "long", "total" => "0", "markPrice" => "50000" } ] }
+        ]
+        call_count = 0
+        allow(position_endpoint).to receive(:position_all) do
+          response = responses[call_count] || responses.last
+          call_count += 1
+          response
+        end
+      end
+
+      it "ループ途中の :stopped return 前にも reduce_only 指値を必ず cancel する(残存指値の反対方向約定リスク回避)" do
+        expect(order_endpoint).to receive(:place_order).and_return("data" => { "orderId" => "ro-1" })
+        expect(order_endpoint).to receive(:cancel_order).with(symbol: "BTCUSDT", order_id: "ro-1")
+        expect(service.execute(session: session, mode: :cancel_and_reduce_only, params: params)).to eq(:stopped)
+      end
+    end
+
+    context "markPrice が nil / 不正値の場合(fail-safe)" do
+      before do
+        allow(position_endpoint).to receive(:position_all).and_return(
+          "data" => [ { "symbol" => "BTCUSDT", "holdSide" => "long", "total" => "0.05", "markPrice" => nil } ]
+        )
+      end
+
+      it "追従ループを abort して fallback close_positions に直行" do
+        expect(order_endpoint).not_to receive(:place_order)
+        expect(order_endpoint).to receive(:close_positions)
+        service.execute(session: session, mode: :cancel_and_reduce_only, params: params)
+        expect(logger).to have_received(:warn).with(/markPrice missing\/invalid.*falling back/)
       end
     end
 

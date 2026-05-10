@@ -54,7 +54,9 @@ RSpec.describe Domain::AnomalyReconcileDebouncer do
         clock_value[0] = 1030.0 # ちょうど 30s 経過
       end
 
-      it "true を返す(>= 30s)" do
+      # 実装の判定は `(now - last) < debounce_seconds` で `<` 比較.
+      # `30 < 30` → false → 取得許可 → `true` 返却.
+      it "true を返す(`now - last < debounce` が false → 取得許可)" do
         expect(debouncer.try_acquire).to be true
       end
     end

@@ -1,4 +1,5 @@
 require "bigdecimal"
+require "securerandom"
 
 module Domain
   # ユーザー指示の kill-switch(stop / emergency_stop)実行を担う Domain サービス.
@@ -33,16 +34,16 @@ module Domain
 
     # @param order_endpoint [Infrastructure::BitgetOrderEndpoint] 全注文 cancel + close_positions
     # @param position_endpoint [Infrastructure::BitgetPositionEndpoint] reduce_only 追従ループでの position 取得
-    # @param clock [#call] reduce_only 追従ループの elapsed 判定(monotonic clock 推奨 / 壁時計逆行耐性)
+    # @param monotonic_clock [#call] reduce_only 追従ループの elapsed 判定(壁時計逆行耐性 / 他 Domain と命名統一)
     # @param sleep_proc [#call] reduce_only 追従ループの sleep 注入(spec で no-op 化用)
     # @param logger [Logger] 部分失敗 warn / 致命エラー error 出力先
     def initialize(order_endpoint:, position_endpoint:,
-                   clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) },
+                   monotonic_clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) },
                    sleep_proc: ->(sec) { sleep(sec) },
                    logger: Rails.logger)
       @order_endpoint = order_endpoint
       @position_endpoint = position_endpoint
-      @clock = clock
+      @monotonic_clock = monotonic_clock
       @sleep_proc = sleep_proc
       @logger = logger
     end
@@ -69,19 +70,15 @@ module Domain
 
     private
 
-    attr_reader :order_endpoint, :position_endpoint, :clock, :sleep_proc, :logger
+    attr_reader :order_endpoint, :position_endpoint, :monotonic_clock, :sleep_proc, :logger
 
     # cancel_only モード: 全 pending order(通常 + plan)を取消し,ポジションは保持.
+    # cancel_all_pending_*_orders は内部の orders_pending / orders_plan_pending 取得失敗時に
+    # それぞれ :halted-or-stopped の判定が必要なため 2 段階で評価する.
     def execute_cancel_only(session)
-      cancel_all_pending_normal_orders(session)
-      cancel_all_pending_plan_orders(session)
-      :stopped
-    rescue StandardError => e
-      logger.error(
-        "[KillSwitchExecutorService] cancel_only failed: " \
-        "#{e.class.name}: #{Domain::FailureReasonSanitizer.sanitize(e.message)}"
-      )
-      :halted
+      normal_ok = cancel_all_pending_normal_orders(session)
+      plan_ok = cancel_all_pending_plan_orders(session)
+      normal_ok && plan_ok ? :stopped : :halted
     end
 
     # cancel_and_market_close モード: 全 pending order 取消 + close_positions 即時成行.
@@ -101,39 +98,54 @@ module Domain
     end
 
     def cancel_all_pending_normal_orders(session)
-      response = order_endpoint.orders_pending(symbol: session.symbol)
-      orders = extract_data_array(response)
-      orders.each do |order|
+      response = fetch_or_log(:orders_pending) do
+        order_endpoint.orders_pending(symbol: session.symbol)
+      end
+      return false if response.nil?
+
+      extract_data_array(response).each do |order|
         order_id = order.is_a?(Hash) ? order["orderId"] : nil
         next if order_id.nil?
 
-        begin
-          order_endpoint.cancel_order(symbol: session.symbol, order_id: order_id)
-        rescue StandardError => e
-          logger.warn(
-            "[KillSwitchExecutorService] cancel_order failed (order_id=#{order_id}): " \
-            "#{e.class.name}: #{Domain::FailureReasonSanitizer.sanitize(e.message)}"
-          )
-        end
+        cancel_individual_order(:cancel_order, session: session, order_id: order_id)
       end
+      true
     end
 
     def cancel_all_pending_plan_orders(session)
-      response = order_endpoint.orders_plan_pending(symbol: session.symbol)
-      plans = extract_data_array(response)
-      plans.each do |plan|
+      response = fetch_or_log(:orders_plan_pending) do
+        order_endpoint.orders_plan_pending(symbol: session.symbol)
+      end
+      return false if response.nil?
+
+      extract_data_array(response).each do |plan|
         order_id = plan.is_a?(Hash) ? plan["orderId"] : nil
         next if order_id.nil?
 
-        begin
-          order_endpoint.cancel_plan_order(symbol: session.symbol, order_id: order_id)
-        rescue StandardError => e
-          logger.warn(
-            "[KillSwitchExecutorService] cancel_plan_order failed (order_id=#{order_id}): " \
-            "#{e.class.name}: #{Domain::FailureReasonSanitizer.sanitize(e.message)}"
-          )
-        end
+        cancel_individual_order(:cancel_plan_order, session: session, order_id: order_id)
       end
+      true
+    end
+
+    # API 取得自体の失敗(致命)を logger.error + nil 返却で表現する共通 helper.
+    def fetch_or_log(label)
+      yield
+    rescue StandardError => e
+      logger.error(
+        "[KillSwitchExecutorService] #{label} fetch failed: " \
+        "#{e.class.name}: #{Domain::FailureReasonSanitizer.sanitize(e.message)}"
+      )
+      nil
+    end
+
+    # 個別 cancel 失敗(部分失敗)を logger.warn 落とし + 後続継続させる共通 helper.
+    def cancel_individual_order(method, session:, order_id:)
+      order_endpoint.public_send(method, symbol: session.symbol, order_id: order_id)
+    rescue StandardError => e
+      logger.warn(
+        "[KillSwitchExecutorService] #{method} failed (order_id=#{order_id}): " \
+        "#{e.class.name}: #{Domain::FailureReasonSanitizer.sanitize(e.message)}"
+      )
     end
 
     # cancel_and_reduce_only モード: 全 pending order 取消 + reduce_only 指値追従ループ +
@@ -141,7 +153,7 @@ module Domain
     #
     # レビュー重要 3 反映:
     # (a) fallback 直前に reduce_only 指値を必ずキャンセル(設計書原文)
-    # (b) elapsed_sec の起点 started_at = clock.call を冒頭で明示
+    # (b) elapsed_sec の起点 started_at = monotonic_clock.call を冒頭で明示
     # (c) 戻り値は :stopped / :halted Symbol(Worker 側で session.update! する責務分担)
     # (d) ループ条件は時刻ベース fallback と iterations 上限の両方適用(時刻優先 / iterations は安全網)
     def execute_cancel_and_reduce_only(session, params)
@@ -157,16 +169,29 @@ module Domain
     end
 
     def run_reduce_only_follow_loop(session, config)
-      started_at = clock.call # 重要 3-(b): elapsed 起点
+      started_at = monotonic_clock.call # 重要 3-(b): elapsed 起点
       iterations = 0
       reduce_only_order_id = nil
 
       # 重要 3-(d): 時刻ベース fallback と iterations 上限の両方適用
-      while (clock.call - started_at) < config[:fallback_after_sec] && iterations < config[:max_follow_iterations]
+      while (monotonic_clock.call - started_at) < config[:fallback_after_sec] && iterations < config[:max_follow_iterations]
         position = fetch_active_position(session)
-        return :stopped if position.nil?
+        if position.nil?
+          # ループ途中の close 完了でも reduce_only 指値は約定で消費されたか
+          # まだ pending 残存の可能性があるため必ず cancel(残存指値の反対方向約定リスク回避).
+          cancel_reduce_only_order_if_exists(session, reduce_only_order_id)
+          return :stopped
+        end
 
         desired_price = calculate_desired_price(position, config[:limit_offset_bps])
+        if desired_price.nil?
+          # markPrice 異常: 追従 abort して fallback close に直行(kill 用途 fail-safe)
+          logger.warn(
+            "[KillSwitchExecutorService] markPrice missing/invalid; aborting follow loop and falling back to close_positions"
+          )
+          break
+        end
+
         reduce_only_order_id = place_or_modify_reduce_only(
           session, position, desired_price, reduce_only_order_id
         )
@@ -175,9 +200,12 @@ module Domain
         iterations += 1
       end
 
-      # ループ終了後の最終確認: position が消えていれば :stopped
+      # ループ終了後の最終確認: position が消えていれば :stopped(残存 reduce_only も cancel)
       position = fetch_active_position(session)
-      return :stopped if position.nil?
+      if position.nil?
+        cancel_reduce_only_order_if_exists(session, reduce_only_order_id)
+        return :stopped
+      end
 
       # 重要 3-(a): fallback 直前に reduce_only 指値を必ずキャンセル
       cancel_reduce_only_order_if_exists(session, reduce_only_order_id)
@@ -191,13 +219,20 @@ module Domain
       positions.find { |p| BigDecimal(p["total"].to_s).positive? }
     end
 
+    # markPrice が nil / 不正値の場合は nil を返し,呼出側で reduce_only 追従を諦めて
+    # fallback close へ遷移する(kill 用途の fail-safe / 異常時にループに張り付かない).
     def calculate_desired_price(position, limit_offset_bps)
-      mark_price = BigDecimal(position["markPrice"].to_s)
+      mark_price_str = position["markPrice"].to_s
+      return nil if mark_price_str.empty?
+
+      mark_price = BigDecimal(mark_price_str)
       offset_factor = BigDecimal(limit_offset_bps.to_s) / BigDecimal("10000")
       # close long → 売却 → mark_price * (1 + offset)(passive 寄り)
       # close short → 買戻 → mark_price * (1 - offset)
       offset_factor = -offset_factor if position["holdSide"] == "short"
       mark_price * (BigDecimal("1") + offset_factor)
+    rescue ArgumentError
+      nil
     end
 
     def place_or_modify_reduce_only(session, position, desired_price, existing_order_id)
@@ -214,12 +249,21 @@ module Domain
             "[KillSwitchExecutorService] modify_order failed (order_id=#{existing_order_id}): " \
             "#{e.class.name}: #{Domain::FailureReasonSanitizer.sanitize(e.message)}"
           )
+          # 二重発注リスク回避: modify が失敗 → exchange 側に旧 reduce_only 指値が残存しうるため,
+          # 新規 place_order の前に必ず cancel して連続注文の重複約定を防ぐ.
+          cancel_individual_order(:cancel_order, session: session, order_id: existing_order_id)
         end
       end
 
       response = order_endpoint.place_order(build_reduce_only_params(session, position, desired_price))
       data = response.is_a?(Hash) ? response["data"] : nil
-      data.is_a?(Hash) ? data["orderId"] : nil
+      new_order_id = data.is_a?(Hash) ? data["orderId"] : nil
+      if new_order_id.nil?
+        logger.warn(
+          "[KillSwitchExecutorService] place_order returned no orderId; reduce_only tracking lost"
+        )
+      end
+      new_order_id
     end
 
     def build_reduce_only_params(session, position, desired_price)
@@ -234,7 +278,10 @@ module Domain
         price: desired_price,
         force: "gtc",
         reduce_only: "yes",
-        client_oid: "reduce_only_close-#{session.id}-#{clock.call.to_i}"
+        # client_oid は session id + monotonic clock 整数秒 + ランダム hex で衝突回避.
+        # follow_interval_sec < 1s 設定や modify 失敗 → 再 place の 1 秒以内連続発注時も
+        # SecureRandom.hex(8) によって独立性を確保する.
+        client_oid: "reduce_only_close-#{session.id}-#{monotonic_clock.call.to_i}-#{SecureRandom.hex(8)}"
       }
       params[:trade_side] = "close" if session.position_mode == "hedge_mode"
       params
@@ -273,8 +320,21 @@ module Domain
     # session.position_mode で one_way / hedge を判別:
     # - one_way_mode: 該当 symbol で total > 0 の position が 1 件でもあれば 1 回 close_positions(hold_side: nil)
     # - hedge_mode: total > 0 の各 holdSide ごとに close_positions(hold_side: side)
+    #
+    # position_all 取得自体が失敗した場合は kill 用途の fail-safe として
+    # close_positions(hold_side: nil) を盲目的に呼ぶ(close_positions は idempotent / over-close リスクなし).
     def close_all_positions(session)
-      response = position_endpoint.position_all(margin_coin: session.margin_coin, symbol: session.symbol)
+      begin
+        response = position_endpoint.position_all(margin_coin: session.margin_coin, symbol: session.symbol)
+      rescue StandardError => e
+        logger.warn(
+          "[KillSwitchExecutorService] position_all failed; fail-safe close_positions(nil): " \
+          "#{e.class.name}: #{Domain::FailureReasonSanitizer.sanitize(e.message)}"
+        )
+        order_endpoint.close_positions(symbol: session.symbol, hold_side: nil)
+        return
+      end
+
       positions = extract_data_array(response)
         .select { |p| p.is_a?(Hash) && p["symbol"] == session.symbol }
       active = positions.select { |p| BigDecimal(p["total"].to_s).positive? }

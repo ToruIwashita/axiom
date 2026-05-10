@@ -59,13 +59,15 @@ module Domain
 
     # 周期到達時に process_manager.renew_lease! を呼ぶ.
     # 初回(@last_lease_renew_at が nil)は即時実行 / lease が nil なら no-op.
+    # lease nil チェックを先頭に配置し,nil 状態が連続した場合は周期警告で運用検知できるようにする.
     #
     # @param lease [LiveTrading::SessionLease, nil]
     # @return [void]
     def renew_lease_if_due(lease:)
+      return warn_lease_missing if lease.nil?
+
       now = @monotonic_clock.call
       return if @last_lease_renew_at && (now - @last_lease_renew_at) < @lease_renew_interval_seconds
-      return unless lease
 
       @process_manager.renew_lease!(lease: lease)
       @last_lease_renew_at = now
@@ -90,5 +92,21 @@ module Domain
     private
 
     attr_reader :logger
+
+    # lease nil 状態が周期(lease_renew_interval_seconds)以上連続した場合に warn 出力.
+    # 初回 nil から記録し,以後周期到達ごとに 1 回ずつ通知(spam 防止).
+    def warn_lease_missing
+      now = @monotonic_clock.call
+      @last_lease_missing_warn_at ||= nil
+      if @last_lease_missing_warn_at.nil? ||
+         (now - @last_lease_missing_warn_at) >= @lease_renew_interval_seconds
+        logger.warn(
+          "[HeartbeatScheduler] lease is nil; lease renew skipped " \
+          "(lease 喪失または bootstrap 未完了の可能性)"
+        )
+        @last_lease_missing_warn_at = now
+      end
+      nil
+    end
   end
 end

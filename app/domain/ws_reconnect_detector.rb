@@ -74,13 +74,20 @@ module Domain
     # reconnection 検知後の reconciliation 完了を受けて保持 count を更新する.
     # 通常は snapshot で得た public_count / private_count を渡す.
     #
+    # 注意: snapshot 時点 count まで前進させるのみで,reconciliation 中に再 reconnect が
+    # 起きて exchange 側 count がさらに進んでいた場合(例: snapshot=N+1 / reconciliation 中に
+    # 再 reconnect で count=N+2),次回 main loop iteration の snapshot で `N+2 > N+1` のため
+    # 再検知される(carry 漏れではなく一度の reconciliation で `N+2` まで吸収しない設計).
+    # この再検知を意図する場合は `monotonic`(現値より小さい更新を無視)で安全に呼べる.
+    #
     # @param public_count [Integer]
     # @param private_count [Integer]
     # @return [void]
     def update_to(public_count:, private_count:)
       @mutex.synchronize do
-        @last_public_count = public_count
-        @last_private_count = private_count
+        # snapshot 時点 count より小さい値で上書きしない(monotonic 保証).
+        @last_public_count = public_count if public_count > @last_public_count
+        @last_private_count = private_count if private_count > @last_private_count
       end
       nil
     end
