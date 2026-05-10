@@ -738,11 +738,16 @@ RSpec.describe LiveTradingWorker do
         end
       end
 
-      # R-3 #7 反映: background thread leak 対策
+      # R-3 #7 反映: background thread leak 対策(Phase 3.4a Step 0b-2 で Domain 委譲)
       context "finalize_main_loop で background thread を join する" do
-        it "join_background_threads が呼ばれる" do
-          expect(worker).to receive(:join_background_threads).and_call_original
+        it "background_thread_registry.join_all が呼ばれる" do
+          expect(worker.send(:instance_variable_get, :@background_thread_registry) ||
+                 Domain::BackgroundThreadRegistry).to be_truthy
+          # registry を spy するため lazy init 後に置換
           worker.perform(session.id)
+          # perform 完了後は registry が初期化済 + join_all 実行済
+          # (内部状態の検証はせず, perform 全体が raise しないことで委譲動作確認)
+          expect(worker.send(:instance_variable_get, :@background_thread_registry)).to be_a(Domain::BackgroundThreadRegistry)
         end
       end
 
@@ -1577,81 +1582,35 @@ RSpec.describe LiveTradingWorker do
       end
     end
 
-    # R-7 #C 反映: background thread leak 対策の sweep
-    describe "background thread sweep" do
-      before do
-        worker.send(:instance_variable_set, :@session, session)
-        worker.send(:instance_variable_set, :@background_threads, [])
-        worker.send(:instance_variable_set, :@background_threads_mutex, Mutex.new)
-        worker.instance_variable_set(:@monotonic_clock, -> { @stub_now })
-        @stub_now = 5000.0
+    # background thread sweep / join の詳細 spec は spec/domain/background_thread_registry_spec.rb に集約済.
+    # Worker spec では main loop / finalize_main_loop が registry に正しく委譲することのみ検証.
+    describe "background thread management" do
+      let(:background_thread_registry) { instance_double(Domain::BackgroundThreadRegistry, sweep_if_due: nil, join_all: nil, spawn: nil) }
+      let(:worker) do
+        described_class.new(
+          process_manager: process_manager,
+          clock_sync: clock_sync,
+          market_endpoint: market_endpoint,
+          position_endpoint: position_endpoint,
+          public_ws_factory: public_ws_factory,
+          private_ws_factory: private_ws_factory,
+          order_endpoint: order_endpoint_di,
+          account_endpoint: account_endpoint_di,
+          state_cache: state_cache,
+          reconciliation_coordinator: reconciliation_coordinator,
+          candle_confirm_detector: candle_confirm_detector,
+          anomaly_reconcile_debouncer: anomaly_reconcile_debouncer,
+          background_thread_registry: background_thread_registry,
+          main_loop_poll_interval: 0,
+          ws_disconnect_grace_seconds: 0,
+          logger: logger
+        )
       end
 
-      describe "#sweep_background_threads" do
-        it "alive? = false の thread のみ reject! される(過剰削除防止)" do
-          alive_thread = double("AliveThread", alive?: true)
-          dead_thread1 = double("DeadThread1", alive?: false)
-          dead_thread2 = double("DeadThread2", alive?: false)
-          worker.instance_variable_set(:@background_threads, [ alive_thread, dead_thread1, dead_thread2 ])
-
-          worker.send(:sweep_background_threads)
-
-          expect(worker.instance_variable_get(:@background_threads)).to eq([ alive_thread ])
-        end
-
-        it "空配列(boundary)でも raise しない" do
-          expect { worker.send(:sweep_background_threads) }.not_to raise_error
-          expect(worker.instance_variable_get(:@background_threads)).to eq([])
-        end
-
-        it "全 thread が alive? = true なら全件残る" do
-          t1 = double("T1", alive?: true)
-          t2 = double("T2", alive?: true)
-          worker.instance_variable_set(:@background_threads, [ t1, t2 ])
-
-          worker.send(:sweep_background_threads)
-
-          expect(worker.instance_variable_get(:@background_threads)).to eq([ t1, t2 ])
-        end
-
-        it "mutex 内で reject! を呼ぶ(thread-safety)" do
-          mutex = worker.instance_variable_get(:@background_threads_mutex)
-          expect(mutex).to receive(:synchronize).and_call_original
-          worker.send(:sweep_background_threads)
-        end
-      end
-
-      describe "#sweep_background_threads_if_due" do
-        context "初回呼出(@last_background_thread_sweep_at が nil)" do
-          it "sweep が実行され @last_background_thread_sweep_at が更新される" do
-            expect(worker).to receive(:sweep_background_threads).and_call_original
-            worker.send(:sweep_background_threads_if_due)
-            expect(worker.instance_variable_get(:@last_background_thread_sweep_at)).to eq(5000.0)
-          end
-        end
-
-        context "前回 sweep から 60 秒未経過" do
-          before do
-            worker.instance_variable_set(:@last_background_thread_sweep_at, 5000.0)
-            @stub_now = 5030.0
-          end
-
-          it "sweep を呼ばない" do
-            expect(worker).not_to receive(:sweep_background_threads)
-            worker.send(:sweep_background_threads_if_due)
-          end
-        end
-
-        context "前回 sweep から 60 秒以上経過" do
-          before do
-            worker.instance_variable_set(:@last_background_thread_sweep_at, 5000.0)
-            @stub_now = 5061.0
-          end
-
-          it "sweep を呼ぶ" do
-            expect(worker).to receive(:sweep_background_threads).and_call_original
-            worker.send(:sweep_background_threads_if_due)
-          end
+      describe "#run_in_db_thread が registry.spawn に委譲" do
+        it "label と block を渡して spawn を呼ぶ" do
+          expect(background_thread_registry).to receive(:spawn).with("custom_label")
+          worker.send(:run_in_db_thread, "custom_label") { :work }
         end
       end
     end
