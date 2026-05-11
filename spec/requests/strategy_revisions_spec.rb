@@ -140,10 +140,11 @@ RSpec.describe "StrategyRevisions(View)", type: :request do
         )
       end
 
-      it "redirect + alert(LiveForbiddenInputError)" do
+      it "redirect + flash alert(LiveForbiddenInputError)で approved 維持" do
         subject
         expect(response).to have_http_status(:redirect)
         expect(revision.reload).to be_state_approved
+        expect(flash[:alert]).to match(/live-forbidden/)
       end
     end
   end

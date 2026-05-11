@@ -176,6 +176,32 @@ RSpec.describe ApplicationServices::LiveTradingSessionService do
       it "InvalidTransitionError を raise する" do
         expect { subject }.to raise_error(LiveTrading::Session::InvalidTransitionError)
       end
+
+      # Phase 3.4b R-13 反映: terminal session への emergency_stop_mode 副作用回避
+      it "InvalidTransitionError 発生時 emergency_stop_mode は変更されない(副作用なし)" do
+        original_mode = session.emergency_stop_mode
+        expect { subject }.to raise_error(LiveTrading::Session::InvalidTransitionError)
+        expect(session.reload.emergency_stop_mode).to eq(original_mode)
+      end
+    end
+
+    # Phase 3.4b R-13 反映: Service 単体での mode 不正値 Fail Fast 検証
+    context "mode が EMERGENCY_STOP_MODES 外の場合" do
+      it "nil で ArgumentError raise + session は変化なし" do
+        expect { service.stop(session_id: session.id, mode: nil) }
+          .to raise_error(ArgumentError, /mode must be one of/)
+        expect(session.reload.state_running?).to be true
+      end
+
+      it "空文字で ArgumentError raise" do
+        expect { service.stop(session_id: session.id, mode: "") }
+          .to raise_error(ArgumentError, /mode must be one of/)
+      end
+
+      it "未知の文字列で ArgumentError raise" do
+        expect { service.stop(session_id: session.id, mode: "invalid_mode") }
+          .to raise_error(ArgumentError, /mode must be one of/)
+      end
     end
   end
 
@@ -258,6 +284,46 @@ RSpec.describe ApplicationServices::LiveTradingSessionService do
 
       it "空配列を返す" do
         expect(subject).to eq([])
+      end
+    end
+
+    # Phase 3.4b R-13 反映: Service 単体での mode 不正値 Fail Fast 検証
+    context "mode が EMERGENCY_STOP_MODES 外の場合" do
+      it "nil で ArgumentError raise + 全 session 不変" do
+        running_session_btc
+        running_session_eth
+        expect { service.emergency_stop(mode: nil) }.to raise_error(ArgumentError, /mode must be one of/)
+        expect(running_session_btc.reload.state_running?).to be true
+        expect(running_session_eth.reload.state_running?).to be true
+      end
+
+      it "未知の文字列で ArgumentError raise" do
+        expect { service.emergency_stop(mode: "invalid_mode") }
+          .to raise_error(ArgumentError, /mode must be one of/)
+      end
+    end
+
+    # Phase 3.4b R-13 反映: 個別 session の失敗で残 session を継続停止する best-effort 動作
+    context "1 件の session が start_stopping! 失敗" do
+      before do
+        # btc session は running のまま / eth session は途中で status を halted に変更
+        running_session_btc
+        running_session_eth
+        allow_any_instance_of(LiveTrading::Session).to receive(:start_stopping!).and_wrap_original do |original, *args|
+          if running_session_eth.id == original.receiver.id
+            raise LiveTrading::Session::InvalidTransitionError, "simulated failure"
+          else
+            original.call(*args)
+          end
+        end
+      end
+
+      it "失敗 session を skip + 成功 session のみ配列で返す(残 session に kill-switch 届く)" do
+        result = service.emergency_stop(mode: "cancel_only")
+        expect(result.map(&:id)).to contain_exactly(running_session_btc.id)
+        expect(running_session_btc.reload.state_stopping?).to be true
+        # eth は失敗のため running のまま
+        expect(running_session_eth.reload.state_running?).to be true
       end
     end
   end

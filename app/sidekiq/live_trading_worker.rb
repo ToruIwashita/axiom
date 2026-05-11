@@ -313,10 +313,12 @@ class LiveTradingWorker
   # session.emergency_stop_mode が SUPPORTED_MODES 外の場合は :halted で遷移.
   # Phase 3.4b R-12 反映: executor 内例外時も session が stopping のまま残らないよう
   # 全例外を rescue して mark_halted! で確定遷移させる.
+  # Phase 3.4b R-13 反映: reload / mark_halted! 自体の連鎖例外も rescue で潰し
+  # finalize_main_loop の WS disconnect / lease release を必ず実行させる.
   def execute_kill_switch_and_finalize
     mode_str = @session.emergency_stop_mode
     unless LiveTrading::Session::EMERGENCY_STOP_MODES.include?(mode_str)
-      @session.mark_halted!(reason: "kill_switch_mode_invalid: mode=#{mode_str.inspect}")
+      safe_mark_halted("kill_switch_mode_invalid: mode=#{mode_str.inspect}")
       return
     end
 
@@ -325,16 +327,37 @@ class LiveTradingWorker
     when :stopped
       @session.mark_stopped!
     when :halted
-      @session.mark_halted!(reason: "kill_switch_executor_failed: mode=#{mode_str}")
+      safe_mark_halted("kill_switch_executor_failed: mode=#{mode_str}")
     end
   rescue StandardError => e
     logger.error(
       "[LiveTradingWorker] execute_kill_switch_and_finalize failed: " \
       "#{e.class.name}: #{sanitize_log_message(e.message)}"
     )
-    # stopping 状態に張り付かないよう halted で確定遷移(冪等性ガード: 既に terminal なら no-op).
-    @session.reload
-    @session.mark_halted!(reason: "kill_switch_unexpected_error: #{e.class.name}") unless @session.terminal?
+    safe_mark_halted("kill_switch_unexpected_error: #{e.class.name}")
+  end
+
+  # mark_halted! 自体の例外で finalize 後続(WS disconnect / lease release)が阻害されないよう
+  # 全例外を logger.warn 落としで握る.reload も内側 rescue で防御.
+  # reason は sanitize 経由で永続化(R-13 反映 / failure_reason 漏洩遮断).
+  def safe_mark_halted(reason)
+    begin
+      @session.reload
+    rescue StandardError => e
+      logger.warn(
+        "[LiveTradingWorker] safe_mark_halted reload failed: " \
+        "#{e.class.name}: #{sanitize_log_message(e.message)}"
+      )
+      return
+    end
+    return if @session.terminal?
+
+    @session.mark_halted!(reason: sanitize_log_message(reason))
+  rescue StandardError => e
+    logger.warn(
+      "[LiveTradingWorker] safe_mark_halted mark_halted! failed: " \
+      "#{e.class.name}: #{sanitize_log_message(e.message)}"
+    )
   end
 
   # 3.3-10a peer review 軽微 obs 3 反映: 運用調査時に public_ws / private_ws どちらが切れたかを

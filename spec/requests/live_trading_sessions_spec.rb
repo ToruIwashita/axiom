@@ -172,11 +172,12 @@ RSpec.describe "LiveTradingSessions(View)", type: :request do
     subject { post stop_live_trading_session_path(session), params: { mode: "cancel_and_market_close" } }
 
     context "running session を stop する場合" do
-      it "session を stopping に遷移 + show リダイレクト + notice" do
+      it "session を stopping に遷移 + emergency_stop_mode 上書き + show リダイレクト + notice" do
         subject
-        expect(response).to have_http_status(:redirect)
+        expect(response).to redirect_to(live_trading_session_path(session))
         expect(session.reload.state_stopping?).to be true
         expect(session.reload.emergency_stop_mode).to eq("cancel_and_market_close")
+        expect(flash[:notice]).to match(/停止シグナル/)
       end
     end
 
@@ -212,9 +213,10 @@ RSpec.describe "LiveTradingSessions(View)", type: :request do
     context "存在しない session_id の場合" do
       subject { post stop_live_trading_session_path(0), params: { mode: "cancel_only" } }
 
-      it "一覧リダイレクト + alert" do
+      it "一覧リダイレクト + flash alert" do
         subject
-        expect(response).to have_http_status(:redirect)
+        expect(response).to redirect_to(live_trading_sessions_path)
+        expect(flash[:alert]).to be_present
       end
     end
   end
@@ -236,14 +238,28 @@ RSpec.describe "LiveTradingSessions(View)", type: :request do
         status: "running"
       )
     end
+    let!(:stopped_session) do
+      LiveTrading::Session.create!(
+        strategy_definition: definition, strategy_revision: revision, risk_policy_id: risk_policy.id,
+        symbol: "BTCUSDT", leverage: 10, margin_mode: "isolated", position_mode: "one_way_mode",
+        asset_mode: "single", margin_coin: "USDT", emergency_stop_mode: "cancel_only",
+        status: "stopped", stopped_at: Time.current
+      )
+    end
 
     subject { post emergency_stop_live_trading_sessions_path, params: { mode: "cancel_only" } }
 
-    it "全 running session を stopping に遷移 + 一覧リダイレクト + notice" do
+    it "全 running session を stopping に遷移 + 一覧リダイレクト + notice(セッション数明示)" do
       subject
-      expect(response).to have_http_status(:redirect)
+      expect(response).to redirect_to(live_trading_sessions_path)
       expect(running_a.reload.state_stopping?).to be true
       expect(running_b.reload.state_stopping?).to be true
+      expect(flash[:notice]).to match(/2 セッション/)
+    end
+
+    it "terminal session(stopped_session)には影響しない" do
+      subject
+      expect(stopped_session.reload.state_stopped?).to be true
     end
 
     context "running session が 0 件の場合" do
