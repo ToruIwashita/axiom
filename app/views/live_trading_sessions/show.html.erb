@@ -1,14 +1,27 @@
 <% content_for :title, "ライブトレード セッション ##{@session.id}" %>
 
+<%# Phase 3.4b Step 3.4-13: Turbo Streams + polling fallback 二段安全網.
+    Session#after_update_commit が live_trading_session_<id> stream に
+    broadcast_replace_to で _status_badge partial を送信し,この turbo_stream_from
+    が受信して live_trading_session_<id>_status 要素を置換する.
+    Action Cable 切断時は data-controller="live-trading-status-polling" の
+    polling controller(3s 間隔)が fallback として動作する. %>
+<%= turbo_stream_from "live_trading_session_#{@session.id}" %>
+
 <h1>ライブトレード セッション #<%= @session.id %></h1>
 
 <p>
   <%= link_to "一覧へ戻る", live_trading_sessions_path %>
 </p>
 
-<%# Phase 3.4b Step 3.4-11: status badge + kill-switch modal 統合 %>
-<div style="margin-bottom: 1em;">
-  <strong>現在の状態: </strong><%= render "status_badge", status: @session.status %>
+<div style="margin-bottom: 1em;"
+     data-controller="live-trading-status-polling"
+     data-live-trading-status-polling-api-url-value="<%= api_v1_live_trading_session_path(@session, format: :json) %>"
+     data-live-trading-status-polling-status-value="<%= @session.status %>">
+  <strong>現在の状態: </strong>
+  <span id="live_trading_session_<%= @session.id %>_status">
+    <%= render "status_badge", status: @session.status %>
+  </span>
   <% unless @session.terminal? %>
     <span style="margin-left: 1em;"><%= render "kill_switch_modal", session: @session %></span>
   <% end %>
