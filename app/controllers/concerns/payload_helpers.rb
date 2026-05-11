@@ -89,6 +89,63 @@ module PayloadHelpers
     }
   end
 
+  # Phase 3.4b Step 3.4-8: Exchange::Order payload
+  def exchange_order_payload(order)
+    {
+      id: order.id,
+      live_trading_trade_id: order.live_trading_trade_id,
+      strategy_revision_id: order.strategy_revision_id,
+      symbol: order.symbol,
+      side: order.side,
+      trade_side: order.trade_side,
+      order_type: order.order_type,
+      size: serialize_decimal(order.size),
+      price: serialize_decimal(order.price),
+      status: order.status,
+      force: order.force,
+      reduce_only: order.reduce_only,
+      client_oid: order.client_oid,
+      bitget_order_id: order.bitget_order_id,
+      placed_at: serialize_datetime(order.placed_at),
+      finished_at: serialize_datetime(order.finished_at),
+      created_at: serialize_datetime(order.created_at),
+      updated_at: serialize_datetime(order.updated_at)
+    }
+  end
+
+  # Phase 3.4b Step 3.4-8: Exchange::AlgoOrder payload
+  def exchange_algo_order_payload(algo)
+    {
+      id: algo.id,
+      live_trading_trade_id: algo.live_trading_trade_id,
+      strategy_revision_id: algo.strategy_revision_id,
+      algo_type: algo.algo_type,
+      bitget_algo_id: algo.bitget_algo_id,
+      trigger_price: serialize_decimal(algo.trigger_price),
+      execute_price: serialize_decimal(algo.execute_price),
+      callback_ratio: serialize_decimal(algo.callback_ratio),
+      status: algo.status,
+      created_at: serialize_datetime(algo.created_at),
+      updated_at: serialize_datetime(algo.updated_at)
+    }
+  end
+
+  # Phase 3.4b Step 3.4-8: Exchange::Fill payload
+  def exchange_fill_payload(fill)
+    {
+      id: fill.id,
+      exchange_order_id: fill.exchange_order_id,
+      bitget_fill_id: fill.bitget_fill_id,
+      price: serialize_decimal(fill.price),
+      size: serialize_decimal(fill.size),
+      fee: serialize_decimal(fill.fee),
+      fee_coin: fill.fee_coin,
+      filled_at: serialize_datetime(fill.filled_at),
+      created_at: serialize_datetime(fill.created_at),
+      updated_at: serialize_datetime(fill.updated_at)
+    }
+  end
+
   # Phase 3.4b Step 3.4-7: LiveTrading::Trade payload
   def live_trading_trade_payload(trade)
     {

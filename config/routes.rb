@@ -38,6 +38,9 @@ Rails.application.routes.draw do
         resource :position, controller: "live_trading_session_positions", only: %i[show]
       end
 
+      # Phase 3.4b Step 3.4-8: LiveTrading::Trade 単体取得 API(Trade + Order[] + AlgoOrder[] + Fill[])
+      resources :live_trading_trades, only: %i[show]
+
       post "market_data/sync", to: "market_data#sync"
     end
   end
