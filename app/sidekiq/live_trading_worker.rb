@@ -65,6 +65,7 @@ class LiveTradingWorker
   # @param background_thread_registry [Domain::BackgroundThreadRegistry, nil] WS callback 経由の DB 操作 thread 管理(Phase 3.4a Step 0b-2 抽出)
   # @param ws_reconnect_detector [Domain::WsReconnectDetector, nil] WS Client reconnect 検知(Phase 3.4a Step 0b-3 抽出)
   # @param heartbeat_scheduler [Domain::HeartbeatScheduler, nil] heartbeat / lease renew 周期管理(Phase 3.4a Step 0b-4 抽出)
+  # @param kill_switch_executor [Domain::KillSwitchExecutorService, nil] kill-switch 実行(Phase 3.4b Step 0a 配線)
   # @param main_loop_poll_interval [Float] メインループ kill-switch / 状態 poll 間隔(秒). spec で 0 を渡して即時 break.
   # @param monotonic_clock [#call] heartbeat / lease renew の周期判定用 monotonic clock(R-2 #5 反映).
   #   デフォルトは `Process.clock_gettime(Process::CLOCK_MONOTONIC)`. 壁時計逆行(NTP step / 手動修正)による
@@ -90,6 +91,7 @@ class LiveTradingWorker
     background_thread_registry: nil,
     ws_reconnect_detector: nil,
     heartbeat_scheduler: nil,
+    kill_switch_executor: nil,
     main_loop_poll_interval: DEFAULT_MAIN_LOOP_POLL_INTERVAL,
     monotonic_clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) },
     ws_disconnect_grace_seconds: WS_DISCONNECT_GRACE_SECONDS,
@@ -113,6 +115,7 @@ class LiveTradingWorker
     @background_thread_registry = background_thread_registry
     @ws_reconnect_detector = ws_reconnect_detector
     @heartbeat_scheduler = heartbeat_scheduler
+    @kill_switch_executor = kill_switch_executor
     @main_loop_poll_interval = main_loop_poll_interval
     @monotonic_clock = monotonic_clock
     @ws_disconnect_grace_seconds = ws_disconnect_grace_seconds
@@ -146,6 +149,8 @@ class LiveTradingWorker
     @ws_reconnect_detector = ws_reconnect_detector_lazy
     # Phase 3.4a Step 0b-4 反映: heartbeat / lease renew を Domain::HeartbeatScheduler に抽出.
     @heartbeat_scheduler = heartbeat_scheduler_lazy
+    # Phase 3.4b Step 0a 反映: kill-switch 実行を Domain::KillSwitchExecutorService に委譲.
+    @kill_switch_executor = kill_switch_executor_lazy
 
     bootstrap_session(session_id)
     enter_main_loop
@@ -292,13 +297,33 @@ class LiveTradingWorker
     @session.reload
     case exit_reason
     when :kill_switch
-      # signal_kill_switch? は session.state_stopping? を意味するため stopping → stopped に遷移
-      @session.mark_stopped! if @session.state_stopping?
+      # signal_kill_switch? は session.state_stopping? を意味するため kill_switch_executor で
+      # 注文 cancel + ポジション処理を実施した後 stopping → stopped(or halted)に遷移する.
+      execute_kill_switch_and_finalize if @session.state_stopping?
     when :ws_disconnected
       reason = ws_disconnected_reason
       @session.mark_halted!(reason: reason) unless @session.terminal?
     when :terminal
       # 他プロセスが既に状態確定済み. 何もしない.
+    end
+  end
+
+  # Phase 3.4b Step 0a: kill-switch 実行を Domain::KillSwitchExecutorService に委譲し,
+  # 戻り値 :stopped / :halted に基づき session 状態遷移する.
+  # session.emergency_stop_mode が SUPPORTED_MODES 外の場合は :halted で遷移.
+  def execute_kill_switch_and_finalize
+    mode_str = @session.emergency_stop_mode
+    unless LiveTrading::Session::EMERGENCY_STOP_MODES.include?(mode_str)
+      @session.mark_halted!(reason: "kill_switch_mode_invalid: mode=#{mode_str.inspect}")
+      return
+    end
+
+    result = @kill_switch_executor.execute(session: @session, mode: mode_str.to_sym)
+    case result
+    when :stopped
+      @session.mark_stopped!
+    when :halted
+      @session.mark_halted!(reason: "kill_switch_executor_failed: mode=#{mode_str}")
     end
   end
 
@@ -869,6 +894,17 @@ class LiveTradingWorker
       logger: logger,
       heartbeat_interval_seconds: HEARTBEAT_INTERVAL_SECONDS,
       lease_renew_interval_seconds: LEASE_RENEW_INTERVAL_SECONDS
+    )
+  end
+
+  # Phase 3.4b Step 0a: kill_switch_executor が DI されていない場合の lazy init.
+  # order_endpoint / position_endpoint / monotonic_clock を共有.
+  def kill_switch_executor_lazy
+    @kill_switch_executor || Domain::KillSwitchExecutorService.new(
+      order_endpoint: order_endpoint,
+      position_endpoint: position_endpoint,
+      monotonic_clock: @monotonic_clock,
+      logger: logger
     )
   end
 

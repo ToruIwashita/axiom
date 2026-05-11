@@ -646,6 +646,47 @@ RSpec.describe LiveTradingWorker do
           expect(private_ws).to have_received(:disconnect)
           expect(lease).to have_received(:release!)
         end
+
+        # Phase 3.4b Step 0a: KillSwitchExecutorService 配線後の動作
+        it "KillSwitchExecutorService.execute が session.emergency_stop_mode で呼ばれる" do
+          # session の emergency_stop_mode は default で "cancel_only"
+          executor = instance_double(Domain::KillSwitchExecutorService)
+          worker.instance_variable_set(:@kill_switch_executor, executor)
+          expect(executor).to receive(:execute)
+            .with(session: an_object_having_attributes(id: session.id), mode: :cancel_only)
+            .and_return(:stopped)
+          worker.perform(session.id)
+          expect(session.reload.state_stopped?).to be true
+        end
+
+        context "KillSwitchExecutorService.execute が :halted 返却した場合" do
+          it "session が stopping → halted に遷移し failure_reason に kill_switch_executor_failed が記録される" do
+            executor = instance_double(Domain::KillSwitchExecutorService)
+            worker.instance_variable_set(:@kill_switch_executor, executor)
+            allow(executor).to receive(:execute).and_return(:halted)
+            worker.perform(session.id)
+            session.reload
+            expect(session.state_halted?).to be true
+            expect(session.failure_reason).to include("kill_switch_executor_failed")
+            expect(session.failure_reason).to include("cancel_only")
+          end
+        end
+
+        context "session.emergency_stop_mode が SUPPORTED_MODES 外(防御)" do
+          before do
+            allow_any_instance_of(LiveTrading::Session).to receive(:emergency_stop_mode).and_return("invalid_mode")
+          end
+
+          it "executor を呼ばずに session を mark_halted! + failure_reason に kill_switch_mode_invalid 記録" do
+            executor = instance_double(Domain::KillSwitchExecutorService)
+            worker.instance_variable_set(:@kill_switch_executor, executor)
+            expect(executor).not_to receive(:execute)
+            worker.perform(session.id)
+            session.reload
+            expect(session.state_halted?).to be true
+            expect(session.failure_reason).to include("kill_switch_mode_invalid")
+          end
+        end
       end
 
       context "kill-switch 検出だが session が running のまま(防御)" do
