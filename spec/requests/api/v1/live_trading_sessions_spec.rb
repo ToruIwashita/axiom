@@ -178,4 +178,106 @@ RSpec.describe "Api::V1::LiveTradingSessions", type: :request do
       end
     end
   end
+
+  # Phase 3.4b Step 3.4-6: stop / emergency_stop endpoint
+  describe "POST /api/v1/live_trading_sessions/:id/stop" do
+    let!(:session) do
+      LiveTrading::Session.create!(
+        create_params.merge(status: "running", started_at: Time.current)
+      )
+    end
+
+    subject do
+      post "/api/v1/live_trading_sessions/#{session.id}/stop",
+           params: { mode: "cancel_and_market_close" }, as: :json
+    end
+
+    context "running session を stop する場合" do
+      it "200 OK + stopping status + emergency_stop_mode が上書きされる" do
+        subject
+        expect(response).to have_http_status(:ok)
+        body = response.parsed_body
+        expect(body["status"]).to eq("stopping")
+        expect(body["emergency_stop_mode"]).to eq("cancel_and_market_close")
+        expect(session.reload.state_stopping?).to be true
+      end
+    end
+
+    context "running 以外の status から stop を呼んだ場合(InvalidTransitionError)" do
+      let!(:session) do
+        LiveTrading::Session.create!(
+          create_params.merge(status: "stopped", started_at: Time.current, stopped_at: Time.current)
+        )
+      end
+
+      it "422 Unprocessable Entity を返す" do
+        subject
+        expect(response).to have_http_status(:unprocessable_entity)
+        expect(response.parsed_body["error"]).to match(/cannot start_stopping/i)
+      end
+    end
+
+    context "存在しない session_id を指定した場合" do
+      subject do
+        post "/api/v1/live_trading_sessions/0/stop",
+             params: { mode: "cancel_only" }, as: :json
+      end
+
+      it "404 Not Found を返す" do
+        subject
+        expect(response).to have_http_status(:not_found)
+      end
+    end
+  end
+
+  describe "POST /api/v1/live_trading_sessions/emergency_stop" do
+    let!(:running_session_a) do
+      LiveTrading::Session.create!(
+        create_params.merge(status: "running", started_at: Time.current)
+      )
+    end
+    let!(:running_session_b) do
+      LiveTrading::Session.create!(
+        create_params.merge(status: "running", started_at: Time.current)
+      )
+    end
+    let!(:stopped_session) do
+      LiveTrading::Session.create!(
+        create_params.merge(status: "stopped", started_at: Time.current, stopped_at: Time.current)
+      )
+    end
+
+    subject do
+      post "/api/v1/live_trading_sessions/emergency_stop",
+           params: { mode: "cancel_only" }, as: :json
+    end
+
+    context "running session が複数存在する場合" do
+      it "200 OK + 全 running session を stopping に遷移させる" do
+        subject
+        expect(response).to have_http_status(:ok)
+        body = response.parsed_body
+        expect(body["sessions"].map { |s| s["id"] }).to contain_exactly(running_session_a.id, running_session_b.id)
+        expect(body["sessions"].map { |s| s["status"] }).to all(eq("stopping"))
+        expect(running_session_a.reload.state_stopping?).to be true
+        expect(running_session_b.reload.state_stopping?).to be true
+      end
+
+      it "stopped 等の terminal session は対象外(状態維持)" do
+        subject
+        expect(stopped_session.reload.state_stopped?).to be true
+      end
+    end
+
+    context "running session が 0 件の場合" do
+      let!(:running_session_a) { nil }
+      let!(:running_session_b) { nil }
+
+      it "200 OK + sessions: 空配列" do
+        subject
+        expect(response).to have_http_status(:ok)
+        expect(response.parsed_body["sessions"]).to eq([])
+      end
+    end
+  end
 end

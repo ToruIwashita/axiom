@@ -29,7 +29,12 @@ Rails.application.routes.draw do
       end
 
       # Phase 3.4b Step 3.4-5/6/7: LiveTrading::Session API
-      resources :live_trading_sessions, only: %i[index show create]
+      resources :live_trading_sessions, only: %i[index show create] do
+        post :stop, on: :member
+        collection do
+          post :emergency_stop
+        end
+      end
 
       post "market_data/sync", to: "market_data#sync"
     end

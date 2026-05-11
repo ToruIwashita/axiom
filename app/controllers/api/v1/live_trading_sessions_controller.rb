@@ -43,6 +43,23 @@ module Api
         end
       end
 
+      # Phase 3.4b Step 3.4-6: 単一 session を kill-switch シグナル(stopping 遷移)で停止する.
+      # 実際の注文 cancel + position 処理は Worker 側で KillSwitchExecutorService 経由で実行される.
+      def stop
+        session = service.stop(session_id: params[:id].to_i, mode: params[:mode])
+        render json: live_trading_session_payload(session)
+      rescue ActiveRecord::RecordNotFound => e
+        render json: { error: e.message }, status: :not_found
+      rescue LiveTrading::Session::InvalidTransitionError => e
+        render json: { error: e.message }, status: :unprocessable_entity
+      end
+
+      # Phase 3.4b Step 3.4-6: 全 running session を一斉 stopping に遷移させる(緊急停止).
+      def emergency_stop
+        sessions = service.emergency_stop(mode: params[:mode])
+        render json: { sessions: sessions.map { |s| live_trading_session_payload(s) } }
+      end
+
       private
 
       def service
