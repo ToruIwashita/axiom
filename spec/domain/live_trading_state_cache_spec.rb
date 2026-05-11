@@ -215,7 +215,9 @@ RSpec.describe Domain::LiveTradingStateCache do
     end
 
     # 並列更新と並列 snapshot を交錯させ Mutex 保護下で torn read / race が起きないことを検証.
+    # RSpec の let は thread-safe ではないため cache を local 変数にキャプチャしてから spawn する.
     it "並列 update / snapshot 中に整合性が壊れない(20 thread × 50 反復)" do
+      target_cache = cache
       writer_count = 10
       reader_count = 10
       iterations = 50
@@ -225,8 +227,8 @@ RSpec.describe Domain::LiveTradingStateCache do
         Thread.new do
           iterations.times do |j|
             balance_value = (i * 1000 + j).to_s
-            cache.update_balance(balance_value)
-            cache.apply_position_push(
+            target_cache.update_balance(balance_value)
+            target_cache.apply_position_push(
               [ { "symbol" => "BTCUSDT", "holdSide" => "long", "total" => "1", "openPriceAvg" => balance_value } ],
               symbol: "BTCUSDT"
             )
@@ -237,7 +239,7 @@ RSpec.describe Domain::LiveTradingStateCache do
       readers = reader_count.times.map do
         Thread.new do
           iterations.times do
-            balance, position = cache.snapshot
+            balance, position = target_cache.snapshot
             observed << [ balance, position ]
           end
         end

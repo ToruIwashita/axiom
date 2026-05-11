@@ -28,7 +28,13 @@ module Domain
     ].join("|").freeze
     # 終端文字: 空白・JSON / array 区切り(`,` `;` `}` `]`)・URL query 区切り(`&` `?` `#`)・
     # 連結代入(`=`)・引用符(`"`)。`=` を含めることで `api_key=A=B` 形式で次のトークンを呑み込まない.
-    SECRET_PATTERN = /\b(#{SECRET_KEY_NAMES})(\s*=\s*)[^\s,;}&\]"=?#]+/i
+    #
+    # 先頭境界: `\b` は word char ⇄ non-word char の境界のため `access-key` のような
+    # ハイフン名 + ハイフン prefix(例: `X-access-key=`)で `\b` が反応しない.
+    # `(^|[^A-Za-z0-9_])` で「文字列頭 or 英数字 / `_` 以外」を境界として明示し,
+    # ハイフン(`-`)も境界として扱うことで HTTP header 形式の漏洩を遮断する.
+    # gsub 置換側で `\1` 経由で境界文字を保持する(Onigmo は variable-length lookbehind 非対応).
+    SECRET_PATTERN = /(^|[^A-Za-z0-9_])(#{SECRET_KEY_NAMES})(\s*=\s*)[^\s,;}&\]"=?#]+/i
     SECRET_JSON_PATTERN = /("(?:#{SECRET_KEY_NAMES})"\s*:\s*")(?:[^"\\]|\\.)*(")/i
 
     private_constant :SECRET_KEY_NAMES, :SECRET_PATTERN, :SECRET_JSON_PATTERN
@@ -40,7 +46,7 @@ module Domain
     def self.sanitize(message)
       message.to_s
              .gsub(SECRET_JSON_PATTERN, '\1[FILTERED]\2')
-             .gsub(SECRET_PATTERN, '\1\2[FILTERED]')
+             .gsub(SECRET_PATTERN, '\1\2\3[FILTERED]')
     end
   end
 end

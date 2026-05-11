@@ -28,6 +28,9 @@ RSpec.describe LiveTradingWorker do
   let(:private_ws_factory) { -> { private_ws } }
   let(:state_cache) { Domain::LiveTradingStateCache.new(logger: logger) }
   let(:reconciliation_coordinator) { nil } # 個別 describe で instance_double 等に override
+  let(:candle_confirm_detector) { Domain::CandleConfirmDetector.new }
+  let(:anomaly_reconcile_debouncer) { instance_double(Domain::AnomalyReconcileDebouncer, try_acquire: true, release: nil) }
+  let(:ws_reconnect_detector) { Domain::WsReconnectDetector.new }
   let(:worker) do
     described_class.new(
       process_manager: process_manager,
@@ -40,6 +43,9 @@ RSpec.describe LiveTradingWorker do
       account_endpoint: account_endpoint_di,
       state_cache: state_cache,
       reconciliation_coordinator: reconciliation_coordinator,
+      candle_confirm_detector: candle_confirm_detector,
+      anomaly_reconcile_debouncer: anomaly_reconcile_debouncer,
+      ws_reconnect_detector: ws_reconnect_detector,
       main_loop_poll_interval: 0, # spec ではループを sleep させない
       ws_disconnect_grace_seconds: 0, # R-6 #9: spec では grace なしで即時 :ws_disconnected return
       logger: logger
@@ -734,10 +740,35 @@ RSpec.describe LiveTradingWorker do
         end
       end
 
-      # R-3 #7 反映: background thread leak 対策
+      # R-3 #7 反映: background thread leak 対策(Phase 3.4a Step 0b-2 で Domain 委譲)
       context "finalize_main_loop で background thread を join する" do
-        it "join_background_threads が呼ばれる" do
-          expect(worker).to receive(:join_background_threads).and_call_original
+        let(:background_thread_registry) do
+          instance_double(Domain::BackgroundThreadRegistry, sweep_if_due: nil, join_all: nil, spawn: nil)
+        end
+        let(:worker) do
+          described_class.new(
+            process_manager: process_manager,
+            clock_sync: clock_sync,
+            market_endpoint: market_endpoint,
+            position_endpoint: position_endpoint,
+            public_ws_factory: public_ws_factory,
+            private_ws_factory: private_ws_factory,
+            order_endpoint: order_endpoint_di,
+            account_endpoint: account_endpoint_di,
+            state_cache: state_cache,
+            reconciliation_coordinator: reconciliation_coordinator,
+            candle_confirm_detector: candle_confirm_detector,
+            anomaly_reconcile_debouncer: anomaly_reconcile_debouncer,
+            background_thread_registry: background_thread_registry,
+            ws_reconnect_detector: ws_reconnect_detector,
+            main_loop_poll_interval: 0,
+            ws_disconnect_grace_seconds: 0,
+            logger: logger
+          )
+        end
+
+        it "background_thread_registry.join_all が呼ばれる" do
+          expect(background_thread_registry).to receive(:join_all)
           worker.perform(session.id)
         end
       end
@@ -775,7 +806,6 @@ RSpec.describe LiveTradingWorker do
       before do
         # bootstrap で session を作成しておくが main loop 内処理は不要
         worker.send(:instance_variable_set, :@session, session)
-        worker.send(:instance_variable_set, :@last_candle_row, nil)
         # run_in_db_thread を同期化(spec hang 回避)
         allow(worker).to receive(:run_in_db_thread) do |_label, &block|
           block.call
@@ -817,35 +847,18 @@ RSpec.describe LiveTradingWorker do
         end
       end
 
-      describe "#handle_candle_message + #detect_confirmed_candle(確定判定)" do
+      describe "#handle_candle_message が candle_confirm_detector に委譲" do
         let(:row1) { [ 1_700_000_000_000, "50000", "50100", "49900", "50050", "10", "500000", "500000" ] }
         let(:row2) { [ 1_700_000_060_000, "50050", "50200", "50000", "50150", "12", "601800", "601800" ] }
 
-        context "初回 candle1m 受信 update(@last_candle_row が nil)" do
-          it "確定 candle なし(spawn を呼ばない)" do
+        context "確定判定なし(detector.observe が nil 返却)" do
+          it "spawn を呼ばない" do
             expect(worker).not_to receive(:spawn_runner_child_for_tick)
             worker.send(:handle_candle_message, [ row1 ], snapshot: false)
           end
-
-          it "@last_candle_row が更新される" do
-            worker.send(:handle_candle_message, [ row1 ], snapshot: false)
-            expect(worker.instance_variable_get(:@last_candle_row)).to eq(row1)
-          end
         end
 
-        context "同一 ts の candle1m 再受信(更新中)" do
-          before do
-            worker.send(:handle_candle_message, [ row1 ], snapshot: false)
-          end
-
-          it "確定 candle なし(spawn を呼ばない)" do
-            updated_row1 = [ row1[0], "50000", "50500", "49800", "50300", "20", "1000000", "1000000" ]
-            expect(worker).not_to receive(:spawn_runner_child_for_tick)
-            worker.send(:handle_candle_message, [ updated_row1 ], snapshot: false)
-          end
-        end
-
-        context "ts が進んだ candle1m 受信(前 candle 確定)" do
+        context "確定判定あり(ts が進んだ row 受信)" do
           before do
             worker.send(:handle_candle_message, [ row1 ], snapshot: false)
           end
@@ -873,9 +886,11 @@ RSpec.describe LiveTradingWorker do
             worker.send(:handle_candle_message, snapshot_rows, snapshot: true)
           end
 
-          it "@last_candle_row が末尾 row(最新)で初期化される" do
+          it "snapshot 末尾 row が detector に保持され, 次の update update で確定判定の起点になる" do
             worker.send(:handle_candle_message, snapshot_rows, snapshot: true)
-            expect(worker.instance_variable_get(:@last_candle_row)).to eq(row2)
+            row3 = [ 1_700_000_120_000, "50150", "50250", "50100", "50200", "5", "250000", "250000" ]
+            expect(worker).to receive(:spawn_runner_child_for_tick).with(a_hash_including("ts" => row2[0]))
+            worker.send(:handle_candle_message, [ row3 ], snapshot: false)
           end
         end
 
@@ -1123,85 +1138,46 @@ RSpec.describe LiveTradingWorker do
         end
       end
 
-      # Phase 3.4-pre-7 + R-8-2: trigger_reconciliation_for_algo_anomaly
+      # trigger_reconciliation_for_algo_anomaly: anomaly_reconcile_debouncer 経由の起動制御.
+      # debounce 詳細 spec は spec/domain/anomaly_reconcile_debouncer_spec.rb に集約済.
+      # Worker spec では debouncer への委譲と reconciliation 呼出経路のみ検証.
       describe "#trigger_reconciliation_for_algo_anomaly" do
-        before do
-          worker.instance_variable_set(:@session, session)
-          worker.instance_variable_set(:@anomaly_reconcile_in_progress, false)
-          worker.instance_variable_set(:@anomaly_reconcile_mutex, Mutex.new)
-          worker.instance_variable_set(:@last_anomaly_reconcile_at, nil)
-          worker.instance_variable_set(:@monotonic_clock, -> { @stub_now })
-          @stub_now = 1000.0
+        before { worker.instance_variable_set(:@session, session) }
+
+        context "debouncer.try_acquire = true(取得成功)" do
+          before { allow(anomaly_reconcile_debouncer).to receive(:try_acquire).and_return(true) }
+
+          it "run_in_db_thread('reconcile_after_algo_anomaly')で run_reconciliation_after_reconnect を呼ぶ" do
+            expect(worker).to receive(:run_reconciliation_after_reconnect).with(
+              an_object_having_attributes(id: session.id)
+            )
+            worker.send(:trigger_reconciliation_for_algo_anomaly)
+            expect(worker).to have_received(:run_in_db_thread).with("reconcile_after_algo_anomaly")
+          end
+
+          it "ensure 経路で debouncer.release を呼ぶ" do
+            expect(anomaly_reconcile_debouncer).to receive(:release)
+            allow(worker).to receive(:run_reconciliation_after_reconnect)
+            worker.send(:trigger_reconciliation_for_algo_anomaly)
+          end
         end
 
-        it "run_in_db_thread('reconcile_after_algo_anomaly')で run_reconciliation_after_reconnect を呼ぶ" do
-          expect(worker).to receive(:run_reconciliation_after_reconnect).with(
-            an_object_having_attributes(id: session.id)
-          )
-          worker.send(:trigger_reconciliation_for_algo_anomaly)
-          expect(worker).to have_received(:run_in_db_thread).with("reconcile_after_algo_anomaly")
+        context "debouncer.try_acquire = false(取得失敗 / debounce 中)" do
+          before { allow(anomaly_reconcile_debouncer).to receive(:try_acquire).and_return(false) }
+
+          it "run_in_db_thread を呼ばない / release も呼ばない" do
+            expect(anomaly_reconcile_debouncer).not_to receive(:release)
+            worker.send(:trigger_reconciliation_for_algo_anomaly)
+            expect(worker).not_to have_received(:run_in_db_thread)
+          end
         end
 
         context "@session が nil の場合(防御)" do
-          before do
-            worker.instance_variable_set(:@session, nil)
-          end
+          before { worker.instance_variable_set(:@session, nil) }
 
-          it "run_reconciliation_after_reconnect を呼ばない / raise しない" do
-            expect(worker).not_to receive(:run_reconciliation_after_reconnect)
+          it "debouncer.try_acquire を呼ばない / raise しない" do
+            expect(anomaly_reconcile_debouncer).not_to receive(:try_acquire)
             expect { worker.send(:trigger_reconciliation_for_algo_anomaly) }.not_to raise_error
-          end
-        end
-
-        # R-8-2: WS push burst での thread 爆発防止 debounce
-        context "debounce(B-1 #1 反映)" do
-          context "in-progress フラグが true の場合" do
-            before do
-              worker.instance_variable_set(:@anomaly_reconcile_in_progress, true)
-            end
-
-            it "run_in_db_thread を呼ばない(skip)" do
-              worker.send(:trigger_reconciliation_for_algo_anomaly)
-              expect(worker).not_to have_received(:run_in_db_thread)
-            end
-          end
-
-          context "前回起動から 30 秒未経過" do
-            before do
-              worker.instance_variable_set(:@last_anomaly_reconcile_at, 1000.0)
-              @stub_now = 1015.0 # 15 秒経過
-            end
-
-            it "run_in_db_thread を呼ばない(throttle)" do
-              worker.send(:trigger_reconciliation_for_algo_anomaly)
-              expect(worker).not_to have_received(:run_in_db_thread)
-            end
-          end
-
-          context "前回起動から 30 秒以上経過" do
-            before do
-              worker.instance_variable_set(:@last_anomaly_reconcile_at, 1000.0)
-              @stub_now = 1031.0 # 31 秒経過
-            end
-
-            it "run_in_db_thread を呼ぶ(再起動)" do
-              expect(worker).to receive(:run_reconciliation_after_reconnect)
-              worker.send(:trigger_reconciliation_for_algo_anomaly)
-              expect(worker).to have_received(:run_in_db_thread).with("reconcile_after_algo_anomaly")
-            end
-          end
-
-          context "reconciliation 完了後に in-progress = false にリリースされる" do
-            it "次回呼出が許可される(連続 2 回呼出可能)" do
-              # 1 回目: 起動 + run_reconciliation_after_reconnect 即時実行(stub 同期)
-              call_count = 0
-              allow(worker).to receive(:run_reconciliation_after_reconnect) { call_count += 1 }
-              worker.send(:trigger_reconciliation_for_algo_anomaly)
-              # 30 秒以上進めて 2 回目可能化
-              @stub_now = 1031.0
-              worker.send(:trigger_reconciliation_for_algo_anomaly)
-              expect(call_count).to eq(2)
-            end
           end
         end
       end
@@ -1479,131 +1455,8 @@ RSpec.describe LiveTradingWorker do
         worker.send(:instance_variable_set, :@worker_instance_id, "worker-test-001")
       end
 
-      describe "#pulse_heartbeat_if_due" do
-        # R-2 #5 反映: monotonic clock 化に伴い数値時刻で経過判定する
-        before do
-          worker.instance_variable_set(:@monotonic_clock, -> { @stub_now })
-          @stub_now = 1000.0
-        end
-
-        context "初回呼出(@last_heartbeat_at が nil)" do
-          it "process_manager.pulse_heartbeat! を session + worker_instance_id で呼ぶ" do
-            worker.send(:pulse_heartbeat_if_due)
-            expect(process_manager).to have_received(:pulse_heartbeat!).with(
-              session: session, worker_instance_id: "worker-test-001"
-            )
-          end
-
-          it "@last_heartbeat_at に monotonic_clock の値が記録される" do
-            worker.send(:pulse_heartbeat_if_due)
-            expect(worker.instance_variable_get(:@last_heartbeat_at)).to eq(1000.0)
-          end
-        end
-
-        context "前回 heartbeat から 60 秒未経過" do
-          before do
-            worker.send(:instance_variable_set, :@last_heartbeat_at, 1000.0)
-            @stub_now = 1030.0 # 30 秒経過
-          end
-
-          it "pulse_heartbeat! を呼ばない" do
-            worker.send(:pulse_heartbeat_if_due)
-            expect(process_manager).not_to have_received(:pulse_heartbeat!)
-          end
-        end
-
-        context "前回 heartbeat から 60 秒以上経過" do
-          before do
-            worker.send(:instance_variable_set, :@last_heartbeat_at, 1000.0)
-            @stub_now = 1061.0 # 61 秒経過
-          end
-
-          it "pulse_heartbeat! を呼ぶ" do
-            worker.send(:pulse_heartbeat_if_due)
-            expect(process_manager).to have_received(:pulse_heartbeat!)
-          end
-        end
-
-        context "pulse_heartbeat! が raise した場合" do
-          before do
-            allow(process_manager).to receive(:pulse_heartbeat!)
-              .and_raise(StandardError, "DB connection lost")
-          end
-
-          it "logger.warn 落とし + 例外を再 raise しない" do
-            expect { worker.send(:pulse_heartbeat_if_due) }.not_to raise_error
-            expect(logger).to have_received(:warn).with(
-              /pulse_heartbeat! failed.*DB connection lost/
-            )
-          end
-        end
-      end
-
-      describe "#renew_lease_if_due" do
-        before do
-          worker.instance_variable_set(:@monotonic_clock, -> { @stub_now })
-          @stub_now = 2000.0
-        end
-
-        context "初回呼出(@last_lease_renew_at が nil)" do
-          it "process_manager.renew_lease! を lease で呼ぶ" do
-            worker.send(:renew_lease_if_due)
-            expect(process_manager).to have_received(:renew_lease!).with(lease: lease)
-          end
-
-          it "@last_lease_renew_at に monotonic_clock の値が記録される" do
-            worker.send(:renew_lease_if_due)
-            expect(worker.instance_variable_get(:@last_lease_renew_at)).to eq(2000.0)
-          end
-        end
-
-        context "前回 lease renew から 120 秒未経過" do
-          before do
-            worker.send(:instance_variable_set, :@last_lease_renew_at, 2000.0)
-            @stub_now = 2060.0 # 60 秒経過
-          end
-
-          it "renew_lease! を呼ばない" do
-            worker.send(:renew_lease_if_due)
-            expect(process_manager).not_to have_received(:renew_lease!)
-          end
-        end
-
-        context "前回 lease renew から 120 秒以上経過" do
-          before do
-            worker.send(:instance_variable_set, :@last_lease_renew_at, 2000.0)
-            @stub_now = 2121.0 # 121 秒経過
-          end
-
-          it "renew_lease! を呼ぶ" do
-            worker.send(:renew_lease_if_due)
-            expect(process_manager).to have_received(:renew_lease!)
-          end
-        end
-
-        context "@lease が nil の場合(防御)" do
-          before do
-            worker.send(:instance_variable_set, :@lease, nil)
-          end
-
-          it "renew_lease! を呼ばない" do
-            worker.send(:renew_lease_if_due)
-            expect(process_manager).not_to have_received(:renew_lease!)
-          end
-        end
-
-        context "renew_lease! が raise した場合" do
-          before do
-            allow(process_manager).to receive(:renew_lease!)
-              .and_raise(StandardError, "lease lost")
-          end
-
-          it "logger.warn 落とし + 例外を再 raise しない" do
-            expect { worker.send(:renew_lease_if_due) }.not_to raise_error
-            expect(logger).to have_received(:warn).with(/renew_lease! failed.*lease lost/)
-          end
-        end
-      end
+      # heartbeat / lease renew の詳細 spec は spec/domain/heartbeat_scheduler_spec.rb に集約済.
+      # Worker spec では main loop iteration 統合(下記)で scheduler 呼出が起きることを検証.
 
       describe "main loop 統合: 1 iteration で heartbeat / renew_lease が呼ばれる" do
         before do
@@ -1628,94 +1481,47 @@ RSpec.describe LiveTradingWorker do
       end
     end
 
-    # R-7 #C 反映: background thread leak 対策の sweep
-    describe "background thread sweep" do
-      before do
-        worker.send(:instance_variable_set, :@session, session)
-        worker.send(:instance_variable_set, :@background_threads, [])
-        worker.send(:instance_variable_set, :@background_threads_mutex, Mutex.new)
-        worker.instance_variable_set(:@monotonic_clock, -> { @stub_now })
-        @stub_now = 5000.0
+    # background thread sweep / join の詳細 spec は spec/domain/background_thread_registry_spec.rb に集約済.
+    # Worker spec では main loop / finalize_main_loop が registry に正しく委譲することのみ検証.
+    describe "background thread management" do
+      let(:background_thread_registry) { instance_double(Domain::BackgroundThreadRegistry, sweep_if_due: nil, join_all: nil, spawn: nil) }
+      let(:worker) do
+        described_class.new(
+          process_manager: process_manager,
+          clock_sync: clock_sync,
+          market_endpoint: market_endpoint,
+          position_endpoint: position_endpoint,
+          public_ws_factory: public_ws_factory,
+          private_ws_factory: private_ws_factory,
+          order_endpoint: order_endpoint_di,
+          account_endpoint: account_endpoint_di,
+          state_cache: state_cache,
+          reconciliation_coordinator: reconciliation_coordinator,
+          candle_confirm_detector: candle_confirm_detector,
+          anomaly_reconcile_debouncer: anomaly_reconcile_debouncer,
+          background_thread_registry: background_thread_registry,
+          ws_reconnect_detector: ws_reconnect_detector,
+          main_loop_poll_interval: 0,
+          ws_disconnect_grace_seconds: 0,
+          logger: logger
+        )
       end
 
-      describe "#sweep_background_threads" do
-        it "alive? = false の thread のみ reject! される(過剰削除防止)" do
-          alive_thread = double("AliveThread", alive?: true)
-          dead_thread1 = double("DeadThread1", alive?: false)
-          dead_thread2 = double("DeadThread2", alive?: false)
-          worker.instance_variable_set(:@background_threads, [ alive_thread, dead_thread1, dead_thread2 ])
-
-          worker.send(:sweep_background_threads)
-
-          expect(worker.instance_variable_get(:@background_threads)).to eq([ alive_thread ])
-        end
-
-        it "空配列(boundary)でも raise しない" do
-          expect { worker.send(:sweep_background_threads) }.not_to raise_error
-          expect(worker.instance_variable_get(:@background_threads)).to eq([])
-        end
-
-        it "全 thread が alive? = true なら全件残る" do
-          t1 = double("T1", alive?: true)
-          t2 = double("T2", alive?: true)
-          worker.instance_variable_set(:@background_threads, [ t1, t2 ])
-
-          worker.send(:sweep_background_threads)
-
-          expect(worker.instance_variable_get(:@background_threads)).to eq([ t1, t2 ])
-        end
-
-        it "mutex 内で reject! を呼ぶ(thread-safety)" do
-          mutex = worker.instance_variable_get(:@background_threads_mutex)
-          expect(mutex).to receive(:synchronize).and_call_original
-          worker.send(:sweep_background_threads)
-        end
-      end
-
-      describe "#sweep_background_threads_if_due" do
-        context "初回呼出(@last_background_thread_sweep_at が nil)" do
-          it "sweep が実行され @last_background_thread_sweep_at が更新される" do
-            expect(worker).to receive(:sweep_background_threads).and_call_original
-            worker.send(:sweep_background_threads_if_due)
-            expect(worker.instance_variable_get(:@last_background_thread_sweep_at)).to eq(5000.0)
-          end
-        end
-
-        context "前回 sweep から 60 秒未経過" do
-          before do
-            worker.instance_variable_set(:@last_background_thread_sweep_at, 5000.0)
-            @stub_now = 5030.0
-          end
-
-          it "sweep を呼ばない" do
-            expect(worker).not_to receive(:sweep_background_threads)
-            worker.send(:sweep_background_threads_if_due)
-          end
-        end
-
-        context "前回 sweep から 60 秒以上経過" do
-          before do
-            worker.instance_variable_set(:@last_background_thread_sweep_at, 5000.0)
-            @stub_now = 5061.0
-          end
-
-          it "sweep を呼ぶ" do
-            expect(worker).to receive(:sweep_background_threads).and_call_original
-            worker.send(:sweep_background_threads_if_due)
-          end
+      describe "#run_in_db_thread が registry.spawn に委譲" do
+        it "label と block を渡して spawn を呼ぶ" do
+          expect(background_thread_registry).to receive(:spawn).with("custom_label")
+          worker.send(:run_in_db_thread, "custom_label") { :work }
         end
       end
     end
 
+    # WS reconnect 検知の詳細 spec は spec/domain/ws_reconnect_detector_spec.rb に集約済.
+    # Worker spec では detector への委譲経路と reconciliation 起動を検証.
     describe "WS reconnect detection + reconciliation 再実行" do
       before do
         worker.send(:instance_variable_set, :@session, session)
         worker.send(:instance_variable_set, :@public_ws, public_ws)
         worker.send(:instance_variable_set, :@private_ws, private_ws)
-        worker.send(:instance_variable_set, :@last_public_ws_reconnect_count, 0)
-        worker.send(:instance_variable_set, :@last_private_ws_reconnect_count, 0)
-        # R-8-3 #C-1: cross-thread mutex 初期化
-        worker.send(:instance_variable_set, :@ws_reconnect_count_mutex, Mutex.new)
         # run_in_db_thread を同期化(spec hang 回避)
         allow(worker).to receive(:run_in_db_thread) do |_label, &block|
           block.call
@@ -1723,7 +1529,9 @@ RSpec.describe LiveTradingWorker do
       end
 
       describe "#detect_ws_reconnect_and_reconcile" do
-        context "public_ws.reconnect_count が増えていない場合" do
+        before { ws_reconnect_detector.reset(public_ws: public_ws, private_ws: private_ws) }
+
+        context "reconnect 検知なし" do
           before do
             allow(public_ws).to receive(:reconnect_count).and_return(0)
             allow(private_ws).to receive(:reconnect_count).and_return(0)
@@ -1735,47 +1543,32 @@ RSpec.describe LiveTradingWorker do
           end
         end
 
-        context "public_ws.reconnect_count が増えた(1 → 2)場合" do
+        context "public_ws のみ reconnect 検知" do
           before do
-            worker.send(:instance_variable_set, :@last_public_ws_reconnect_count, 1)
             allow(public_ws).to receive(:reconnect_count).and_return(2)
             allow(private_ws).to receive(:reconnect_count).and_return(0)
           end
 
-          it "reconciliation 再実行 + logger.info ログ出力" do
+          it "reconciliation 再実行 + logger.info(public=true) + candle_confirm_detector.reset" do
             expect(worker).to receive(:run_reconciliation_after_reconnect).with(
               an_object_having_attributes(id: session.id)
             )
+            expect(candle_confirm_detector).to receive(:reset)
 
             worker.send(:detect_ws_reconnect_and_reconcile)
             expect(logger).to have_received(:info).with(/WS reconnect detected.*public=true/)
           end
-
-          it "@last_public_ws_reconnect_count が更新される" do
-            allow(worker).to receive(:run_reconciliation_after_reconnect)
-            worker.send(:detect_ws_reconnect_and_reconcile)
-            expect(worker.instance_variable_get(:@last_public_ws_reconnect_count)).to eq(2)
-          end
-
-          # R-2 #6 反映: public_ws reconnect 検知時は @last_candle_row を nil リセットして
-          # 新旧受信 thread の race window を回避する
-          it "@last_candle_row を nil にリセットする" do
-            allow(worker).to receive(:run_reconciliation_after_reconnect)
-            worker.send(:instance_variable_set, :@last_candle_row, [ 1_700_000_000_000, "50000" ])
-            worker.send(:detect_ws_reconnect_and_reconcile)
-            expect(worker.instance_variable_get(:@last_candle_row)).to be_nil
-          end
         end
 
-        context "private_ws.reconnect_count のみ増えた場合" do
+        context "private_ws のみ reconnect 検知" do
           before do
-            worker.send(:instance_variable_set, :@last_private_ws_reconnect_count, 0)
             allow(public_ws).to receive(:reconnect_count).and_return(0)
             allow(private_ws).to receive(:reconnect_count).and_return(1)
           end
 
-          it "reconciliation 再実行 + logger.info で private=true 表示" do
+          it "reconciliation 再実行 + logger.info(private=true) / candle reset しない" do
             expect(worker).to receive(:run_reconciliation_after_reconnect)
+            expect(candle_confirm_detector).not_to receive(:reset)
             worker.send(:detect_ws_reconnect_and_reconcile)
             expect(logger).to have_received(:info).with(/private=true/)
           end
@@ -1800,22 +1593,6 @@ RSpec.describe LiveTradingWorker do
         it "session を渡して run_after_reconnect を呼ぶ" do
           expect(reconciliation_coordinator).to receive(:run_after_reconnect).with(session)
           worker.send(:run_reconciliation_after_reconnect, session)
-        end
-      end
-
-      describe "#ws_reconnect_count(防御 helper)" do
-        it "ws が nil なら 0" do
-          expect(worker.send(:ws_reconnect_count, nil)).to eq(0)
-        end
-
-        it "ws が reconnect_count に respond しない場合は 0" do
-          ws = double("Ws")
-          expect(worker.send(:ws_reconnect_count, ws)).to eq(0)
-        end
-
-        it "ws.reconnect_count を to_i で返す" do
-          ws = double("Ws", reconnect_count: 3)
-          expect(worker.send(:ws_reconnect_count, ws)).to eq(3)
         end
       end
     end

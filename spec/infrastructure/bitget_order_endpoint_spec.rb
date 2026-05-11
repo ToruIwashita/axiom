@@ -140,6 +140,41 @@ RSpec.describe Infrastructure::BitgetOrderEndpoint do
     end
   end
 
+  describe "#cancel_plan_order" do
+    context "order_id 指定の場合" do
+      it "POST cancel-plan-order に orderId を含む" do
+        expect(rest_client).to receive(:request) do |method, path, **kwargs|
+          expect(method).to eq(:post)
+          expect(path).to eq("/api/v2/mix/order/cancel-plan-order")
+          body = JSON.parse(kwargs[:body])
+          expect(body).to include("orderId" => "plan-1", "symbol" => "BTCUSDT")
+          expect(body["clientOid"]).to be_nil
+          expect(kwargs[:endpoint_key]).to eq(:cancel_plan_order)
+          { "data" => {} }
+        end
+        endpoint.cancel_plan_order(symbol: "BTCUSDT", order_id: "plan-1")
+      end
+    end
+
+    context "client_oid のみ指定の場合" do
+      it "clientOid を含む" do
+        expect(rest_client).to receive(:request) do |_method, _path, **kwargs|
+          body = JSON.parse(kwargs[:body])
+          expect(body["clientOid"]).to eq("client-oid-1")
+          { "data" => {} }
+        end
+        endpoint.cancel_plan_order(symbol: "BTCUSDT", client_oid: "client-oid-1")
+      end
+    end
+
+    context "order_id / client_oid 両方 nil の場合" do
+      it "ArgumentError raise" do
+        expect { endpoint.cancel_plan_order(symbol: "BTCUSDT") }
+          .to raise_error(ArgumentError, /order_id or client_oid/)
+      end
+    end
+  end
+
   describe "#modify_order" do
     it "POST modify-order に新価格 / 新サイズを含む" do
       expect(rest_client).to receive(:request) do |method, path, **kwargs|

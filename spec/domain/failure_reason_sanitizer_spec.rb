@@ -59,6 +59,17 @@ RSpec.describe Domain::FailureReasonSanitizer do
       end
     end
 
+    context "ハイフン prefix が前置された Bitget HTTP header 形式(X-access-key 等)" do
+      let(:input) { "X-access-key=ABC123 some-prefix-access-sign=xyz" }
+
+      it "prefix のハイフンが境界として認識され credential が漏洩しない" do
+        expect(subject).to include("access-key=[FILTERED]")
+        expect(subject).to include("access-sign=[FILTERED]")
+        expect(subject).not_to include("ABC123")
+        expect(subject).not_to include("xyz")
+      end
+    end
+
     context "JSON value 内 escape された quote" do
       let(:input) { '{"api_key": "ABC\\"DEF"}' }
 

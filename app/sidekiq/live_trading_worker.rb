@@ -30,6 +30,8 @@ class LiveTradingWorker
   # メインループ poll 間隔(設計書 02_§5.2.6).
   DEFAULT_MAIN_LOOP_POLL_INTERVAL = 1.0
   # heartbeat 周期(設計書 02_§5.2.6 / 05_§7.2: 60 秒推奨).
+  # heartbeat / lease renew 周期定数(秒). Phase 3.4a Step 0b-4 で
+  # Domain::HeartbeatScheduler に委譲(本定数は lazy init で渡す).
   HEARTBEAT_INTERVAL_SECONDS = 60
   # lease renew 周期(設計書 02_§5.2.6 / 05_§7.2: 2 分推奨 / TTL 5 分の余裕を持たせた更新).
   LEASE_RENEW_INTERVAL_SECONDS = 120
@@ -37,15 +39,12 @@ class LiveTradingWorker
   # その間 connected?=false 状態を許容して main loop を continue させる(設計書 02_§5.2.6 / multi-agent review #9 反映).
   # この期間を超えても disconnect 状態が継続する場合は :ws_disconnected として halted 終了する.
   WS_DISCONNECT_GRACE_SECONDS = 30
-  # background thread sweep 周期(秒). R-7 #C 反映: 24h 稼働で @background_threads に
-  # 完了済 thread が蓄積するメモリリークを定期的に reject! で解消する.
-  BACKGROUND_THREAD_SWEEP_INTERVAL_SECONDS = 60
   # algo anomaly trigger debounce 期間(秒). R-8-2 反映: WS push burst で reconciliation thread が
-  # 大量起動し AR pool 枯渇 / Bitget rate limit 抵触するのを防ぐ.同期間中は in-progress フラグでスキップ.
+  # 大量起動し AR pool 枯渇 / Bitget rate limit 抵触するのを防ぐ.
+  # Phase 3.4a Step 0b-1 で Domain::AnomalyReconcileDebouncer に委譲(本定数は lazy init で渡す).
   ALGO_ANOMALY_RECONCILE_DEBOUNCE_SECONDS = 30
   private_constant :DEFAULT_MAIN_LOOP_POLL_INTERVAL, :HEARTBEAT_INTERVAL_SECONDS,
                    :LEASE_RENEW_INTERVAL_SECONDS, :WS_DISCONNECT_GRACE_SECONDS,
-                   :BACKGROUND_THREAD_SWEEP_INTERVAL_SECONDS,
                    :ALGO_ANOMALY_RECONCILE_DEBOUNCE_SECONDS
 
   # @param process_manager [Domain::LiveTradingProcessManager]
@@ -61,6 +60,11 @@ class LiveTradingWorker
   # @param account_endpoint [Infrastructure::BitgetAccountEndpoint, nil] 残高 / fill_history 取得(3.4-pre-1 + 3.4-pre-4)
   # @param state_cache [Domain::LiveTradingStateCache, nil] balance / position memory cache(R-8-5 抽出)
   # @param reconciliation_coordinator [Domain::ReconciliationCoordinator, nil] reconciliation REST 突合(R-8-6 抽出)
+  # @param candle_confirm_detector [Domain::CandleConfirmDetector, nil] WS candle 確定判定(Phase 3.4a Step 0a 抽出)
+  # @param anomaly_reconcile_debouncer [Domain::AnomalyReconcileDebouncer, nil] algo anomaly reconciliation 起動 debounce(Phase 3.4a Step 0b-1 抽出)
+  # @param background_thread_registry [Domain::BackgroundThreadRegistry, nil] WS callback 経由の DB 操作 thread 管理(Phase 3.4a Step 0b-2 抽出)
+  # @param ws_reconnect_detector [Domain::WsReconnectDetector, nil] WS Client reconnect 検知(Phase 3.4a Step 0b-3 抽出)
+  # @param heartbeat_scheduler [Domain::HeartbeatScheduler, nil] heartbeat / lease renew 周期管理(Phase 3.4a Step 0b-4 抽出)
   # @param main_loop_poll_interval [Float] メインループ kill-switch / 状態 poll 間隔(秒). spec で 0 を渡して即時 break.
   # @param monotonic_clock [#call] heartbeat / lease renew の周期判定用 monotonic clock(R-2 #5 反映).
   #   デフォルトは `Process.clock_gettime(Process::CLOCK_MONOTONIC)`. 壁時計逆行(NTP step / 手動修正)による
@@ -81,6 +85,11 @@ class LiveTradingWorker
     account_endpoint: nil,
     state_cache: nil,
     reconciliation_coordinator: nil,
+    candle_confirm_detector: nil,
+    anomaly_reconcile_debouncer: nil,
+    background_thread_registry: nil,
+    ws_reconnect_detector: nil,
+    heartbeat_scheduler: nil,
     main_loop_poll_interval: DEFAULT_MAIN_LOOP_POLL_INTERVAL,
     monotonic_clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) },
     ws_disconnect_grace_seconds: WS_DISCONNECT_GRACE_SECONDS,
@@ -99,6 +108,11 @@ class LiveTradingWorker
     @account_endpoint = account_endpoint
     @state_cache = state_cache
     @reconciliation_coordinator = reconciliation_coordinator
+    @candle_confirm_detector = candle_confirm_detector
+    @anomaly_reconcile_debouncer = anomaly_reconcile_debouncer
+    @background_thread_registry = background_thread_registry
+    @ws_reconnect_detector = ws_reconnect_detector
+    @heartbeat_scheduler = heartbeat_scheduler
     @main_loop_poll_interval = main_loop_poll_interval
     @monotonic_clock = monotonic_clock
     @ws_disconnect_grace_seconds = ws_disconnect_grace_seconds
@@ -118,18 +132,20 @@ class LiveTradingWorker
     @lease = nil
     @public_ws = nil
     @private_ws = nil
-    @background_threads = []
-    @background_threads_mutex = Mutex.new
     # R-8-5 反映: balance / position memory cache を Domain::LiveTradingStateCache に抽出.
     @state_cache = state_cache_lazy
     # R-8-6 反映: reconciliation を Domain::ReconciliationCoordinator に抽出.
     @reconciliation_coordinator = reconciliation_coordinator_lazy
-    # R-8-2: algo anomaly reconcile の debounce 用フラグ + 最終起動時刻.
-    @anomaly_reconcile_in_progress = false
-    @anomaly_reconcile_mutex = Mutex.new
-    @last_anomaly_reconcile_at = nil
-    # R-8-3 #C-1: WS reconnect_count の cross-thread mutex(main loop read / run_in_db_thread block write).
-    @ws_reconnect_count_mutex = Mutex.new
+    # Phase 3.4a Step 0a 反映: candle 確定判定を Domain::CandleConfirmDetector に抽出.
+    @candle_confirm_detector = candle_confirm_detector_lazy
+    # Phase 3.4a Step 0b-1 反映: algo anomaly reconcile debounce を Domain::AnomalyReconcileDebouncer に抽出.
+    @anomaly_reconcile_debouncer = anomaly_reconcile_debouncer_lazy
+    # Phase 3.4a Step 0b-2 反映: background thread 管理を Domain::BackgroundThreadRegistry に抽出.
+    @background_thread_registry = background_thread_registry_lazy
+    # Phase 3.4a Step 0b-3 反映: WS reconnect 検知を Domain::WsReconnectDetector に抽出.
+    @ws_reconnect_detector = ws_reconnect_detector_lazy
+    # Phase 3.4a Step 0b-4 反映: heartbeat / lease renew を Domain::HeartbeatScheduler に抽出.
+    @heartbeat_scheduler = heartbeat_scheduler_lazy
 
     bootstrap_session(session_id)
     enter_main_loop
@@ -182,21 +198,18 @@ class LiveTradingWorker
   #   - WS 切断検知: mark_halted!(reason: ws_disconnected)
   def enter_main_loop
     exit_reason = nil
-    @last_heartbeat_at = nil
-    @last_lease_renew_at = nil
-    @last_background_thread_sweep_at = nil
-    @last_public_ws_reconnect_count = ws_reconnect_count(@public_ws)
-    @last_private_ws_reconnect_count = ws_reconnect_count(@private_ws)
+    @heartbeat_scheduler.reset
+    @ws_reconnect_detector.reset(public_ws: @public_ws, private_ws: @private_ws)
     @ws_disconnected_since = nil # R-6 #9: WS_DISCONNECT_GRACE_SECONDS 計測用
 
     loop do
       exit_reason = check_loop_exit_condition
       break if exit_reason
 
-      pulse_heartbeat_if_due
-      renew_lease_if_due
+      @heartbeat_scheduler.pulse_heartbeat_if_due(session: @session, worker_instance_id: @worker_instance_id)
+      @heartbeat_scheduler.renew_lease_if_due(lease: @lease)
       detect_ws_reconnect_and_reconcile
-      sweep_background_threads_if_due
+      @background_thread_registry.sweep_if_due
       sleep(@main_loop_poll_interval)
     end
 
@@ -207,41 +220,29 @@ class LiveTradingWorker
   # (Phase 1.3 引き継ぎ #13: 24h 切断後 reconciliation / 設計書 02_§5.2.6).
   # 別 thread + AR pool で実行(WS callback thread は触らないため main loop thread から起動).
   #
-  # R-8-3 #C-1 反映: @last_*_reconnect_count の cross-thread 読書きを @anomaly_reconcile_mutex 流用で
-  # 保護する(別 mutex を増やすと初期化箇所が増えるため流用 / read main loop / write run_in_db_thread block).
+  # WS reconnect 検知 + reconciliation 再実行.
+  # Phase 3.4a Step 0b-3 で Domain::WsReconnectDetector に検知ロジックを委譲.
+  # R-6 #10 反映: count update は reconciliation 完了後(carry 漏れ防止).
   def detect_ws_reconnect_and_reconcile
     return unless @session
 
-    public_count = ws_reconnect_count(@public_ws)
-    private_count = ws_reconnect_count(@private_ws)
-    last_public, last_private = @ws_reconnect_count_mutex.synchronize do
-      [ @last_public_ws_reconnect_count, @last_private_ws_reconnect_count ]
-    end
-    public_reconnected = public_count > last_public
-    private_reconnected = private_count > last_private
-
-    return unless public_reconnected || private_reconnected
+    result = @ws_reconnect_detector.snapshot(public_ws: @public_ws, private_ws: @private_ws)
+    return unless result.any?
 
     logger.info(
-      "[LiveTradingWorker] WS reconnect detected (public=#{public_reconnected}, " \
-      "private=#{private_reconnected}), re-running reconciliation"
+      "[LiveTradingWorker] WS reconnect detected (public=#{result.public_reconnected}, " \
+      "private=#{result.private_reconnected}), re-running reconciliation"
     )
 
     # R-2 #6 反映: WS reconnect 後は新旧受信 thread の race window が論理上発生し得るため,
-    # @last_candle_row を nil リセットして次の確定判定を新 thread の最初の row から再開する
+    # candle confirm detector を reset して次の確定判定を新 thread の最初の row から再開する
     # (snapshot 受信時と同様の振る舞い).
-    @last_candle_row = nil if public_reconnected
+    @candle_confirm_detector.reset if result.public_reconnected
 
     run_in_db_thread("reconcile_after_ws_reconnect") do
       session_reloaded = LiveTrading::Session.find(@session.id)
       run_reconciliation_after_reconnect(session_reloaded)
-      # R-6 #10 反映: count 更新は reconciliation 完了後に行う.
-      # thread 例外時は count 未更新 → 次 main loop iteration で再試行可能(carry 漏れ防止).
-      # R-8-3 #C-1: mutex 保護で main loop thread の read と整合性確保.
-      @ws_reconnect_count_mutex.synchronize do
-        @last_public_ws_reconnect_count = public_count
-        @last_private_ws_reconnect_count = private_count
-      end
+      @ws_reconnect_detector.update_to(public_count: result.public_count, private_count: result.private_count)
     end
   end
 
@@ -249,46 +250,6 @@ class LiveTradingWorker
   # R-8-6 反映: Domain::ReconciliationCoordinator に委譲.
   def run_reconciliation_after_reconnect(session)
     @reconciliation_coordinator.run_after_reconnect(session)
-  end
-
-  # WS Client の reconnect_count を安全に取得する(nil 防御 + respond_to? 防御).
-  def ws_reconnect_count(ws)
-    return 0 unless ws&.respond_to?(:reconnect_count)
-
-    ws.reconnect_count.to_i
-  end
-
-  # heartbeat 周期到達時に process_manager.pulse_heartbeat! を呼ぶ.
-  # 初回は @last_heartbeat_at が nil のため即時実行.
-  # 失敗時は logger.warn 落とし(main loop を止めない).
-  # 周期判定は monotonic clock を使用し壁時計逆行による heartbeat 停止事故を防ぐ(R-2 #5 反映).
-  def pulse_heartbeat_if_due
-    now = @monotonic_clock.call
-    return if @last_heartbeat_at && (now - @last_heartbeat_at) < HEARTBEAT_INTERVAL_SECONDS
-
-    process_manager.pulse_heartbeat!(session: @session, worker_instance_id: @worker_instance_id)
-    @last_heartbeat_at = now
-  rescue StandardError => e
-    logger.warn(
-      "[LiveTradingWorker] pulse_heartbeat! failed: #{e.class.name}: #{sanitize_log_message(e.message)}"
-    )
-  end
-
-  # lease renew 周期到達時に process_manager.renew_lease! を呼ぶ.
-  # 初回は @last_lease_renew_at が nil のため即時実行.
-  # 失敗時は logger.warn 落とし.
-  # 周期判定は monotonic clock を使用(R-2 #5 反映).
-  def renew_lease_if_due
-    now = @monotonic_clock.call
-    return if @last_lease_renew_at && (now - @last_lease_renew_at) < LEASE_RENEW_INTERVAL_SECONDS
-    return unless @lease
-
-    process_manager.renew_lease!(lease: @lease)
-    @last_lease_renew_at = now
-  rescue StandardError => e
-    logger.warn(
-      "[LiveTradingWorker] renew_lease! failed: #{e.class.name}: #{sanitize_log_message(e.message)}"
-    )
   end
 
   # 終了条件判定: terminal / kill_switch / ws_disconnected の 3 経路.
@@ -317,8 +278,8 @@ class LiveTradingWorker
   # session 状態遷移後 → WS disconnect → lease release の順で安全に解放する.
   def finalize_main_loop(exit_reason:)
     # R-3 #7 反映: 残存 background thread を timeout 付きで join し AR connection を解放してから
-    # その後の WS disconnect / lease release に進む.
-    join_background_threads
+    # その後の WS disconnect / lease release に進む(Phase 3.4a Step 0b-2 で Domain 委譲).
+    @background_thread_registry.join_all
     transition_session_for_exit(exit_reason)
     safe_disconnect(@private_ws, name: "private_ws", context: "finalize_main_loop")
     safe_disconnect(@public_ws, name: "public_ws", context: "finalize_main_loop")
@@ -477,7 +438,7 @@ class LiveTradingWorker
   # snapshot 時は最新 row(末尾)で @last_candle_row を初期化するのみ(spawn しない /
   # warmup_candles は別途 step 8 で REST 取得済 + snapshot 内 row 全件 spawn は二重発注事故になるため).
   # update 時は data の各 row を順次確定判定する.
-  # multiple-agent review R-1 #2 反映.
+  # multiple-agent review R-1 #2 反映 / Phase 3.4a Step 0a で Domain::CandleConfirmDetector に委譲.
   #
   # @param data [Array<Array>, nil] WS push data 部分(各要素は OHLCV row)
   # @param snapshot [Boolean] result.snapshot? 由来 / true なら確定判定スキップ
@@ -485,44 +446,16 @@ class LiveTradingWorker
     return unless data.is_a?(Array) && data.any?
 
     if snapshot
-      @last_candle_row = data.last
+      @candle_confirm_detector.snapshot_init(data.last)
       return
     end
 
     data.each do |row|
-      confirmed = detect_confirmed_candle(row)
+      confirmed = @candle_confirm_detector.observe(row)
       next unless confirmed
 
       spawn_runner_child_for_tick(confirmed)
     end
-  end
-
-  # 受信 row から確定 candle を判定する.
-  # 直前に保持した row より ts が進んでいたら 直前 row が確定 candle として返る.
-  # 初回受信(@last_candle_row が nil)の場合は確定なし.
-  def detect_confirmed_candle(row)
-    new_ts = row[0].to_i
-    prev_row = @last_candle_row
-    @last_candle_row = row
-
-    return nil if prev_row.nil?
-
-    prev_ts = prev_row[0].to_i
-    return nil if prev_ts == new_ts
-
-    build_candle_payload(prev_row)
-  end
-
-  def build_candle_payload(row)
-    {
-      "ts" => row[0].to_i,
-      "open" => row[1],
-      "high" => row[2],
-      "low" => row[3],
-      "close" => row[4],
-      "base_volume" => row[5],
-      "quote_volume" => row[6]
-    }
   end
 
   # 確定 candle を子プロセスで処理するため別 thread + AR pool を確保して実行する
@@ -536,64 +469,10 @@ class LiveTradingWorker
   end
 
   # WS callback thread から DB アクセスを伴う処理を別 thread で実行する共通 helper.
-  # production: 別 thread + ActiveRecord::Base.connection_pool.with_connection で connection 確保.
+  # Phase 3.4a Step 0b-2 で Domain::BackgroundThreadRegistry に委譲.
   # spec: 同期化のため allow(worker).to receive(:run_in_db_thread) { |label, &block| block.call } で差替.
-  #
-  # multiple-agent review R-3 #7 反映: 起動した Thread を @background_threads に保持し,
-  # finalize_main_loop で `join_with_timeout` する.fire-and-forget による thread leak / AR pool 枯渇を防ぐ.
-  # 完了済 thread は finalize 時にまとめて掃除する(loop 中の都度掃除はロック競合になるため避ける).
-  def run_in_db_thread(label)
-    thread = Thread.new do
-      ActiveRecord::Base.connection_pool.with_connection { yield }
-    rescue StandardError => e
-      logger.error(
-        "[LiveTradingWorker] background task '#{label}' failed: " \
-        "#{e.class.name}: #{sanitize_log_message(e.message)}"
-      )
-    end
-
-    @background_threads_mutex.synchronize { @background_threads << thread }
-    thread
-  end
-
-  # main loop iteration 内で BACKGROUND_THREAD_SWEEP_INTERVAL_SECONDS 周期で完了済 thread を取り除く.
-  # 24h 稼働で @background_threads に thread が蓄積するメモリリーク対策(R-7 #C 反映).
-  # mutex 内で select! を呼び thread-safety を確保(non-atomic 操作回避).
-  def sweep_background_threads_if_due
-    now = @monotonic_clock.call
-    return if @last_background_thread_sweep_at && (now - @last_background_thread_sweep_at) < BACKGROUND_THREAD_SWEEP_INTERVAL_SECONDS
-
-    sweep_background_threads
-    @last_background_thread_sweep_at = now
-  end
-
-  def sweep_background_threads
-    @background_threads_mutex.synchronize do
-      @background_threads.select!(&:alive?)
-    end
-  end
-
-  # finalize_main_loop から呼ばれ, 残存 background thread を timeout 付きで join する.
-  # timeout 経過後も生存している thread は強制終了して connection を解放する.
-  BACKGROUND_THREAD_JOIN_TIMEOUT = 10.0
-  private_constant :BACKGROUND_THREAD_JOIN_TIMEOUT
-
-  def join_background_threads
-    threads = @background_threads_mutex.synchronize { @background_threads.dup }
-    return if threads.empty?
-
-    threads.each do |thread|
-      thread.join(BACKGROUND_THREAD_JOIN_TIMEOUT)
-      next unless thread.alive?
-
-      logger.warn(
-        "[LiveTradingWorker] background thread did not finish within " \
-        "#{BACKGROUND_THREAD_JOIN_TIMEOUT}s; killing"
-      )
-      thread.kill
-    end
-
-    @background_threads_mutex.synchronize { @background_threads.clear }
+  def run_in_db_thread(label, &block)
+    @background_thread_registry.spawn(label, &block)
   end
 
   # candle 確定 → live_runner_child 起動 → on_tick callback → order_intents 評価 → 発注 (3.3-10d).
@@ -789,43 +668,20 @@ class LiveTradingWorker
   # WS callback thread から DB 操作 + REST 呼出を直接実行すると thread block 化するため
   # run_in_db_thread 経由で隔離.session.reload で main loop と同じ最新状態取得.
   #
-  # R-8-2 反映: WS push burst での thread 爆発 / Bitget rate limit 抵触を防ぐため debounce 適用.
+  # R-8-2 反映 / Phase 3.4a Step 0b-1 で Domain::AnomalyReconcileDebouncer に委譲:
   # - in-progress フラグで重複起動防止
   # - 前回起動から ALGO_ANOMALY_RECONCILE_DEBOUNCE_SECONDS 未満なら skip
   def trigger_reconciliation_for_algo_anomaly
     return unless @session
-    return unless acquire_anomaly_reconcile_slot
+    return unless @anomaly_reconcile_debouncer.try_acquire
 
     run_in_db_thread("reconcile_after_algo_anomaly") do
       begin
         session_reloaded = LiveTrading::Session.find(@session.id)
         run_reconciliation_after_reconnect(session_reloaded)
       ensure
-        release_anomaly_reconcile_slot
+        @anomaly_reconcile_debouncer.release
       end
-    end
-  end
-
-  # debounce slot 取得: in-progress でなく前回から DEBOUNCE 以上経過していれば true.
-  # 取得時に in-progress = true + last_triggered_at 更新.
-  def acquire_anomaly_reconcile_slot
-    @anomaly_reconcile_mutex.synchronize do
-      return false if @anomaly_reconcile_in_progress
-
-      now = @monotonic_clock.call
-      if @last_anomaly_reconcile_at && (now - @last_anomaly_reconcile_at) < ALGO_ANOMALY_RECONCILE_DEBOUNCE_SECONDS
-        return false
-      end
-
-      @anomaly_reconcile_in_progress = true
-      @last_anomaly_reconcile_at = now
-      true
-    end
-  end
-
-  def release_anomaly_reconcile_slot
-    @anomaly_reconcile_mutex.synchronize do
-      @anomaly_reconcile_in_progress = false
     end
   end
 
@@ -973,6 +829,46 @@ class LiveTradingWorker
       position_endpoint: position_endpoint,
       account_endpoint: account_endpoint,
       logger: logger
+    )
+  end
+
+  # Phase 3.4a Step 0a: candle_confirm_detector が DI されていない場合の lazy init.
+  def candle_confirm_detector_lazy
+    @candle_confirm_detector || Domain::CandleConfirmDetector.new
+  end
+
+  # Phase 3.4a Step 0b-1: anomaly_reconcile_debouncer が DI されていない場合の lazy init.
+  # monotonic_clock は Worker と共有(壁時計逆行耐性).
+  def anomaly_reconcile_debouncer_lazy
+    @anomaly_reconcile_debouncer || Domain::AnomalyReconcileDebouncer.new(
+      monotonic_clock: @monotonic_clock,
+      debounce_seconds: ALGO_ANOMALY_RECONCILE_DEBOUNCE_SECONDS
+    )
+  end
+
+  # Phase 3.4a Step 0b-2: background_thread_registry が DI されていない場合の lazy init.
+  # monotonic_clock を共有 / sweep_interval / join_timeout は Domain DEFAULT を採用.
+  def background_thread_registry_lazy
+    @background_thread_registry || Domain::BackgroundThreadRegistry.new(
+      monotonic_clock: @monotonic_clock,
+      logger: logger
+    )
+  end
+
+  # Phase 3.4a Step 0b-3: ws_reconnect_detector が DI されていない場合の lazy init.
+  def ws_reconnect_detector_lazy
+    @ws_reconnect_detector || Domain::WsReconnectDetector.new
+  end
+
+  # Phase 3.4a Step 0b-4: heartbeat_scheduler が DI されていない場合の lazy init.
+  # process_manager + monotonic_clock を共有 / heartbeat 60s + lease renew 120s 既定.
+  def heartbeat_scheduler_lazy
+    @heartbeat_scheduler || Domain::HeartbeatScheduler.new(
+      process_manager: process_manager,
+      monotonic_clock: @monotonic_clock,
+      logger: logger,
+      heartbeat_interval_seconds: HEARTBEAT_INTERVAL_SECONDS,
+      lease_renew_interval_seconds: LEASE_RENEW_INTERVAL_SECONDS
     )
   end
 
