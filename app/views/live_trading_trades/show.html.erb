@@ -1,0 +1,120 @@
+<% content_for :title, "Trade ##{@trade.id}" %>
+
+<h1>Trade #<%= @trade.id %></h1>
+
+<p>
+  <%= link_to "セッション一覧へ", live_trading_sessions_path %>
+  &nbsp;|&nbsp;
+  <%= link_to "セッション ##{@trade.live_trading_session_id} 詳細",
+              live_trading_session_path(@trade.live_trading_session_id) %>
+</p>
+
+<h2>基本情報</h2>
+<table>
+  <tbody>
+    <tr><th>ID</th><td><%= @trade.id %></td></tr>
+    <tr><th>session</th><td><%= @trade.live_trading_session_id %></td></tr>
+    <tr><th>revision</th><td><%= @trade.strategy_revision_id %></td></tr>
+    <tr><th>symbol</th><td><%= @trade.symbol %></td></tr>
+    <tr><th>side</th><td><%= @trade.side %></td></tr>
+    <tr><th>quantity</th><td><%= @trade.quantity %></td></tr>
+    <tr><th>status</th><td><%= @trade.status %></td></tr>
+    <tr><th>entry_price</th><td><%= @trade.entry_price %></td></tr>
+    <tr><th>entry_at</th><td><%= @trade.entry_at&.iso8601 %></td></tr>
+    <tr><th>exit_price</th><td><%= @trade.exit_price %></td></tr>
+    <tr><th>exit_at</th><td><%= @trade.exit_at&.iso8601 %></td></tr>
+    <tr><th>realized_pnl</th><td><%= @trade.realized_pnl %></td></tr>
+    <tr><th>failure_reason</th><td><%= @trade.failure_reason %></td></tr>
+  </tbody>
+</table>
+
+<h2>Orders</h2>
+<% if @orders.any? %>
+  <table>
+    <thead>
+      <tr>
+        <th>#</th><th>side</th><th>trade_side</th><th>order_type</th>
+        <th>size</th><th>price</th><th>status</th><th>force</th>
+        <th>reduce_only</th><th>client_oid</th><th>bitget_order_id</th>
+        <th>placed_at</th><th>finished_at</th>
+      </tr>
+    </thead>
+    <tbody>
+      <% @orders.each do |o| %>
+        <tr>
+          <td><%= o.id %></td>
+          <td><%= o.side %></td>
+          <td><%= o.trade_side %></td>
+          <td><%= o.order_type %></td>
+          <td><%= o.size %></td>
+          <td><%= o.price %></td>
+          <td><%= o.status %></td>
+          <td><%= o.force %></td>
+          <td><%= o.reduce_only %></td>
+          <td><%= o.client_oid %></td>
+          <td><%= o.bitget_order_id %></td>
+          <td><%= o.placed_at&.iso8601 %></td>
+          <td><%= o.finished_at&.iso8601 %></td>
+        </tr>
+      <% end %>
+    </tbody>
+  </table>
+<% else %>
+  <p>Order が登録されていません。</p>
+<% end %>
+
+<h2>AlgoOrders</h2>
+<% if @algo_orders.any? %>
+  <table>
+    <thead>
+      <tr>
+        <th>#</th><th>algo_type</th><th>bitget_algo_id</th>
+        <th>trigger_price</th><th>execute_price</th>
+        <th>callback_ratio</th><th>status</th>
+      </tr>
+    </thead>
+    <tbody>
+      <% @algo_orders.each do |a| %>
+        <tr>
+          <td><%= a.id %></td>
+          <td><%= a.algo_type %></td>
+          <td><%= a.bitget_algo_id %></td>
+          <td><%= a.trigger_price %></td>
+          <td><%= a.execute_price %></td>
+          <td><%= a.callback_ratio %></td>
+          <td><%= a.status %></td>
+        </tr>
+      <% end %>
+    </tbody>
+  </table>
+<% else %>
+  <p>AlgoOrder が登録されていません。</p>
+<% end %>
+
+<h2>Fills</h2>
+<% if @fills.any? %>
+  <table>
+    <thead>
+      <tr>
+        <th>#</th><th>exchange_order_id</th><th>bitget_fill_id</th>
+        <th>price</th><th>size</th><th>fee</th><th>fee_coin</th><th>filled_at</th>
+      </tr>
+    </thead>
+    <tbody>
+      <% @fills.each do |f| %>
+        <tr>
+          <td><%= f.id %></td>
+          <td><%= f.exchange_order_id %></td>
+          <td><%= f.bitget_fill_id %></td>
+          <td><%= f.price %></td>
+          <td><%= f.size %></td>
+          <td><%= f.fee %></td>
+          <td><%= f.fee_coin %></td>
+          <td><%= f.filled_at&.iso8601 %></td>
+        </tr>
+      <% end %>
+    </tbody>
+  </table>
+<% else %>
+  <p>Fill が登録されていません。</p>
+<% end %>

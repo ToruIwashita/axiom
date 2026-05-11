@@ -1,0 +1,27 @@
+<%# Phase 3.4b Step 3.4-11 / R-12: LiveTrading::Session#status の 8 値色分け badge partial.
+    呼出側: <%= render "status_badge", session: session %>
+    Backtesting::Run と対称に session オブジェクトを受け取り,partial 内で status を引き出す.
+    色分け基準:
+    - starting / reconciling / running / cooling_down: 進行系(青系 / 緑系)
+    - stopping: 警告系(黄)
+    - stopped / failed_to_start / halted: 終端系(灰 / 赤)%>
+<%
+  status = session.status
+  color = case status
+  when "starting", "reconciling" then "#4F8BF9" # 青(初期化中)
+  when "running"                 then "#28A745" # 緑(稼働中)
+  when "cooling_down"            then "#17A2B8" # 水色(冷却中)
+  when "stopping"                then "#FFC107" # 黄(停止処理中)
+  when "stopped"                 then "#6C757D" # 灰(正常停止)
+  when "failed_to_start"         then "#DC3545" # 赤(起動失敗)
+  when "halted"                  then "#C82333" # 濃赤(異常停止)
+  else "#6C757D"
+  end
+%>
+<span class="session-status-badge"
+      style="display: inline-block; padding: 0.25em 0.75em; border-radius: 12px;
+             background-color: <%= color %>; color: white; font-size: 0.85em;
+             font-weight: 600; min-width: 7em; text-align: center;"
+      data-status="<%= status %>">
+  <%= status %>
+</span>

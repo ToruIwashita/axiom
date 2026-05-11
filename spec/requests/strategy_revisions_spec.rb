@@ -110,4 +110,80 @@ RSpec.describe "StrategyRevisions(View)", type: :request do
       expect(revision.reload).to be_state_approved
     end
   end
+
+  # Phase 3.4b Step 3.4-14: promote / deprecate / archive UI action
+  describe "POST /strategy_definitions/:id/revisions/:rev_id/promote" do
+    let!(:revision) do
+      Strategy::Revision.create!(
+        strategy_definition: definition, revision_number: 1, script_content: script_body,
+        script_entrypoint: "Sample", status: "approved", ast_validation_status: "passed",
+        uses_live_forbidden_input: false, ai_filter_enabled: false, ai_sizing_enabled: false,
+        approved_at: Time.current
+      )
+    end
+
+    subject { post promote_strategy_definition_revision_path(definition, revision) }
+
+    it "promoted に遷移し show にリダイレクト" do
+      subject
+      expect(response).to have_http_status(:redirect)
+      expect(revision.reload).to be_state_promoted
+    end
+
+    context "uses_live_forbidden_input が true の場合" do
+      let!(:revision) do
+        Strategy::Revision.create!(
+          strategy_definition: definition, revision_number: 1, script_content: script_body,
+          script_entrypoint: "Sample", status: "approved", ast_validation_status: "passed",
+          uses_live_forbidden_input: true, ai_filter_enabled: false, ai_sizing_enabled: false,
+          approved_at: Time.current
+        )
+      end
+
+      it "redirect + flash alert(LiveForbiddenInputError)で approved 維持" do
+        subject
+        expect(response).to have_http_status(:redirect)
+        expect(revision.reload).to be_state_approved
+        expect(flash[:alert]).to match(/live-forbidden/)
+      end
+    end
+  end
+
+  describe "POST /strategy_definitions/:id/revisions/:rev_id/deprecate" do
+    let!(:revision) do
+      Strategy::Revision.create!(
+        strategy_definition: definition, revision_number: 1, script_content: script_body,
+        script_entrypoint: "Sample", status: "promoted", ast_validation_status: "passed",
+        uses_live_forbidden_input: false, ai_filter_enabled: false, ai_sizing_enabled: false,
+        approved_at: Time.current, promoted_at: Time.current
+      )
+    end
+
+    subject { post deprecate_strategy_definition_revision_path(definition, revision) }
+
+    it "deprecated に遷移し show にリダイレクト" do
+      subject
+      expect(response).to have_http_status(:redirect)
+      expect(revision.reload).to be_state_deprecated
+    end
+  end
+
+  describe "POST /strategy_definitions/:id/revisions/:rev_id/archive" do
+    let!(:revision) do
+      Strategy::Revision.create!(
+        strategy_definition: definition, revision_number: 1, script_content: script_body,
+        script_entrypoint: "Sample", status: "deprecated", ast_validation_status: "passed",
+        uses_live_forbidden_input: false, ai_filter_enabled: false, ai_sizing_enabled: false,
+        approved_at: Time.current, promoted_at: Time.current, deprecated_at: Time.current
+      )
+    end
+
+    subject { post archive_strategy_definition_revision_path(definition, revision) }
+
+    it "archived に遷移し show にリダイレクト" do
+      subject
+      expect(response).to have_http_status(:redirect)
+      expect(revision.reload).to be_state_archived
+    end
+  end
 end

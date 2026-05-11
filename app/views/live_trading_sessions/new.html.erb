@@ -1,0 +1,51 @@
+<% content_for :title, "ライブトレード セッション起動" %>
+
+<h1>ライブトレード セッション起動</h1>
+
+<%= form_with url: live_trading_sessions_path, method: :post, scope: :live_trading_session, local: true do |f| %>
+  <div>
+    <%= f.label :strategy_revision_id, "Strategy::Revision(promoted)" %>
+    <%= f.select :strategy_revision_id, @promoted_revisions.map { |r| ["##{r.revision_number} (#{r.script_entrypoint})", r.id] } %>
+  </div>
+  <div>
+    <%= f.label :strategy_definition_id, "Strategy::Definition" %>
+    <%= f.number_field :strategy_definition_id %>
+  </div>
+  <div>
+    <%= f.label :risk_policy_id, "Risk::Policy" %>
+    <%= f.select :risk_policy_id, @risk_policies.map { |p| [p.name, p.id] } %>
+  </div>
+  <div>
+    <%= f.label :symbol, "symbol" %>
+    <%= f.text_field :symbol, value: @form_defaults[:symbol] %>
+  </div>
+  <div>
+    <%= f.label :leverage, "leverage" %>
+    <%= f.number_field :leverage, value: @form_defaults[:leverage] %>
+  </div>
+  <div>
+    <%= f.label :margin_mode, "margin_mode" %>
+    <%= f.select :margin_mode, LiveTrading::Session::MARGIN_MODES, selected: @form_defaults[:margin_mode] %>
+  </div>
+  <div>
+    <%= f.label :position_mode, "position_mode" %>
+    <%= f.select :position_mode, LiveTrading::Session::POSITION_MODES, selected: @form_defaults[:position_mode] %>
+  </div>
+  <div>
+    <%= f.label :asset_mode, "asset_mode" %>
+    <%= f.select :asset_mode, LiveTrading::Session::ASSET_MODES, selected: @form_defaults[:asset_mode] %>
+  </div>
+  <div>
+    <%= f.label :margin_coin, "margin_coin" %>
+    <%= f.text_field :margin_coin, value: @form_defaults[:margin_coin] %>
+  </div>
+  <div>
+    <%= f.label :emergency_stop_mode, "emergency_stop_mode" %>
+    <%= f.select :emergency_stop_mode, LiveTrading::Session::EMERGENCY_STOP_MODES, selected: @form_defaults[:emergency_stop_mode] %>
+  </div>
+  <div>
+    <%= f.submit "セッション起動" %>
+  </div>
+<% end %>
+
+<p><%= link_to "一覧へ戻る", live_trading_sessions_path %></p>

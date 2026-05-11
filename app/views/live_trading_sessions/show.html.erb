@@ -1,0 +1,48 @@
+<% content_for :title, "ライブトレード セッション ##{@session.id}" %>
+
+<%# Phase 3.4b Step 3.4-13: Turbo Streams + polling fallback 二段安全網.
+    Session#after_update_commit が live_trading_session_<id> stream に
+    broadcast_replace_to で _status_badge partial を送信し,この turbo_stream_from
+    が受信して live_trading_session_<id>_status 要素を置換する.
+    Action Cable 切断時は data-controller="live-trading-status-polling" の
+    polling controller(3s 間隔)が fallback として動作する. %>
+<%= turbo_stream_from "live_trading_session_#{@session.id}" %>
+
+<h1>ライブトレード セッション #<%= @session.id %></h1>
+
+<p>
+  <%= link_to "一覧へ戻る", live_trading_sessions_path %>
+</p>
+
+<div style="margin-bottom: 1em;"
+     data-controller="live-trading-status-polling"
+     data-live-trading-status-polling-api-url-value="<%= api_v1_live_trading_session_path(@session, format: :json) %>"
+     data-live-trading-status-polling-status-value="<%= @session.status %>">
+  <strong>現在の状態: </strong>
+  <span id="live_trading_session_<%= @session.id %>_status">
+    <%= render "status_badge", session: @session %>
+  </span>
+  <% unless @session.terminal? %>
+    <span style="margin-left: 1em;"><%= render "kill_switch_modal", session: @session %></span>
+  <% end %>
+</div>
+
+<table>
+  <tbody>
+    <tr><th>ID</th><td><%= @session.id %></td></tr>
+    <tr><th>symbol</th><td><%= @session.symbol %></td></tr>
+    <tr><th>status</th><td><%= @session.status %></td></tr>
+    <tr><th>leverage</th><td><%= @session.leverage %></td></tr>
+    <tr><th>margin_mode</th><td><%= @session.margin_mode %></td></tr>
+    <tr><th>position_mode</th><td><%= @session.position_mode %></td></tr>
+    <tr><th>asset_mode</th><td><%= @session.asset_mode %></td></tr>
+    <tr><th>margin_coin</th><td><%= @session.margin_coin %></td></tr>
+    <tr><th>emergency_stop_mode</th><td><%= @session.emergency_stop_mode %></td></tr>
+    <tr><th>worker_instance_id</th><td><%= @session.worker_instance_id %></td></tr>
+    <tr><th>failure_reason</th><td><%= @session.failure_reason %></td></tr>
+    <tr><th>started_at</th><td><%= @session.started_at&.iso8601 %></td></tr>
+    <tr><th>stopped_at</th><td><%= @session.stopped_at&.iso8601 %></td></tr>
+    <tr><th>created_at</th><td><%= @session.created_at.iso8601 %></td></tr>
+    <tr><th>updated_at</th><td><%= @session.updated_at.iso8601 %></td></tr>
+  </tbody>
+</table>

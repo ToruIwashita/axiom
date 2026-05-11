@@ -1,0 +1,60 @@
+<% content_for :title, "ライブトレード セッション一覧" %>
+
+<h1>ライブトレード セッション一覧</h1>
+
+<p>
+  <%= link_to "新規セッション起動", new_live_trading_session_path %>
+</p>
+
+<%# Phase 3.4b Step 3.4-11: 全 running 緊急停止フォーム %>
+<details style="display: inline-block; margin-bottom: 1em;">
+  <summary style="cursor: pointer; padding: 0.5em 1em; background: #DC3545;
+                  color: white; border-radius: 4px; display: inline-block;">
+    全 running セッション緊急停止
+  </summary>
+  <div style="border: 1px solid #ddd; padding: 1em; margin-top: 0.5em; border-radius: 4px;">
+    <p>停止モードを選択してください:</p>
+    <% LiveTrading::Session::EMERGENCY_STOP_MODES.each do |mode| %>
+      <%= form_with url: emergency_stop_live_trading_sessions_path, method: :post,
+                    local: true, html: { style: "display: inline-block; margin-right: 0.5em;" } do |f| %>
+        <%= f.hidden_field :mode, value: mode %>
+        <%= f.submit mode, data: { turbo_confirm: "全 running セッションを「#{mode}」モードで停止しますか?" } %>
+      <% end %>
+    <% end %>
+  </div>
+</details>
+
+<% if @sessions.any? %>
+  <table>
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>symbol</th>
+        <th>status</th>
+        <th>leverage</th>
+        <th>margin_mode</th>
+        <th>position_mode</th>
+        <th>emergency_stop_mode</th>
+        <th>started_at</th>
+        <th>操作</th>
+      </tr>
+    </thead>
+    <tbody>
+      <% @sessions.each do |session| %>
+        <tr>
+          <td><%= session.id %></td>
+          <td><%= session.symbol %></td>
+          <td><%= render "status_badge", session: session %></td>
+          <td><%= session.leverage %></td>
+          <td><%= session.margin_mode %></td>
+          <td><%= session.position_mode %></td>
+          <td><%= session.emergency_stop_mode %></td>
+          <td><%= session.started_at&.iso8601 %></td>
+          <td><%= link_to "詳細", live_trading_session_path(session) %></td>
+        </tr>
+      <% end %>
+    </tbody>
+  </table>
+<% else %>
+  <p>セッションが登録されていません。</p>
+<% end %>

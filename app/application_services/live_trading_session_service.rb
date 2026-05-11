@@ -65,27 +65,68 @@ module ApplicationServices
 
     # 指定 Session を停止する(kill-switch シグナル送信).
     # `emergency_stop_mode` を `mode` で上書き後 `start_stopping!` を呼ぶ.
+    # Phase 3.4b R-12 反映: mode を EMERGENCY_STOP_MODES allow-list で Fail Fast 検証する.
+    # Phase 3.4b R-13 反映: terminal session への emergency_stop_mode 副作用回避のため
+    # transaction + reload で start_stopping! 可能性を先に検証する.
     #
     # @param session_id [Integer]
     # @param mode [String] 停止モード(emergency_stop_mode の上書き値)
     # @return [LiveTrading::Session] status: :stopping に遷移済の Session
     # @raise [ActiveRecord::RecordNotFound]
+    # @raise [ArgumentError] mode が EMERGENCY_STOP_MODES に含まれない場合(nil / 不正値含む)
     # @raise [LiveTrading::Session::InvalidTransitionError] running / cooling_down 以外から呼ばれた場合
     def stop(session_id:, mode:)
+      assert_valid_emergency_stop_mode!(mode)
       session = LiveTrading::Session.find(session_id)
-      session.update!(emergency_stop_mode: mode)
-      session.start_stopping!
+      LiveTrading::Session.transaction do
+        session.lock!
+        apply_stop_to(session, mode)
+      end
       session
     end
 
     # 全 running セッションを一斉停止する.
+    # Phase 3.4b R-13 反映: best-effort 継続(個別失敗で残 session に kill-switch を届ける).
     #
     # @param mode [String] 停止モード(emergency_stop_mode の一括上書き値)
     # @return [Array<LiveTrading::Session>] 停止対象になった Session 群(running 0 件なら空配列)
+    # @raise [ArgumentError] mode が EMERGENCY_STOP_MODES に含まれない場合(nil / 不正値含む)
     def emergency_stop(mode:)
-      LiveTrading::Session.where(status: "running").map do |session|
-        stop(session_id: session.id, mode: mode)
+      assert_valid_emergency_stop_mode!(mode)
+      stopped_sessions = []
+      LiveTrading::Session.where(status: "running").find_each do |session|
+        begin
+          LiveTrading::Session.transaction do
+            session.lock!
+            apply_stop_to(session, mode)
+          end
+          stopped_sessions << session
+        rescue StandardError => e
+          Rails.logger.warn(
+            "[LiveTradingSessionService] emergency_stop failed for session=#{session.id}: " \
+            "#{e.class.name}: #{Domain::FailureReasonSanitizer.sanitize(e.message)}"
+          )
+        end
       end
+      stopped_sessions
+    end
+
+    private
+
+    # 既に取得済 session に対して状態遷移を適用する共通 helper(stop / emergency_stop で共有).
+    # 呼出側で transaction + lock 制御するため,この helper 内では行わない.
+    # terminal session への副作用回避のため start_stopping! を先に呼び,
+    # 成功した場合のみ emergency_stop_mode を上書きする.
+    def apply_stop_to(session, mode)
+      session.start_stopping!
+      session.update!(emergency_stop_mode: mode)
+    end
+
+    def assert_valid_emergency_stop_mode!(mode)
+      return if LiveTrading::Session::EMERGENCY_STOP_MODES.include?(mode)
+
+      raise ArgumentError,
+            "mode must be one of #{LiveTrading::Session::EMERGENCY_STOP_MODES.inspect} but got #{mode.inspect}"
     end
   end
 end

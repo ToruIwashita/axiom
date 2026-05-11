@@ -15,6 +15,9 @@ Rails.application.routes.draw do
       resources :strategy_definitions, only: %i[index show create update] do
         resources :revisions, controller: "strategy_revisions", only: %i[index show create] do
           post :approve, on: :member
+          post :promote, on: :member
+          post :deprecate, on: :member
+          post :archive, on: :member
         end
         resources :backtesting_runs, only: %i[create]
       end
@@ -25,6 +28,19 @@ Rails.application.routes.draw do
         resource :equity_curve, controller: "backtesting_run_equity_curve", only: %i[show]
       end
 
+      # Phase 3.4b Step 3.4-5/6/7: LiveTrading::Session API
+      resources :live_trading_sessions, only: %i[index show create] do
+        post :stop, on: :member
+        collection do
+          post :emergency_stop
+        end
+        resources :trades, controller: "live_trading_session_trades", only: %i[index]
+        resource :position, controller: "live_trading_session_positions", only: %i[show]
+      end
+
+      # Phase 3.4b Step 3.4-8: LiveTrading::Trade 単体取得 API(Trade + Order[] + AlgoOrder[] + Fill[])
+      resources :live_trading_trades, only: %i[show]
+
       post "market_data/sync", to: "market_data#sync"
     end
   end
@@ -33,12 +49,27 @@ Rails.application.routes.draw do
   resources :strategy_definitions do
     resources :revisions, controller: "strategy_revisions", only: %i[index show new create] do
       post :approve, on: :member
+      # Phase 3.4b Step 3.4-14: Revision 状態遷移 UI ルート
+      post :promote, on: :member
+      post :deprecate, on: :member
+      post :archive, on: :member
     end
     resources :backtesting_runs, only: %i[new create]
   end
   resources :backtesting_runs, only: %i[index show] do
     post :cancel, on: :member
   end
+
+  # Phase 3.4b Step 3.4-9 / 3.4-10: LiveTrading::Session UI ルート
+  resources :live_trading_sessions, only: %i[index show new create] do
+    post :stop, on: :member
+    collection do
+      post :emergency_stop
+    end
+  end
+
+  # Phase 3.4b Step 3.4-12: LiveTrading::Trade 単体表示 UI ルート
+  resources :live_trading_trades, only: %i[show]
 
   # Defines the root path route ("/")
   root "backtesting_runs#index"

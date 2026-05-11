@@ -51,6 +51,33 @@ class StrategyRevisionsController < ApplicationController
     redirect_to strategy_definition_revision_path(params[:strategy_definition_id], params[:id]), alert: e.message
   end
 
+  # Phase 3.4b Step 3.4-14: Revision 状態遷移 UI action
+  def promote
+    @definition = definition_service.get(definition_id: params[:strategy_definition_id].to_i)
+    @revision = service.promote(revision_id: params[:id].to_i)
+    redirect_to strategy_definition_revision_path(@definition, @revision), notice: "Promoted"
+  rescue ActiveRecord::RecordNotFound
+    redirect_to strategy_definition_path(params[:strategy_definition_id]), alert: "Revision not found"
+  rescue Strategy::Revision::LiveForbiddenInputError => e
+    redirect_to strategy_definition_revision_path(params[:strategy_definition_id], params[:id]), alert: e.message
+  end
+
+  def deprecate
+    @definition = definition_service.get(definition_id: params[:strategy_definition_id].to_i)
+    @revision = service.deprecate(revision_id: params[:id].to_i)
+    redirect_to strategy_definition_revision_path(@definition, @revision), notice: "Deprecated"
+  rescue ActiveRecord::RecordNotFound
+    redirect_to strategy_definition_path(params[:strategy_definition_id]), alert: "Revision not found"
+  end
+
+  def archive
+    @definition = definition_service.get(definition_id: params[:strategy_definition_id].to_i)
+    @revision = service.archive(revision_id: params[:id].to_i)
+    redirect_to strategy_definition_revision_path(@definition, @revision), notice: "Archived"
+  rescue ActiveRecord::RecordNotFound
+    redirect_to strategy_definition_path(params[:strategy_definition_id]), alert: "Revision not found"
+  end
+
   private
 
   def service

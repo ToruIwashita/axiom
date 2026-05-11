@@ -21,6 +21,18 @@ module LiveTrading
     enum :asset_mode, ASSET_MODES.index_with(&:itself), prefix: :asset
     enum :emergency_stop_mode, EMERGENCY_STOP_MODES.index_with(&:itself), prefix: :emergency_stop
 
+    # Phase 3.4b Step 3.4-13(02_§6.2.4)反映: status 変更時に Turbo Streams で UI へ broadcast.
+    # `live_trading_session_<id>_status` 要素を _status_badge partial で置換する.
+    # Worker / ApplicationServices からの状態遷移呼出時に発火する.
+    # polling controller(live_trading_status_polling)は Action Cable 切断時の fallback として併用.
+    # Phase 3.4b R-12 反映: Backtesting::Run と対称な locals(session: self) で partial に渡す.
+    after_update_commit -> {
+      broadcast_replace_to "live_trading_session_#{id}",
+                           target: "live_trading_session_#{id}_status",
+                           partial: "live_trading_sessions/status_badge",
+                           locals: { session: self }
+    }
+
     belongs_to :strategy_definition, class_name: "Strategy::Definition"
     belongs_to :strategy_revision, class_name: "Strategy::Revision"
     belongs_to :risk_policy, class_name: "Risk::Policy"

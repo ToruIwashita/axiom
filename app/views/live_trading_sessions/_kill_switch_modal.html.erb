@@ -1,0 +1,31 @@
+<%# Phase 3.4b Step 3.4-11: kill-switch モード選択モーダル partial.
+    呼出側: <%= render "kill_switch_modal", session: session %>
+    Step 3.4-13 で Stimulus(kill_switch_modal_controller.js)による開閉制御が付与される.
+    現状は <details>/<summary> ベースの自然開閉に簡略化(JS 無しでも動作確保). %>
+<details data-controller="kill-switch-modal"
+         data-kill-switch-modal-session-id-value="<%= session.id %>"
+         class="kill-switch-modal">
+  <summary style="cursor: pointer; padding: 0.5em 1em; background: #C82333; color: white;
+                  border-radius: 4px; display: inline-block;">
+    セッション停止(kill-switch)
+  </summary>
+
+  <div style="border: 1px solid #ddd; padding: 1em; margin-top: 0.5em; border-radius: 4px;">
+    <p>セッション #<%= session.id %>(<%= session.symbol %>)を停止します。停止モードを選択してください:</p>
+
+    <% LiveTrading::Session::EMERGENCY_STOP_MODES.each do |mode| %>
+      <%= form_with url: stop_live_trading_session_path(session), method: :post,
+                    local: true, html: { style: "display: inline-block; margin-right: 0.5em;" } do |f| %>
+        <%= f.hidden_field :mode, value: mode %>
+        <%= f.submit mode,
+                     data: { turbo_confirm: "セッション ##{session.id} を「#{mode}」モードで停止しますか?" } %>
+      <% end %>
+    <% end %>
+
+    <p style="margin-top: 1em; font-size: 0.85em; color: #666;">
+      <strong>cancel_only</strong>: 全注文取消 + ポジション保持<br>
+      <strong>cancel_and_market_close</strong>: 全注文取消 + 全ポジション成行 close<br>
+      <strong>cancel_and_reduce_only</strong>: 全注文取消 + reduce_only 追従ループ + fallback close
+    </p>
+  </div>
+</details>
