@@ -99,6 +99,117 @@ RSpec.describe "Api::V1::StrategyRevisions", type: :request do
     end
   end
 
+  # Phase 3.4b Step 3.4-4: promote / deprecate / archive 3 action 追加
+  describe "POST /api/v1/strategy_definitions/:id/revisions/:rev_id/promote" do
+    let!(:revision) do
+      Strategy::Revision.create!(
+        strategy_definition: definition, revision_number: 1, script_content: script_body,
+        script_entrypoint: "Sample", status: "approved", ast_validation_status: "passed",
+        uses_live_forbidden_input: false, ai_filter_enabled: false, ai_sizing_enabled: false,
+        approved_at: Time.current
+      )
+    end
+
+    subject { post "/api/v1/strategy_definitions/#{definition.id}/revisions/#{revision.id}/promote", as: :json }
+
+    context "approved Revision を promote する場合" do
+      it "200 OK + promoted に遷移する" do
+        subject
+        expect(response).to have_http_status(:ok)
+        expect(response.parsed_body["status"]).to eq("promoted")
+        expect(revision.reload).to be_state_promoted
+      end
+    end
+
+    context "uses_live_forbidden_input が true の Revision を promote する場合" do
+      let!(:revision) do
+        Strategy::Revision.create!(
+          strategy_definition: definition, revision_number: 1, script_content: script_body,
+          script_entrypoint: "Sample", status: "approved", ast_validation_status: "passed",
+          uses_live_forbidden_input: true, ai_filter_enabled: false, ai_sizing_enabled: false,
+          approved_at: Time.current
+        )
+      end
+
+      it "422 Unprocessable Entity を返す(LiveForbiddenInputError)" do
+        subject
+        expect(response).to have_http_status(:unprocessable_entity)
+        expect(response.parsed_body["error"]).to match(/live-forbidden/)
+      end
+    end
+
+    context "存在しない revision_id を指定した場合" do
+      subject { post "/api/v1/strategy_definitions/#{definition.id}/revisions/0/promote", as: :json }
+
+      it "404 Not Found を返す" do
+        subject
+        expect(response).to have_http_status(:not_found)
+      end
+    end
+  end
+
+  describe "POST /api/v1/strategy_definitions/:id/revisions/:rev_id/deprecate" do
+    let!(:revision) do
+      Strategy::Revision.create!(
+        strategy_definition: definition, revision_number: 1, script_content: script_body,
+        script_entrypoint: "Sample", status: "promoted", ast_validation_status: "passed",
+        uses_live_forbidden_input: false, ai_filter_enabled: false, ai_sizing_enabled: false,
+        approved_at: Time.current, promoted_at: Time.current
+      )
+    end
+
+    subject { post "/api/v1/strategy_definitions/#{definition.id}/revisions/#{revision.id}/deprecate", as: :json }
+
+    context "promoted Revision を deprecate する場合" do
+      it "200 OK + deprecated に遷移する" do
+        subject
+        expect(response).to have_http_status(:ok)
+        expect(response.parsed_body["status"]).to eq("deprecated")
+        expect(revision.reload).to be_state_deprecated
+      end
+    end
+
+    context "存在しない revision_id を指定した場合" do
+      subject { post "/api/v1/strategy_definitions/#{definition.id}/revisions/0/deprecate", as: :json }
+
+      it "404 Not Found を返す" do
+        subject
+        expect(response).to have_http_status(:not_found)
+      end
+    end
+  end
+
+  describe "POST /api/v1/strategy_definitions/:id/revisions/:rev_id/archive" do
+    let!(:revision) do
+      Strategy::Revision.create!(
+        strategy_definition: definition, revision_number: 1, script_content: script_body,
+        script_entrypoint: "Sample", status: "deprecated", ast_validation_status: "passed",
+        uses_live_forbidden_input: false, ai_filter_enabled: false, ai_sizing_enabled: false,
+        approved_at: Time.current, promoted_at: Time.current, deprecated_at: Time.current
+      )
+    end
+
+    subject { post "/api/v1/strategy_definitions/#{definition.id}/revisions/#{revision.id}/archive", as: :json }
+
+    context "任意 status の Revision を archive する場合" do
+      it "200 OK + archived に遷移する" do
+        subject
+        expect(response).to have_http_status(:ok)
+        expect(response.parsed_body["status"]).to eq("archived")
+        expect(revision.reload).to be_state_archived
+      end
+    end
+
+    context "存在しない revision_id を指定した場合" do
+      subject { post "/api/v1/strategy_definitions/#{definition.id}/revisions/0/archive", as: :json }
+
+      it "404 Not Found を返す" do
+        subject
+        expect(response).to have_http_status(:not_found)
+      end
+    end
+  end
+
   describe "POST /api/v1/strategy_definitions/:id/revisions/:rev_id/approve" do
     let!(:revision) do
       Strategy::Revision.create!(

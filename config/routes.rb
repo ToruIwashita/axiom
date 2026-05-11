@@ -15,6 +15,9 @@ Rails.application.routes.draw do
       resources :strategy_definitions, only: %i[index show create update] do
         resources :revisions, controller: "strategy_revisions", only: %i[index show create] do
           post :approve, on: :member
+          post :promote, on: :member
+          post :deprecate, on: :member
+          post :archive, on: :member
         end
         resources :backtesting_runs, only: %i[create]
       end

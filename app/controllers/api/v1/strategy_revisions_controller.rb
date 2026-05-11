@@ -42,6 +42,30 @@ module Api
         render json: { error: e.message }, status: :unprocessable_entity
       end
 
+      # Phase 3.4b Step 3.4-4 / 02_§6.2.2.1
+      def promote
+        revision = service.promote(revision_id: params[:id].to_i)
+        render json: revision_payload(revision)
+      rescue ActiveRecord::RecordNotFound => e
+        render json: { error: e.message }, status: :not_found
+      rescue Strategy::Revision::LiveForbiddenInputError => e
+        render json: { error: e.message }, status: :unprocessable_entity
+      end
+
+      def deprecate
+        revision = service.deprecate(revision_id: params[:id].to_i)
+        render json: revision_payload(revision)
+      rescue ActiveRecord::RecordNotFound => e
+        render json: { error: e.message }, status: :not_found
+      end
+
+      def archive
+        revision = service.archive(revision_id: params[:id].to_i)
+        render json: revision_payload(revision)
+      rescue ActiveRecord::RecordNotFound => e
+        render json: { error: e.message }, status: :not_found
+      end
+
       private
 
       def service
