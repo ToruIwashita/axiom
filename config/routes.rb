@@ -64,6 +64,9 @@ Rails.application.routes.draw do
     end
   end
 
+  # Phase 3.4b Step 3.4-12: LiveTrading::Trade 単体表示 UI ルート
+  resources :live_trading_trades, only: %i[show]
+
   # Defines the root path route ("/")
   root "backtesting_runs#index"
 end
