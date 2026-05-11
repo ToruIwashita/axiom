@@ -89,6 +89,60 @@ module PayloadHelpers
     }
   end
 
+  # Phase 3.4b Step 3.4-7: LiveTrading::Trade payload
+  def live_trading_trade_payload(trade)
+    {
+      id: trade.id,
+      live_trading_session_id: trade.live_trading_session_id,
+      strategy_revision_id: trade.strategy_revision_id,
+      symbol: trade.symbol,
+      side: trade.side,
+      quantity: serialize_decimal(trade.quantity),
+      status: trade.status,
+      entry_price: serialize_decimal(trade.entry_price),
+      entry_at: serialize_datetime(trade.entry_at),
+      exit_price: serialize_decimal(trade.exit_price),
+      exit_at: serialize_datetime(trade.exit_at),
+      realized_pnl: serialize_decimal(trade.realized_pnl),
+      failure_reason: trade.failure_reason,
+      created_at: serialize_datetime(trade.created_at),
+      updated_at: serialize_datetime(trade.updated_at)
+    }
+  end
+
+  # Phase 3.4b Step 3.4-7: Exchange::PositionSnapshot payload
+  def position_snapshot_payload(snapshot)
+    {
+      id: snapshot.id,
+      live_trading_session_id: snapshot.live_trading_session_id,
+      symbol: snapshot.symbol,
+      margin_coin: snapshot.margin_coin,
+      hold_side: snapshot.hold_side,
+      total: serialize_decimal(snapshot.total),
+      available: serialize_decimal(snapshot.available),
+      frozen_size: serialize_decimal(snapshot.frozen_size),
+      open_price_avg: serialize_decimal(snapshot.open_price_avg),
+      mark_price: serialize_decimal(snapshot.mark_price),
+      break_even_price: serialize_decimal(snapshot.break_even_price),
+      liquidation_price: serialize_decimal(snapshot.liquidation_price),
+      unrealized_pl: serialize_decimal(snapshot.unrealized_pl),
+      unrealized_plr: serialize_decimal(snapshot.unrealized_plr),
+      margin_size: serialize_decimal(snapshot.margin_size),
+      margin_rate: serialize_decimal(snapshot.margin_rate),
+      keep_margin_rate: serialize_decimal(snapshot.keep_margin_rate),
+      total_fee: serialize_decimal(snapshot.total_fee),
+      deducted_fee: serialize_decimal(snapshot.deducted_fee),
+      leverage: snapshot.leverage,
+      margin_mode: snapshot.margin_mode,
+      pos_mode: snapshot.pos_mode,
+      asset_mode: snapshot.asset_mode,
+      auto_margin: snapshot.auto_margin,
+      snapshot_at: serialize_datetime(snapshot.snapshot_at),
+      created_at: serialize_datetime(snapshot.created_at),
+      updated_at: serialize_datetime(snapshot.updated_at)
+    }
+  end
+
   # Phase 3.4b Step 3.4-5: LiveTrading::Session payload
   def live_trading_session_payload(session)
     {

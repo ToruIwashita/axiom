@@ -34,6 +34,8 @@ Rails.application.routes.draw do
         collection do
           post :emergency_stop
         end
+        resources :trades, controller: "live_trading_session_trades", only: %i[index]
+        resource :position, controller: "live_trading_session_positions", only: %i[show]
       end
 
       post "market_data/sync", to: "market_data#sync"
