@@ -65,13 +65,16 @@ module ApplicationServices
 
     # 指定 Session を停止する(kill-switch シグナル送信).
     # `emergency_stop_mode` を `mode` で上書き後 `start_stopping!` を呼ぶ.
+    # Phase 3.4b R-12 反映: mode を EMERGENCY_STOP_MODES allow-list で Fail Fast 検証する.
     #
     # @param session_id [Integer]
     # @param mode [String] 停止モード(emergency_stop_mode の上書き値)
     # @return [LiveTrading::Session] status: :stopping に遷移済の Session
     # @raise [ActiveRecord::RecordNotFound]
+    # @raise [ArgumentError] mode が EMERGENCY_STOP_MODES に含まれない場合(nil / 不正値含む)
     # @raise [LiveTrading::Session::InvalidTransitionError] running / cooling_down 以外から呼ばれた場合
     def stop(session_id:, mode:)
+      assert_valid_emergency_stop_mode!(mode)
       session = LiveTrading::Session.find(session_id)
       session.update!(emergency_stop_mode: mode)
       session.start_stopping!
@@ -82,10 +85,21 @@ module ApplicationServices
     #
     # @param mode [String] 停止モード(emergency_stop_mode の一括上書き値)
     # @return [Array<LiveTrading::Session>] 停止対象になった Session 群(running 0 件なら空配列)
+    # @raise [ArgumentError] mode が EMERGENCY_STOP_MODES に含まれない場合(nil / 不正値含む)
     def emergency_stop(mode:)
+      assert_valid_emergency_stop_mode!(mode)
       LiveTrading::Session.where(status: "running").map do |session|
         stop(session_id: session.id, mode: mode)
       end
+    end
+
+    private
+
+    def assert_valid_emergency_stop_mode!(mode)
+      return if LiveTrading::Session::EMERGENCY_STOP_MODES.include?(mode)
+
+      raise ArgumentError,
+            "mode must be one of #{LiveTrading::Session::EMERGENCY_STOP_MODES.inspect} but got #{mode.inspect}"
     end
   end
 end

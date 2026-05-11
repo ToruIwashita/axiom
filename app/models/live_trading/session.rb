@@ -25,11 +25,12 @@ module LiveTrading
     # `live_trading_session_<id>_status` 要素を _status_badge partial で置換する.
     # Worker / ApplicationServices からの状態遷移呼出時に発火する.
     # polling controller(live_trading_status_polling)は Action Cable 切断時の fallback として併用.
+    # Phase 3.4b R-12 反映: Backtesting::Run と対称な locals(session: self) で partial に渡す.
     after_update_commit -> {
       broadcast_replace_to "live_trading_session_#{id}",
                            target: "live_trading_session_#{id}_status",
                            partial: "live_trading_sessions/status_badge",
-                           locals: { status: status }
+                           locals: { session: self }
     }
 
     belongs_to :strategy_definition, class_name: "Strategy::Definition"

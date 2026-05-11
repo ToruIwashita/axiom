@@ -228,6 +228,19 @@ RSpec.describe "Api::V1::LiveTradingSessions", type: :request do
         expect(response).to have_http_status(:not_found)
       end
     end
+
+    context "mode 不正値(EMERGENCY_STOP_MODES 外)で stop した場合" do
+      subject do
+        post "/api/v1/live_trading_sessions/#{session.id}/stop",
+             params: { mode: "invalid_mode" }, as: :json
+      end
+
+      it "400 Bad Request を返す(Service 入口 Fail Fast)" do
+        subject
+        expect(response).to have_http_status(:bad_request)
+        expect(response.parsed_body["error"]).to match(/mode must be one of/)
+      end
+    end
   end
 
   describe "POST /api/v1/live_trading_sessions/emergency_stop" do

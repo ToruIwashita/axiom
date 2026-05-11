@@ -101,11 +101,10 @@ RSpec.describe "LiveTradingSessions(View)", type: :request do
     context "Revision 不整合の場合" do
       before { create_params[:live_trading_session][:strategy_definition_id] = 0 }
 
-      it "redirect + alert メッセージ" do
-        subject
+      it "Session を作らず redirect + flash alert" do
+        expect { subject }.not_to change { LiveTrading::Session.count }
         expect(response).to have_http_status(:redirect)
-        follow_redirect!
-        expect(flash[:alert] || response.body).to be_present
+        expect(flash[:alert]).to be_present
       end
     end
 
@@ -119,9 +118,10 @@ RSpec.describe "LiveTradingSessions(View)", type: :request do
         )
       end
 
-      it "redirect + alert メッセージ" do
-        subject
+      it "Session を作らず redirect + flash alert" do
+        expect { subject }.not_to change { LiveTrading::Session.count }
         expect(response).to have_http_status(:redirect)
+        expect(flash[:alert]).to be_present
       end
     end
   end
@@ -190,10 +190,22 @@ RSpec.describe "LiveTradingSessions(View)", type: :request do
         )
       end
 
-      it "session.status は変わらず show リダイレクト + alert" do
+      it "session.status は変わらず一覧 redirect + flash alert(InvalidTransitionError)" do
         subject
-        expect(response).to have_http_status(:redirect)
+        expect(response).to redirect_to(live_trading_sessions_path)
         expect(session.reload.state_stopped?).to be true
+        expect(flash[:alert]).to match(/cannot start_stopping/i)
+      end
+    end
+
+    context "mode 不正値(EMERGENCY_STOP_MODES 外)で stop した場合" do
+      subject { post stop_live_trading_session_path(session), params: { mode: "invalid_mode" } }
+
+      it "Service 入口で Fail Fast → 一覧 redirect + alert" do
+        subject
+        expect(response).to redirect_to(live_trading_sessions_path)
+        expect(session.reload.state_running?).to be true
+        expect(flash[:alert]).to match(/mode must be one of/)
       end
     end
 
@@ -232,6 +244,29 @@ RSpec.describe "LiveTradingSessions(View)", type: :request do
       expect(response).to have_http_status(:redirect)
       expect(running_a.reload.state_stopping?).to be true
       expect(running_b.reload.state_stopping?).to be true
+    end
+
+    context "running session が 0 件の場合" do
+      let!(:running_a) { nil }
+      let!(:running_b) { nil }
+
+      it "一覧 redirect + notice(0 セッションに緊急停止)" do
+        subject
+        expect(response).to redirect_to(live_trading_sessions_path)
+        expect(flash[:notice]).to match(/0 セッション/)
+      end
+    end
+
+    context "mode 不正値の場合" do
+      subject { post emergency_stop_live_trading_sessions_path, params: { mode: "invalid_mode" } }
+
+      it "running session は変化せず redirect + flash alert" do
+        subject
+        expect(response).to redirect_to(live_trading_sessions_path)
+        expect(running_a.reload.state_running?).to be true
+        expect(running_b.reload.state_running?).to be true
+        expect(flash[:alert]).to match(/mode must be one of/)
+      end
     end
   end
 end

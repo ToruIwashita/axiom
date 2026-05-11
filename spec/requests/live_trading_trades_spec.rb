@@ -93,9 +93,10 @@ RSpec.describe "LiveTradingTrades(View)", type: :request do
     context "存在しない trade_id の場合" do
       subject { get live_trading_trade_path(0) }
 
-      it "redirect + alert" do
+      it "一覧 redirect + flash alert" do
         subject
-        expect(response).to have_http_status(:redirect)
+        expect(response).to redirect_to(live_trading_sessions_path)
+        expect(flash[:alert]).to be_present
       end
     end
   end

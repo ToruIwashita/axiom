@@ -18,7 +18,7 @@
       <%= form_with url: emergency_stop_live_trading_sessions_path, method: :post,
                     local: true, html: { style: "display: inline-block; margin-right: 0.5em;" } do |f| %>
         <%= f.hidden_field :mode, value: mode %>
-        <%= f.submit mode, data: { confirm: "全 running セッションを「#{mode}」モードで停止しますか?" } %>
+        <%= f.submit mode, data: { turbo_confirm: "全 running セッションを「#{mode}」モードで停止しますか?" } %>
       <% end %>
     <% end %>
   </div>
@@ -44,7 +44,7 @@
         <tr>
           <td><%= session.id %></td>
           <td><%= session.symbol %></td>
-          <td><%= render "status_badge", status: session.status %></td>
+          <td><%= render "status_badge", session: session %></td>
           <td><%= session.leverage %></td>
           <td><%= session.margin_mode %></td>
           <td><%= session.position_mode %></td>

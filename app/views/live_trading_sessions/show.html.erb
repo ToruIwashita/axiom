@@ -20,7 +20,7 @@
      data-live-trading-status-polling-status-value="<%= @session.status %>">
   <strong>現在の状態: </strong>
   <span id="live_trading_session_<%= @session.id %>_status">
-    <%= render "status_badge", status: @session.status %>
+    <%= render "status_badge", session: @session %>
   </span>
   <% unless @session.terminal? %>
     <span style="margin-left: 1em;"><%= render "kill_switch_modal", session: @session %></span>

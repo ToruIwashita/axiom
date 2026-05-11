@@ -18,7 +18,7 @@
                     local: true, html: { style: "display: inline-block; margin-right: 0.5em;" } do |f| %>
         <%= f.hidden_field :mode, value: mode %>
         <%= f.submit mode,
-                     data: { confirm: "セッション ##{session.id} を「#{mode}」モードで停止しますか?" } %>
+                     data: { turbo_confirm: "セッション ##{session.id} を「#{mode}」モードで停止しますか?" } %>
       <% end %>
     <% end %>
 

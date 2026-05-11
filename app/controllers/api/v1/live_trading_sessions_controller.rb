@@ -18,17 +18,18 @@ module Api
       end
 
       def create
+        p = create_params
         session = service.start_session(
-          strategy_definition_id: params[:strategy_definition_id].to_i,
-          strategy_revision_id: params[:strategy_revision_id].to_i,
-          risk_policy_id: params[:risk_policy_id].to_i,
-          symbol: params[:symbol],
-          leverage: params[:leverage].to_i,
-          margin_mode: params[:margin_mode],
-          position_mode: params[:position_mode],
-          asset_mode: params[:asset_mode],
-          margin_coin: params[:margin_coin],
-          emergency_stop_mode: params[:emergency_stop_mode]
+          strategy_definition_id: p[:strategy_definition_id].to_i,
+          strategy_revision_id: p[:strategy_revision_id].to_i,
+          risk_policy_id: p[:risk_policy_id].to_i,
+          symbol: p[:symbol],
+          leverage: p[:leverage].to_i,
+          margin_mode: p[:margin_mode],
+          position_mode: p[:position_mode],
+          asset_mode: p[:asset_mode],
+          margin_coin: p[:margin_coin],
+          emergency_stop_mode: p[:emergency_stop_mode]
         )
         render json: live_trading_session_payload(session), status: :created
       rescue ActiveRecord::RecordNotFound => e
@@ -50,6 +51,8 @@ module Api
         render json: live_trading_session_payload(session)
       rescue ActiveRecord::RecordNotFound => e
         render json: { error: e.message }, status: :not_found
+      rescue ArgumentError => e
+        render json: { error: e.message }, status: :bad_request
       rescue LiveTrading::Session::InvalidTransitionError => e
         render json: { error: e.message }, status: :unprocessable_entity
       end
@@ -58,12 +61,33 @@ module Api
       def emergency_stop
         sessions = service.emergency_stop(mode: params[:mode])
         render json: { sessions: sessions.map { |s| live_trading_session_payload(s) } }
+      rescue ArgumentError => e
+        render json: { error: e.message }, status: :bad_request
       end
 
       private
 
       def service
         @service ||= ApplicationServices::LiveTradingSessionService.new
+      end
+
+      # Strong Parameters: create で受け入れる属性を allow-list で限定する.
+      # JSON ルート要素として `live_trading_session` で包まれているケースと
+      # 直接 top-level に置かれているケースの両方に対応(Phase 2.2 軽微 10 規約整合).
+      def create_params
+        if params[:live_trading_session].present?
+          params.require(:live_trading_session).permit(
+            :strategy_definition_id, :strategy_revision_id, :risk_policy_id,
+            :symbol, :leverage, :margin_mode, :position_mode, :asset_mode,
+            :margin_coin, :emergency_stop_mode
+          )
+        else
+          params.permit(
+            :strategy_definition_id, :strategy_revision_id, :risk_policy_id,
+            :symbol, :leverage, :margin_mode, :position_mode, :asset_mode,
+            :margin_coin, :emergency_stop_mode
+          )
+        end
       end
     end
   end

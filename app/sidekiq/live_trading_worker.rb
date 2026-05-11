@@ -311,6 +311,8 @@ class LiveTradingWorker
   # Phase 3.4b Step 0a: kill-switch 実行を Domain::KillSwitchExecutorService に委譲し,
   # 戻り値 :stopped / :halted に基づき session 状態遷移する.
   # session.emergency_stop_mode が SUPPORTED_MODES 外の場合は :halted で遷移.
+  # Phase 3.4b R-12 反映: executor 内例外時も session が stopping のまま残らないよう
+  # 全例外を rescue して mark_halted! で確定遷移させる.
   def execute_kill_switch_and_finalize
     mode_str = @session.emergency_stop_mode
     unless LiveTrading::Session::EMERGENCY_STOP_MODES.include?(mode_str)
@@ -325,6 +327,14 @@ class LiveTradingWorker
     when :halted
       @session.mark_halted!(reason: "kill_switch_executor_failed: mode=#{mode_str}")
     end
+  rescue StandardError => e
+    logger.error(
+      "[LiveTradingWorker] execute_kill_switch_and_finalize failed: " \
+      "#{e.class.name}: #{sanitize_log_message(e.message)}"
+    )
+    # stopping 状態に張り付かないよう halted で確定遷移(冪等性ガード: 既に terminal なら no-op).
+    @session.reload
+    @session.mark_halted!(reason: "kill_switch_unexpected_error: #{e.class.name}") unless @session.terminal?
   end
 
   # 3.3-10a peer review 軽微 obs 3 反映: 運用調査時に public_ws / private_ws どちらが切れたかを

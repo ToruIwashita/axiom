@@ -6,8 +6,7 @@ module Api
 
       def index
         session = LiveTrading::Session.find(params[:live_trading_session_id].to_i)
-        trades = session.live_trading_trades.order(id: :desc) if session.respond_to?(:live_trading_trades)
-        trades ||= LiveTrading::Trade.where(live_trading_session_id: session.id).order(id: :desc)
+        trades = LiveTrading::Trade.where(live_trading_session_id: session.id).order(id: :desc)
         render json: { trades: trades.map { |t| live_trading_trade_payload(t) } }
       rescue ActiveRecord::RecordNotFound => e
         render json: { error: e.message }, status: :not_found
