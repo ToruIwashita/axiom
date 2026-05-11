@@ -1,0 +1,40 @@
+<% content_for :title, "ライブトレード セッション一覧" %>
+
+<h1>ライブトレード セッション一覧</h1>
+
+<p><%= link_to "新規セッション起動", new_live_trading_session_path %></p>
+
+<% if @sessions.any? %>
+  <table>
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>symbol</th>
+        <th>status</th>
+        <th>leverage</th>
+        <th>margin_mode</th>
+        <th>position_mode</th>
+        <th>emergency_stop_mode</th>
+        <th>started_at</th>
+        <th>操作</th>
+      </tr>
+    </thead>
+    <tbody>
+      <% @sessions.each do |session| %>
+        <tr>
+          <td><%= session.id %></td>
+          <td><%= session.symbol %></td>
+          <td><%= session.status %></td>
+          <td><%= session.leverage %></td>
+          <td><%= session.margin_mode %></td>
+          <td><%= session.position_mode %></td>
+          <td><%= session.emergency_stop_mode %></td>
+          <td><%= session.started_at&.iso8601 %></td>
+          <td><%= link_to "詳細", live_trading_session_path(session) %></td>
+        </tr>
+      <% end %>
+    </tbody>
+  </table>
+<% else %>
+  <p>セッションが登録されていません。</p>
+<% end %>

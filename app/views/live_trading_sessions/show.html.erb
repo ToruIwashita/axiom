@@ -1,0 +1,25 @@
+<% content_for :title, "ライブトレード セッション ##{@session.id}" %>
+
+<h1>ライブトレード セッション #<%= @session.id %></h1>
+
+<p><%= link_to "一覧へ戻る", live_trading_sessions_path %></p>
+
+<table>
+  <tbody>
+    <tr><th>ID</th><td><%= @session.id %></td></tr>
+    <tr><th>symbol</th><td><%= @session.symbol %></td></tr>
+    <tr><th>status</th><td><%= @session.status %></td></tr>
+    <tr><th>leverage</th><td><%= @session.leverage %></td></tr>
+    <tr><th>margin_mode</th><td><%= @session.margin_mode %></td></tr>
+    <tr><th>position_mode</th><td><%= @session.position_mode %></td></tr>
+    <tr><th>asset_mode</th><td><%= @session.asset_mode %></td></tr>
+    <tr><th>margin_coin</th><td><%= @session.margin_coin %></td></tr>
+    <tr><th>emergency_stop_mode</th><td><%= @session.emergency_stop_mode %></td></tr>
+    <tr><th>worker_instance_id</th><td><%= @session.worker_instance_id %></td></tr>
+    <tr><th>failure_reason</th><td><%= @session.failure_reason %></td></tr>
+    <tr><th>started_at</th><td><%= @session.started_at&.iso8601 %></td></tr>
+    <tr><th>stopped_at</th><td><%= @session.stopped_at&.iso8601 %></td></tr>
+    <tr><th>created_at</th><td><%= @session.created_at.iso8601 %></td></tr>
+    <tr><th>updated_at</th><td><%= @session.updated_at.iso8601 %></td></tr>
+  </tbody>
+</table>
