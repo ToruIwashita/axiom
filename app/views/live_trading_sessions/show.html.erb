@@ -2,7 +2,17 @@
 
 <h1>ライブトレード セッション #<%= @session.id %></h1>
 
-<p><%= link_to "一覧へ戻る", live_trading_sessions_path %></p>
+<p>
+  <%= link_to "一覧へ戻る", live_trading_sessions_path %>
+</p>
+
+<%# Phase 3.4b Step 3.4-11: status badge + kill-switch modal 統合 %>
+<div style="margin-bottom: 1em;">
+  <strong>現在の状態: </strong><%= render "status_badge", status: @session.status %>
+  <% unless @session.terminal? %>
+    <span style="margin-left: 1em;"><%= render "kill_switch_modal", session: @session %></span>
+  <% end %>
+</div>
 
 <table>
   <tbody>
