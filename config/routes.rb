@@ -28,6 +28,9 @@ Rails.application.routes.draw do
         resource :equity_curve, controller: "backtesting_run_equity_curve", only: %i[show]
       end
 
+      # Phase 3.4b Step 3.4-5/6/7: LiveTrading::Session API
+      resources :live_trading_sessions, only: %i[index show create]
+
       post "market_data/sync", to: "market_data#sync"
     end
   end

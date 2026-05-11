@@ -89,6 +89,30 @@ module PayloadHelpers
     }
   end
 
+  # Phase 3.4b Step 3.4-5: LiveTrading::Session payload
+  def live_trading_session_payload(session)
+    {
+      id: session.id,
+      strategy_definition_id: session.strategy_definition_id,
+      strategy_revision_id: session.strategy_revision_id,
+      risk_policy_id: session.risk_policy_id,
+      symbol: session.symbol,
+      leverage: session.leverage,
+      margin_mode: session.margin_mode,
+      position_mode: session.position_mode,
+      asset_mode: session.asset_mode,
+      margin_coin: session.margin_coin,
+      emergency_stop_mode: session.emergency_stop_mode,
+      status: session.status,
+      worker_instance_id: session.worker_instance_id,
+      failure_reason: session.failure_reason,
+      started_at: serialize_datetime(session.started_at),
+      stopped_at: serialize_datetime(session.stopped_at),
+      created_at: serialize_datetime(session.created_at),
+      updated_at: serialize_datetime(session.updated_at)
+    }
+  end
+
   def revision_payload(revision)
     {
       id: revision.id,
