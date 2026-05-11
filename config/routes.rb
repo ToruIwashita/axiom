@@ -49,6 +49,10 @@ Rails.application.routes.draw do
   resources :strategy_definitions do
     resources :revisions, controller: "strategy_revisions", only: %i[index show new create] do
       post :approve, on: :member
+      # Phase 3.4b Step 3.4-14: Revision 状態遷移 UI ルート
+      post :promote, on: :member
+      post :deprecate, on: :member
+      post :archive, on: :member
     end
     resources :backtesting_runs, only: %i[new create]
   end

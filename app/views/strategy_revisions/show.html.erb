@@ -24,11 +24,30 @@
 
 <pre><code><%= @revision.script_content %></code></pre>
 
-<% if @revision.state_draft? && @revision.ast_validation_passed? %>
-  <%= button_to "承認(approve)", approve_strategy_definition_revision_path(@definition, @revision), method: :post, data: { turbo_confirm: "approve しますか?" } %>
-<% elsif @revision.state_draft? %>
-  <p><strong>注意:</strong> AST 検証が <%= @revision.ast_validation_status %> のため承認できません。</p>
-<% end %>
+<%# Phase 3.4b Step 3.4-14: 状態遷移ボタン群(approve / promote / deprecate / archive) %>
+<div class="revision-state-actions">
+  <% if @revision.state_draft? && @revision.ast_validation_passed? %>
+    <%= button_to "承認(approve)", approve_strategy_definition_revision_path(@definition, @revision), method: :post, data: { turbo_confirm: "approve しますか?" } %>
+  <% elsif @revision.state_draft? %>
+    <p><strong>注意:</strong> AST 検証が <%= @revision.ast_validation_status %> のため承認できません。</p>
+  <% end %>
+
+  <% if @revision.state_approved? %>
+    <% if @revision.uses_live_forbidden_input %>
+      <p><strong>注意:</strong> uses_live_forbidden_input が true のため promote できません。</p>
+    <% else %>
+      <%= button_to "本番昇格(promote)", promote_strategy_definition_revision_path(@definition, @revision), method: :post, data: { turbo_confirm: "本番昇格(ライブトレード起動可能)しますか?" } %>
+    <% end %>
+  <% end %>
+
+  <% if @revision.state_promoted? %>
+    <%= button_to "非推奨化(deprecate)", deprecate_strategy_definition_revision_path(@definition, @revision), method: :post, data: { turbo_confirm: "deprecate しますか?(ライブ起動不可になります)" } %>
+  <% end %>
+
+  <% unless @revision.state_archived? %>
+    <%= button_to "完全廃止(archive)", archive_strategy_definition_revision_path(@definition, @revision), method: :post, data: { turbo_confirm: "archive しますか?(以後 Live / Backtest 不可)" } %>
+  <% end %>
+</div>
 
 <% if @revision.acceptable_for_backtest? %>
   <p>
