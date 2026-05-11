@@ -157,4 +157,81 @@ RSpec.describe "LiveTradingSessions(View)", type: :request do
       end
     end
   end
+
+  # Phase 3.4b Step 3.4-10: stop / emergency_stop UI action
+  describe "POST /live_trading_sessions/:id/stop" do
+    let!(:session) do
+      LiveTrading::Session.create!(
+        strategy_definition: definition, strategy_revision: revision, risk_policy_id: risk_policy.id,
+        symbol: "BTCUSDT", leverage: 10, margin_mode: "isolated", position_mode: "one_way_mode",
+        asset_mode: "single", margin_coin: "USDT", emergency_stop_mode: "cancel_only",
+        status: "running"
+      )
+    end
+
+    subject { post stop_live_trading_session_path(session), params: { mode: "cancel_and_market_close" } }
+
+    context "running session を stop する場合" do
+      it "session を stopping に遷移 + show リダイレクト + notice" do
+        subject
+        expect(response).to have_http_status(:redirect)
+        expect(session.reload.state_stopping?).to be true
+        expect(session.reload.emergency_stop_mode).to eq("cancel_and_market_close")
+      end
+    end
+
+    context "running 以外の status から stop を呼んだ場合(InvalidTransitionError)" do
+      let!(:session) do
+        LiveTrading::Session.create!(
+          strategy_definition: definition, strategy_revision: revision, risk_policy_id: risk_policy.id,
+          symbol: "BTCUSDT", leverage: 10, margin_mode: "isolated", position_mode: "one_way_mode",
+          asset_mode: "single", margin_coin: "USDT", emergency_stop_mode: "cancel_only",
+          status: "stopped", stopped_at: Time.current
+        )
+      end
+
+      it "session.status は変わらず show リダイレクト + alert" do
+        subject
+        expect(response).to have_http_status(:redirect)
+        expect(session.reload.state_stopped?).to be true
+      end
+    end
+
+    context "存在しない session_id の場合" do
+      subject { post stop_live_trading_session_path(0), params: { mode: "cancel_only" } }
+
+      it "一覧リダイレクト + alert" do
+        subject
+        expect(response).to have_http_status(:redirect)
+      end
+    end
+  end
+
+  describe "POST /live_trading_sessions/emergency_stop" do
+    let!(:running_a) do
+      LiveTrading::Session.create!(
+        strategy_definition: definition, strategy_revision: revision, risk_policy_id: risk_policy.id,
+        symbol: "BTCUSDT", leverage: 10, margin_mode: "isolated", position_mode: "one_way_mode",
+        asset_mode: "single", margin_coin: "USDT", emergency_stop_mode: "cancel_only",
+        status: "running"
+      )
+    end
+    let!(:running_b) do
+      LiveTrading::Session.create!(
+        strategy_definition: definition, strategy_revision: revision, risk_policy_id: risk_policy.id,
+        symbol: "BTCUSDT", leverage: 10, margin_mode: "isolated", position_mode: "one_way_mode",
+        asset_mode: "single", margin_coin: "USDT", emergency_stop_mode: "cancel_only",
+        status: "running"
+      )
+    end
+
+    subject { post emergency_stop_live_trading_sessions_path, params: { mode: "cancel_only" } }
+
+    it "全 running session を stopping に遷移 + 一覧リダイレクト + notice" do
+      subject
+      expect(response).to have_http_status(:redirect)
+      expect(running_a.reload.state_stopping?).to be true
+      expect(running_b.reload.state_stopping?).to be true
+    end
+  end
 end

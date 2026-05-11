@@ -43,6 +43,23 @@ class LiveTradingSessionsController < ApplicationController
     redirect_to new_live_trading_session_path, alert: e.message
   end
 
+  # Phase 3.4b Step 3.4-10: 単一 session 停止(kill-switch シグナル送信)
+  def stop
+    session = service.stop(session_id: params[:id].to_i, mode: params[:mode])
+    redirect_to live_trading_session_path(session), notice: "停止シグナルを送信しました"
+  rescue ActiveRecord::RecordNotFound => e
+    redirect_to live_trading_sessions_path, alert: e.message
+  rescue LiveTrading::Session::InvalidTransitionError => e
+    redirect_to live_trading_session_path(params[:id]), alert: e.message
+  end
+
+  # Phase 3.4b Step 3.4-10: 全 running session 一斉停止(緊急停止)
+  def emergency_stop
+    sessions = service.emergency_stop(mode: params[:mode])
+    redirect_to live_trading_sessions_path,
+                notice: "#{sessions.size} セッションに緊急停止シグナルを送信しました"
+  end
+
   private
 
   def service

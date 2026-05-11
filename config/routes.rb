@@ -57,7 +57,12 @@ Rails.application.routes.draw do
   end
 
   # Phase 3.4b Step 3.4-9 / 3.4-10: LiveTrading::Session UI ルート
-  resources :live_trading_sessions, only: %i[index show new create]
+  resources :live_trading_sessions, only: %i[index show new create] do
+    post :stop, on: :member
+    collection do
+      post :emergency_stop
+    end
+  end
 
   # Defines the root path route ("/")
   root "backtesting_runs#index"
