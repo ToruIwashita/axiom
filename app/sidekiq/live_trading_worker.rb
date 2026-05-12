@@ -810,10 +810,27 @@ class LiveTradingWorker
     ]
   end
 
+  # Bitget V2 Private WS の channel 別パラメータ仕様:
+  # - symbol-scoped(orders / orders-algo / fill): inst_id = session.symbol
+  # - position-scoped(positions / positions-history): inst_id = "default"(全 symbol 購読)
+  # - account-scoped(account): coin = "default"(全 coin 購読 / instId ではなく coin パラメータ)
+  SYMBOL_SCOPED_PRIVATE_CHANNELS = %w[orders orders-algo fill].freeze
+  POSITION_SCOPED_PRIVATE_CHANNELS = %w[positions positions-history].freeze
+  ACCOUNT_COIN_PRIVATE_CHANNELS = %w[account].freeze
+  private_constant :SYMBOL_SCOPED_PRIVATE_CHANNELS, :POSITION_SCOPED_PRIVATE_CHANNELS,
+                   :ACCOUNT_COIN_PRIVATE_CHANNELS
+
   def private_subscriptions(session)
-    %w[orders orders-algo fill positions positions-history account].map do |channel|
+    subs = SYMBOL_SCOPED_PRIVATE_CHANNELS.map do |channel|
       Infrastructure::BitgetPrivateWsSubscription.new(channel: channel, inst_type: "USDT-FUTURES", inst_id: session.symbol)
     end
+    subs += POSITION_SCOPED_PRIVATE_CHANNELS.map do |channel|
+      Infrastructure::BitgetPrivateWsSubscription.new(channel: channel, inst_type: "USDT-FUTURES", inst_id: "default")
+    end
+    subs += ACCOUNT_COIN_PRIVATE_CHANNELS.map do |channel|
+      Infrastructure::BitgetPrivateWsSubscription.new(channel: channel, inst_type: "USDT-FUTURES", coin: "default")
+    end
+    subs
   end
 
   # step 11: reconciliation(starting → reconciling 遷移 + 5 件 REST 突合 + 結果集約).

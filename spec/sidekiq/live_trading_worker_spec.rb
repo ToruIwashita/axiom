@@ -236,11 +236,22 @@ RSpec.describe LiveTradingWorker do
         worker.perform(session.id)
 
         expect(private_ws).to have_received(:subscribe).exactly(6).times
-        %w[orders orders-algo fill positions positions-history account].each do |channel|
+        # symbol-scoped(orders / orders-algo / fill)は inst_id = symbol
+        %w[orders orders-algo fill].each do |channel|
           expect(private_ws).to have_received(:subscribe).with(
             an_object_having_attributes(channel: channel, inst_type: "USDT-FUTURES", inst_id: "BTCUSDT")
           )
         end
+        # position-scoped(positions / positions-history)は inst_id = "default"
+        %w[positions positions-history].each do |channel|
+          expect(private_ws).to have_received(:subscribe).with(
+            an_object_having_attributes(channel: channel, inst_type: "USDT-FUTURES", inst_id: "default")
+          )
+        end
+        # account-scoped(account)は coin = "default"(instId ではなく coin パラメータ)
+        expect(private_ws).to have_received(:subscribe).with(
+          an_object_having_attributes(channel: "account", inst_type: "USDT-FUTURES", coin: "default", inst_id: nil)
+        )
         expect(private_ws).to have_received(:connect)
       end
     end

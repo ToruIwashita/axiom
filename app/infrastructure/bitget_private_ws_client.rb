@@ -329,11 +329,21 @@ module Infrastructure
     end
 
     def lookup_callback(arg)
-      subscription = Infrastructure::BitgetPrivateWsSubscription.new(
-        channel: arg["channel"],
-        inst_type: arg["instType"],
-        inst_id: arg["instId"]
-      )
+      # Bitget V2: account channel push は instId ではなく coin を含む.
+      subscription =
+        if arg.key?("coin")
+          Infrastructure::BitgetPrivateWsSubscription.new(
+            channel: arg["channel"],
+            inst_type: arg["instType"],
+            coin: arg["coin"]
+          )
+        else
+          Infrastructure::BitgetPrivateWsSubscription.new(
+            channel: arg["channel"],
+            inst_type: arg["instType"],
+            inst_id: arg["instId"]
+          )
+        end
       mutex.synchronize { subscriptions[subscription] }
     rescue ArgumentError => e
       logger.warn("[BitgetPrivateWsClient] invalid push arg: #{arg.inspect} (#{e.message})")
