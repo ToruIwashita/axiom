@@ -3,8 +3,13 @@ module ApplicationServices
   # アプリケーション層サービス(設計書 02_§5.2.4 / 05_§1.5.1).
   #
   # トランザクション境界は各メソッド = 1 トランザクション(AR 暗黙 transaction).
-  # `LiveTradingWorker.perform_async` は `enqueue_after_transaction_commit = :always` 既設定
-  # により Session 作成 commit 後に enqueue 保証される.
+  # `LiveTradingWorker` は `Sidekiq::Job` を直接 include しているため,ActiveJob 配下の
+  # `enqueue_after_transaction_commit = :always` は適用されない. 現状 `start_session` は
+  # `create!` を明示 transaction で包んでいないため,`create!` 単体の暗黙 commit 後に
+  # `perform_async` が呼ばれる順序関係で Worker 側の `find` が成立している.
+  # 将来 `LiveTrading::Session.transaction do ... end` で create! を外側 transaction に
+  # 包む場合は,Sidekiq client middleware 等で commit 後 enqueue を別途設計する必要がある
+  # (Phase 3 末 multi-agent review #10 反映: ActiveJob 設定が未適用な事実の明示).
   class LiveTradingSessionService
     # ライブトレードセッションを開始する.
     #
