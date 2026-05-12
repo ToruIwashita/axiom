@@ -20,9 +20,13 @@ module LiveTrading
 
     # Lease を取得する(設計書 05_§7.2: lease TTL 5 分推奨)
     # Phase 3.1 レビュー R-4 反映: idempotent 化
+    # Phase 3 hotfix(A-3 / Demo E2E session #9 で実観測):
+    #   2 worker による同時 acquire! 時の race window 補完
+    #   (find_by → 両方 nil → 両方 create! → 片方 RecordNotUnique)
     # - 既存 released / expired レコード,または期限切れ active があれば update! で再利用
     # - 既存 active かつ期限内なら ActiveLeaseError raise(二重起動防止)
     # - 既存レコードがなければ新規 create!
+    # - create! が RecordNotUnique で失敗した場合は再度 find_by して既存判定経路に合流
     #
     # @param session_id [Integer] LiveTrading::Session の ID
     # @param worker_instance_id [String] Worker プロセス識別子
@@ -41,18 +45,28 @@ module LiveTrading
       }
 
       existing = find_by(live_trading_session_id: session_id)
-      if existing
-        if existing.state_active? && !existing.expired?(now: acquired_at)
-          raise ActiveLeaseError,
-                "session #{session_id} already has active lease (worker=#{existing.worker_instance_id})"
-        end
+      return apply_to_existing!(existing, attrs, session_id, acquired_at) if existing
 
-        existing.update!(attrs)
-        return existing
+      begin
+        create!(attrs.merge(live_trading_session_id: session_id))
+      rescue ActiveRecord::RecordNotUnique
+        # 同時 acquire race: 他 worker が先に create! 成功 → 既存 active 想定で経路合流
+        racing_existing = find_by(live_trading_session_id: session_id)
+        raise ActiveLeaseError,
+              "session #{session_id} already has active lease (worker=#{racing_existing&.worker_instance_id})"
+      end
+    end
+
+    def self.apply_to_existing!(existing, attrs, session_id, acquired_at)
+      if existing.state_active? && !existing.expired?(now: acquired_at)
+        raise ActiveLeaseError,
+              "session #{session_id} already has active lease (worker=#{existing.worker_instance_id})"
       end
 
-      create!(attrs.merge(live_trading_session_id: session_id))
+      existing.update!(attrs)
+      existing
     end
+    private_class_method :apply_to_existing!
 
     # active かつ有効期限内の Lease を返すスコープ
     #

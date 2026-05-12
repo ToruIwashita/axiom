@@ -269,6 +269,35 @@ RSpec.describe LiveTrading::SessionLease, type: :model do
         expect { subject }.to raise_error(described_class::ActiveLeaseError)
       end
     end
+
+    # Phase 3 hotfix(A-3 / Demo E2E session #9 で実観測):
+    # 2 worker が同時に find_by → 両方 nil 判定 → 両方 create! → 片方 RecordNotUnique → 連鎖
+    # rescue で経路合流させて ActiveLeaseError に統一する.
+    context "同時 acquire race(create! で RecordNotUnique 発生)" do
+      let(:session_id) { session.id }
+
+      before do
+        # 既存 lease 無しを模擬しつつ create! で RecordNotUnique を発火させる
+        allow(described_class).to receive(:find_by)
+          .with(live_trading_session_id: session_id).and_return(nil, double_existing_active_lease)
+        allow(described_class).to receive(:create!)
+          .and_raise(ActiveRecord::RecordNotUnique, "Duplicate entry")
+      end
+
+      let(:double_existing_active_lease) do
+        instance_double(described_class, worker_instance_id: "worker-winner")
+      end
+
+      it "ActiveLeaseError に統一して raise(他 worker が先に成功 → 既存 active 想定経路に合流)" do
+        expect {
+          described_class.acquire!(
+            session_id: session_id,
+            worker_instance_id: "worker-loser",
+            acquired_at: now
+          )
+        }.to raise_error(described_class::ActiveLeaseError, /worker=worker-winner/)
+      end
+    end
   end
 
   describe "#renew!" do
