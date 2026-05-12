@@ -117,27 +117,38 @@ module Domain
       true
     end
 
+    # Bitget V2 で orders-plan-pending は planType ごとに分かれているため,
+    # kill-switch では全 planType を iterate して cancel する.
+    # 1 つでも fetch 失敗があれば false 返却(致命扱い).
     def cancel_all_pending_plan_orders(session)
-      response = fetch_or_log(:orders_plan_pending) do
-        order_endpoint.orders_plan_pending(symbol: session.symbol)
-      end
-      return false if response.nil?
+      all_succeeded = true
+      Infrastructure::BitgetOrderEndpoint::PLAN_TYPES.each do |plan_type|
+        response = fetch_or_log(:orders_plan_pending, plan_type: plan_type) do
+          order_endpoint.orders_plan_pending(plan_type: plan_type, symbol: session.symbol)
+        end
+        if response.nil?
+          all_succeeded = false
+          next
+        end
 
-      extract_data_array(response).each do |plan|
-        order_id = plan.is_a?(Hash) ? plan["orderId"] : nil
-        next if order_id.nil?
+        extract_data_array(response).each do |plan|
+          order_id = plan.is_a?(Hash) ? plan["orderId"] : nil
+          next if order_id.nil?
 
-        cancel_individual_order(:cancel_plan_order, session: session, order_id: order_id)
+          cancel_individual_order(:cancel_plan_order, session: session, order_id: order_id)
+        end
       end
-      true
+      all_succeeded
     end
 
     # API 取得自体の失敗(致命)を logger.error + nil 返却で表現する共通 helper.
-    def fetch_or_log(label)
+    # 追加コンテキスト(planType 等)があれば context 引数で渡す.
+    def fetch_or_log(label, **context)
       yield
     rescue StandardError => e
+      ctx_str = context.empty? ? "" : " (#{context.map { |k, v| "#{k}=#{v}" }.join(', ')})"
       logger.error(
-        "[KillSwitchExecutorService] #{label} fetch failed: " \
+        "[KillSwitchExecutorService] #{label} fetch failed#{ctx_str}: " \
         "#{e.class.name}: #{Domain::FailureReasonSanitizer.sanitize(e.message)}"
       )
       nil

@@ -34,11 +34,15 @@ module Domain
     # @param order_endpoint [Infrastructure::BitgetOrderEndpoint] orders_pending / orders_plan_pending / orders_plan_history
     # @param position_endpoint [Infrastructure::BitgetPositionEndpoint] position_all
     # @param account_endpoint [Infrastructure::BitgetAccountEndpoint] fill_history
+    # @param paptrading_enabled [Boolean] Bitget paper trading mode フラグ.true の場合 fill_history は skip
+    #   (Bitget paper trading は /api/v2/mix/order/fill-history が "Request URL NOT FOUND" を返す未対応 endpoint)
     # @param logger [Logger] 部分失敗 warn / 各 reconcile 失敗 warn の出力先
-    def initialize(order_endpoint:, position_endpoint:, account_endpoint:, logger: Rails.logger)
+    def initialize(order_endpoint:, position_endpoint:, account_endpoint:,
+                   paptrading_enabled: false, logger: Rails.logger)
       @order_endpoint = order_endpoint
       @position_endpoint = position_endpoint
       @account_endpoint = account_endpoint
+      @paptrading_enabled = paptrading_enabled
       @logger = logger
     end
 
@@ -67,7 +71,7 @@ module Domain
 
     private
 
-    attr_reader :order_endpoint, :position_endpoint, :account_endpoint, :logger
+    attr_reader :order_endpoint, :position_endpoint, :account_endpoint, :paptrading_enabled, :logger
 
     def collect_reconciliation_results(session)
       {
@@ -114,26 +118,38 @@ module Domain
       nil
     end
 
+    # Bitget V2 で planType ごとに分岐するため全 PLAN_TYPES を iterate.
+    # 1 件でも raise したら nil 返却(部分失敗扱い).
     def reconcile_orders_plan_pending(session)
-      response = order_endpoint.orders_plan_pending(symbol: session.symbol)
-      # TODO(後続 phase): response["data"] から Exchange::AlgoOrder upsert
+      responses = {}
+      Infrastructure::BitgetOrderEndpoint::PLAN_TYPES.each do |plan_type|
+        responses[plan_type] = order_endpoint.orders_plan_pending(
+          plan_type: plan_type, symbol: session.symbol
+        )
+      end
+      # TODO(後続 phase): 各 planType の response["data"] から Exchange::AlgoOrder upsert
       #   + 各 plan_id について order_endpoint.plan_sub_order(plan_id:) を呼んで sub-order を反映
-      response
+      responses
     rescue StandardError => e
       log_reconcile_failure(:reconcile_orders_plan_pending, e)
       nil
     end
 
     # 直近 24h の履歴 plan order を取得する(MVP デフォルト範囲 / 設計書明示なしのため固定値).
+    # planType ごとに iterate.
     def reconcile_orders_plan_history(session)
       end_time = (Time.current.to_f * 1000).to_i
       start_time = end_time - PLAN_HISTORY_LOOKBACK_MS
 
-      response = order_endpoint.orders_plan_history(
-        symbol: session.symbol, start_time: start_time, end_time: end_time
-      )
-      # TODO(後続 phase): response["data"] から AlgoOrder 履歴 upsert
-      response
+      responses = {}
+      Infrastructure::BitgetOrderEndpoint::PLAN_TYPES.each do |plan_type|
+        responses[plan_type] = order_endpoint.orders_plan_history(
+          plan_type: plan_type, symbol: session.symbol,
+          start_time: start_time, end_time: end_time
+        )
+      end
+      # TODO(後続 phase): 各 planType の response["data"] から AlgoOrder 履歴 upsert
+      responses
     rescue StandardError => e
       log_reconcile_failure(:reconcile_orders_plan_history, e)
       nil
@@ -149,7 +165,13 @@ module Domain
     end
 
     # Phase 3.4-pre-4 追加: 直近 24h の約定履歴を取得(WS fill push 欠落分の補完).
+    # Bitget paper trading では fill-history endpoint が未対応のため skip + info log.
     def reconcile_fill_history(session)
+      if paptrading_enabled
+        logger.info("[ReconciliationCoordinator] reconcile_fill_history skipped (paptrading mode / endpoint not supported)")
+        return :skipped
+      end
+
       end_time = (Time.current.to_f * 1000).to_i
       start_time = end_time - PLAN_HISTORY_LOOKBACK_MS
 

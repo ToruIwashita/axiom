@@ -886,6 +886,7 @@ class LiveTradingWorker
       order_endpoint: order_endpoint,
       position_endpoint: position_endpoint,
       account_endpoint: account_endpoint,
+      paptrading_enabled: bitget_paptrading_enabled?,
       logger: logger
     )
   end
@@ -969,7 +970,8 @@ class LiveTradingWorker
     @rest_client ||= Infrastructure::BitgetRestClient.new(
       api_key: bitget_credentials.fetch(:api_key),
       secret_key: bitget_credentials.fetch(:secret_key),
-      passphrase: bitget_credentials.fetch(:passphrase)
+      passphrase: bitget_credentials.fetch(:passphrase),
+      paptrading_enabled: bitget_paptrading_enabled?
     )
   end
 

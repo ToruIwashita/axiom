@@ -91,6 +91,47 @@ RSpec.describe Domain::KillSwitchExecutorService do
       end
     end
 
+    # Phase 3.4b E2E 発見: V2 で orders-plan-pending は planType ごとに分かれる.
+    context "Bitget V2: orders_plan_pending を全 PLAN_TYPES で iterate" do
+      before do
+        allow(order_endpoint).to receive(:orders_plan_pending)
+          .with(plan_type: "normal_plan", symbol: "BTCUSDT")
+          .and_return("data" => [ { "orderId" => "p-normal-1" } ])
+        allow(order_endpoint).to receive(:orders_plan_pending)
+          .with(plan_type: "profit_loss", symbol: "BTCUSDT")
+          .and_return("data" => [ { "orderId" => "p-tpsl-1" } ])
+        allow(order_endpoint).to receive(:orders_plan_pending)
+          .with(plan_type: "track_plan", symbol: "BTCUSDT")
+          .and_return("data" => [ { "orderId" => "p-track-1" } ])
+      end
+
+      it "PLAN_TYPES 各値ごとに orders_plan_pending を呼び全 plan を cancel する" do
+        expect(order_endpoint).to receive(:cancel_plan_order).with(symbol: "BTCUSDT", order_id: "p-normal-1")
+        expect(order_endpoint).to receive(:cancel_plan_order).with(symbol: "BTCUSDT", order_id: "p-tpsl-1")
+        expect(order_endpoint).to receive(:cancel_plan_order).with(symbol: "BTCUSDT", order_id: "p-track-1")
+
+        expect(service.execute(session: session, mode: :cancel_only)).to eq(:stopped)
+
+        # 各 planType の orders_plan_pending が呼ばれたことを確認(before allow stub の呼出)
+        Infrastructure::BitgetOrderEndpoint::PLAN_TYPES.each do |pt|
+          expect(order_endpoint).to have_received(:orders_plan_pending).with(plan_type: pt, symbol: "BTCUSDT")
+        end
+      end
+
+      it "1 つの planType の取得が raise しても残 planType の処理は継続(:halted 返却)" do
+        allow(order_endpoint).to receive(:orders_plan_pending)
+          .with(plan_type: "profit_loss", symbol: "BTCUSDT")
+          .and_raise(Infrastructure::BitgetApiError, "Parameter verification failed")
+
+        # 残りの planType は呼ばれて cancel_plan_order が呼ばれる
+        expect(order_endpoint).to receive(:cancel_plan_order).with(symbol: "BTCUSDT", order_id: "p-normal-1")
+        expect(order_endpoint).to receive(:cancel_plan_order).with(symbol: "BTCUSDT", order_id: "p-track-1")
+
+        # plan 全件 fetch 出来なかったので :halted (cancel_all_pending_plan_orders が false 返却)
+        expect(service.execute(session: session, mode: :cancel_only)).to eq(:halted)
+      end
+    end
+
     context "個別 cancel_order が API エラーで raise した場合(部分失敗)" do
       before do
         allow(order_endpoint).to receive(:orders_pending).and_return(

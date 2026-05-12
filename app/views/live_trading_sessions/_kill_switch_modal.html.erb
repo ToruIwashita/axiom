@@ -1,7 +1,7 @@
-<%# Phase 3.4b Step 3.4-11: kill-switch モード選択モーダル partial.
-    呼出側: <%= render "kill_switch_modal", session: session %>
-    Step 3.4-13 で Stimulus(kill_switch_modal_controller.js)による開閉制御が付与される.
-    現状は <details>/<summary> ベースの自然開閉に簡略化(JS 無しでも動作確保). %>
+<%# Phase 3.4b Step 3.4-11: kill-switch モード選択モーダル partial. %>
+<%# 呼出側: render "kill_switch_modal", session: session %>
+<%# Step 3.4-13 で Stimulus(kill_switch_modal_controller.js)による開閉制御が付与される. %>
+<%# 現状は details / summary ベースの自然開閉に簡略化(JS 無しでも動作確保). %>
 <details data-controller="kill-switch-modal"
          data-kill-switch-modal-session-id-value="<%= session.id %>"
          class="kill-switch-modal">

@@ -221,32 +221,53 @@ RSpec.describe Infrastructure::BitgetOrderEndpoint do
   end
 
   describe "#orders_plan_pending" do
-    it "GET orders-plan-pending に productType を送信" do
+    it "GET orders-plan-pending に productType + planType を送信(V2 で planType 必須)" do
       expect(rest_client).to receive(:request).with(
         :get,
         "/api/v2/mix/order/orders-plan-pending",
-        params: { productType: "usdt-futures" },
+        params: { productType: "usdt-futures", planType: "normal_plan" },
         auth: true,
         endpoint_key: :orders_plan_pending
       ).and_return({ "data" => [] })
-      endpoint.orders_plan_pending
+      endpoint.orders_plan_pending(plan_type: "normal_plan")
+    end
+
+    it "plan_type が PLAN_TYPES 外の場合 ArgumentError を raise する" do
+      expect {
+        endpoint.orders_plan_pending(plan_type: "invalid_plan")
+      }.to raise_error(ArgumentError, /plan_type must be one of/)
     end
   end
 
   describe "#orders_plan_history" do
-    it "GET orders-plan-history に startTime / endTime を送信" do
+    it "GET orders-plan-history に startTime / endTime + planType を送信" do
       expect(rest_client).to receive(:request).with(
         :get,
         "/api/v2/mix/order/orders-plan-history",
         params: {
           productType: "usdt-futures",
+          planType: "normal_plan",
           startTime: 1_700_000_000_000,
           endTime: 1_700_000_999_999
         },
         auth: true,
         endpoint_key: :orders_plan_history
       ).and_return({ "data" => [] })
-      endpoint.orders_plan_history(start_time: 1_700_000_000_000, end_time: 1_700_000_999_999)
+      endpoint.orders_plan_history(
+        plan_type: "normal_plan",
+        start_time: 1_700_000_000_000,
+        end_time: 1_700_000_999_999
+      )
+    end
+
+    it "plan_type が PLAN_TYPES 外の場合 ArgumentError を raise する" do
+      expect {
+        endpoint.orders_plan_history(
+          plan_type: "bogus",
+          start_time: 1_700_000_000_000,
+          end_time: 1_700_000_999_999
+        )
+      }.to raise_error(ArgumentError, /plan_type must be one of/)
     end
   end
 
