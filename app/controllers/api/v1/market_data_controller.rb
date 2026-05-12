@@ -6,8 +6,8 @@ module Api
           symbol: params[:symbol],
           data_types: Array(params[:data_types]),
           granularity: params[:granularity],
-          period_from: Time.parse(params[:period_from]),
-          period_to: Time.parse(params[:period_to])
+          period_from: Time.parse(params[:period_from].to_s),
+          period_to: Time.parse(params[:period_to].to_s)
         )
         render json: { results: results }
       rescue ArgumentError => e

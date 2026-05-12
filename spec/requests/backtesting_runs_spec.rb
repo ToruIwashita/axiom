@@ -97,6 +97,30 @@ RSpec.describe "BacktestingRuns(View)", type: :request do
         .and have_enqueued_job(BacktestExecutionJob)
       expect(response).to have_http_status(:redirect)
     end
+
+    # Phase 3 末 multi-agent review #8 反映: Time.parse(nil) で TypeError → 500 回避
+    context "period_from が nil の場合(`Time.parse(nil)` を防御)" do
+      subject do
+        post strategy_definition_backtesting_runs_path(definition), params: {
+          backtesting_run: {
+            strategy_revision_id: approved_revision.id,
+            risk_policy_id: risk_policy.id,
+            symbol: "BTCUSDT",
+            granularity: "1H",
+            period_from: nil,
+            period_to: "2026-01-31T00:00:00Z",
+            fee_rate: "0.001",
+            slippage_rate: "0.0005"
+          }
+        }
+      end
+
+      it "Run 作成せず ArgumentError 経由で redirect + flash alert(500 化しない)" do
+        expect { subject }.not_to change { Backtesting::Run.count }
+        expect(response).to have_http_status(:redirect)
+        expect(flash[:alert]).to be_present
+      end
+    end
   end
 
   describe "POST /backtesting_runs/:id/cancel" do
