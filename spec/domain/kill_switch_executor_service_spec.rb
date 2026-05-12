@@ -617,6 +617,35 @@ RSpec.describe Domain::KillSwitchExecutorService do
         expect(logger).to have_received(:warn).with(/modify_order failed/)
       end
     end
+
+    # Phase 3 末 multi-agent review #7 反映:
+    # modify 失敗 → cancel も失敗した場合に新規 place_order を skip して二重発注を回避.
+    context "modify_order 失敗後 cancel_order も失敗した場合(二重発注リスク回避)" do
+      before do
+        allow(position_endpoint).to receive(:position_all).and_return(
+          "data" => [ { "symbol" => "BTCUSDT", "holdSide" => "long", "total" => "0.05", "markPrice" => "50000" } ]
+        )
+        # 初回 place_order は成功 → existing_order_id を返す
+        # 2 回目以降は modify_order を試行 → raise → cancel_order も raise
+        place_count = 0
+        allow(order_endpoint).to receive(:place_order) do
+          place_count += 1
+          { "data" => { "orderId" => "ro-#{place_count}" } }
+        end
+        allow(order_endpoint).to receive(:modify_order).and_raise(StandardError, "modify failed")
+        allow(order_endpoint).to receive(:cancel_order).and_raise(StandardError, "cancel also failed")
+        allow(order_endpoint).to receive(:close_positions)
+      end
+
+      it "cancel 失敗時は新規 place_order を呼ばず logger.error + 既存 order_id 維持で次 iteration へ" do
+        custom_params = params.merge(max_follow_iterations: 3, fallback_after_sec: 10_000)
+        # place_order は初回 1 回のみ呼ばれる(2 回目以降の修正経路で skip される)
+        service.execute(session: session, mode: :cancel_and_reduce_only, params: custom_params)
+        expect(order_endpoint).to have_received(:place_order).once
+        expect(logger).to have_received(:error)
+          .with(/cancel failed before place_order.*skipping new reduce_only place/).at_least(:once)
+      end
+    end
   end
 
   describe "#execute(mode: :unknown_mode)" do

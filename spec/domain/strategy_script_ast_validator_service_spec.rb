@@ -310,5 +310,82 @@ RSpec.describe Domain::StrategyScriptAstValidatorService do
         expect(subject.uses_live_forbidden_input).to be true
       end
     end
+
+    # Phase 3 末 multi-agent review #4 反映: Symbol#to_proc 経由のリフレクションバイパス遮断
+    %i[send eval __send__ public_send define_method method_missing instance_eval module_eval
+       const_get const_set exec system open fork spawn exit at_exit trap to_proc].each do |sym|
+      context "リフレクションバイパス: &:#{sym} (Symbol#to_proc 経由)" do
+        let(:script_content) do
+          <<~RUBY
+            class Foo < Domain::TradingScriptBase
+              def on_tick(ctx, candle)
+                [ctx].each(&:#{sym})
+              end
+            end
+          RUBY
+        end
+
+        it "failed を返す(Symbol literal が DANGEROUS_SYMBOL_LITERALS と一致)" do
+          expect(subject.status).to eq(:failed)
+          expect(subject.report).to include("forbidden symbol literal: :#{sym}")
+        end
+      end
+    end
+
+    context "Symbol literal が許可対象(`:long` 等)の場合" do
+      let(:script_content) do
+        <<~RUBY
+          class Foo < Domain::TradingScriptBase
+            def on_tick(ctx, candle)
+              ctx.order.entry(side: :long, size: 0.001, order_type: :market)
+            end
+          end
+        RUBY
+      end
+
+      it "passed を返す(:long / :market 等 通常 Symbol は許可)" do
+        expect(subject.status).to eq(:passed)
+      end
+    end
+
+    # Phase 3 末 multi-agent review #5 反映: fork / spawn / exit / abort / at_exit / trap 漏れ補完
+    %i[fork spawn exit exit! abort at_exit trap].each do |meth|
+      context "プロセス制御: #{meth}(receiver-less)" do
+        let(:script_content) do
+          <<~RUBY
+            class Foo < Domain::TradingScriptBase
+              def on_tick(ctx, candle)
+                #{meth}
+              end
+            end
+          RUBY
+        end
+
+        it "failed を返す" do
+          expect(subject.status).to eq(:failed)
+          expect(subject.report).to include("forbidden method: #{meth}")
+        end
+      end
+    end
+
+    # Phase 3 末 multi-agent review #5 反映: 任意オブジェクト復元 / DoS の漏れ補完
+    %w[Marshal YAML PStore Tempfile DRb GC Kernel].each do |const|
+      context "任意オブジェクト復元 / DoS: #{const} 経由のメソッド呼び出し" do
+        let(:script_content) do
+          <<~RUBY
+            class Foo < Domain::TradingScriptBase
+              def on_tick(ctx, candle)
+                #{const}.load("payload")
+              end
+            end
+          RUBY
+        end
+
+        it "failed を返す" do
+          expect(subject.status).to eq(:failed)
+          expect(subject.report).to include("forbidden call via constant: #{const}")
+        end
+      end
+    end
   end
 end

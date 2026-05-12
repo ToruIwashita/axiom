@@ -59,20 +59,33 @@ module Domain
 
     private
 
+    # Phase 3 末 multi-agent review #4 + #5 反映:
+    # - fork / spawn / exit 系 / at_exit / trap / sleep / GC を追加(プロセス制御 / 起動経路の遮断)
+    # - to_proc を追加(Symbol#to_proc 経由のリフレクション転送を遮断)
     DANGEROUS_METHOD_NAMES = %i[
       eval instance_eval module_eval class_eval binding
       __send__ send public_send define_method method_missing
       method const_get const_set
       exec system open
       require require_relative load autoload
+      fork spawn exit exit! abort at_exit trap to_proc
     ].to_set.freeze
     private_constant :DANGEROUS_METHOD_NAMES
 
+    # Phase 3 末 multi-agent review #5 反映:
+    # Marshal / YAML / PStore / Tempfile / DRb / GC / Kernel を追加(任意オブジェクト復元 RCE / DoS の遮断)
     DANGEROUS_TOP_CONSTS = %i[
       File Dir IO Pathname Process Thread Fiber Mutex ObjectSpace
       Net Socket TCPSocket UDPSocket URI Faraday HTTP FFI Fiddle
+      Marshal YAML PStore Tempfile DRb GC Kernel
     ].to_set.freeze
     private_constant :DANGEROUS_TOP_CONSTS
+
+    # Phase 3 末 multi-agent review #4 反映:
+    # Symbol literal が `&:method` の引数として使われ DANGEROUS_METHOD_NAMES と一致する場合に
+    # リフレクションバイパスを禁止する.
+    DANGEROUS_SYMBOL_LITERALS = DANGEROUS_METHOD_NAMES.dup.freeze
+    private_constant :DANGEROUS_SYMBOL_LITERALS
 
     DYNAMIC_CLASS_FACTORIES = %i[Class Module].to_set.freeze
     private_constant :DYNAMIC_CLASS_FACTORIES
@@ -105,6 +118,14 @@ module Domain
         return "forbidden namespace: #{root}::*" if root && DANGEROUS_TOP_CONSTS.include?(root)
       when :XSTR, :DXSTR
         return "shell execution literal (backtick or %x{...})"
+      when :SYM
+        # Phase 3 末 multi-agent review #4 反映:
+        # Symbol literal(Ruby 3.x の :SYM node)が DANGEROUS_SYMBOL_LITERALS と一致する場合は
+        # `&:send` / `&:eval` 等のリフレクションバイパス経路として遮断する.
+        sym = node.children.first
+        if sym.is_a?(Symbol) && DANGEROUS_SYMBOL_LITERALS.include?(sym)
+          return "forbidden symbol literal: :#{sym} (reflection bypass)"
+        end
       end
       nil
     end
