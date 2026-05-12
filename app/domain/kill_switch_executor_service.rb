@@ -155,13 +155,19 @@ module Domain
     end
 
     # 個別 cancel 失敗(部分失敗)を logger.warn 落とし + 後続継続させる共通 helper.
+    # Phase 3 末 multi-agent review #7 反映: 戻り値を Boolean 化して呼出側が成功 / 失敗を判定できるようにする
+    # (reduce_only 追従ループでの二重発注リスク回避: cancel 失敗時に新規 place を skip するため).
+    #
+    # @return [Boolean] cancel 成功時 true / 失敗時 false
     def cancel_individual_order(method, session:, order_id:)
       order_endpoint.public_send(method, symbol: session.symbol, order_id: order_id)
+      true
     rescue StandardError => e
       logger.warn(
         "[KillSwitchExecutorService] #{method} failed (order_id=#{order_id}): " \
         "#{e.class.name}: #{Domain::FailureReasonSanitizer.sanitize(e.message)}"
       )
+      false
     end
 
     # cancel_and_reduce_only モード: 全 pending order 取消 + reduce_only 指値追従ループ +
@@ -267,7 +273,17 @@ module Domain
           )
           # 二重発注リスク回避: modify が失敗 → exchange 側に旧 reduce_only 指値が残存しうるため,
           # 新規 place_order の前に必ず cancel して連続注文の重複約定を防ぐ.
-          cancel_individual_order(:cancel_order, session: session, order_id: existing_order_id)
+          # Phase 3 末 multi-agent review #7 反映: cancel 失敗時は新規 place を skip.
+          cancel_succeeded = cancel_individual_order(:cancel_order, session: session, order_id: existing_order_id)
+          unless cancel_succeeded
+            logger.error(
+              "[KillSwitchExecutorService] cancel failed before place_order; " \
+              "skipping new reduce_only place to avoid duplicate order (order_id=#{existing_order_id})"
+            )
+            # 旧 order_id を返却して呼出側に「tracking 維持 + 新規 place 未実行」を伝える.
+            # 次 iteration で再度 modify_order を試みる(回復経路).
+            return existing_order_id
+          end
         end
       end
 
