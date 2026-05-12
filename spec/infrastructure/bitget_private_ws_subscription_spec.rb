@@ -60,19 +60,39 @@ RSpec.describe Infrastructure::BitgetPrivateWsSubscription do
       end
     end
 
-    context "inst_id が空文字の場合" do
+    context "inst_id と coin の両方が空文字の場合" do
       let(:attributes) { valid_attributes.merge(inst_id: "") }
 
       it "ArgumentError を raise する" do
-        expect { subject }.to raise_error(ArgumentError, /inst_id/)
+        expect { subject }.to raise_error(ArgumentError, /inst_id or coin is required/)
       end
     end
 
-    context "inst_id が nil の場合" do
+    context "inst_id と coin の両方が nil の場合" do
       let(:attributes) { valid_attributes.merge(inst_id: nil) }
 
       it "ArgumentError を raise する" do
-        expect { subject }.to raise_error(ArgumentError, /inst_id/)
+        expect { subject }.to raise_error(ArgumentError, /inst_id or coin is required/)
+      end
+    end
+
+    context "inst_id と coin の両方が指定された場合" do
+      let(:attributes) { valid_attributes.merge(coin: "USDT") }
+
+      it "ArgumentError を raise する(mutually exclusive)" do
+        expect { subject }.to raise_error(ArgumentError, /mutually exclusive/)
+      end
+    end
+
+    context "account channel に coin パラメータが渡された場合" do
+      let(:attributes) do
+        { channel: "account", inst_type: "USDT-FUTURES", coin: "default" }
+      end
+
+      it "valid な subscription として作成される" do
+        expect { subject }.not_to raise_error
+        expect(subject.coin).to eq("default")
+        expect(subject.inst_id).to be_nil
       end
     end
   end
@@ -97,6 +117,20 @@ RSpec.describe Infrastructure::BitgetPrivateWsSubscription do
 
       it "instType / channel / instId を返す" do
         expect(subject).to eq(instType: "USDT-FUTURES", channel: "fill", instId: "BTCUSDT")
+      end
+    end
+
+    context "account channel (coin パラメータ)の場合" do
+      subject do
+        described_class.new(
+          channel: "account",
+          inst_type: "USDT-FUTURES",
+          coin: "default"
+        ).to_args_hash
+      end
+
+      it "instId ではなく coin を返す(Bitget V2 account channel 仕様)" do
+        expect(subject).to eq(instType: "USDT-FUTURES", channel: "account", coin: "default")
       end
     end
   end
