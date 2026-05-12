@@ -135,12 +135,23 @@ module Infrastructure
       get(PATH_ORDERS_PENDING, params: params, endpoint_key: :orders_pending)
     end
 
-    # 未トリガー Algo 注文一覧を取得する(reconciliation 用)
+    # Bitget V2 で `orders-plan-pending` / `orders-plan-history` は planType を必須化.
+    # 未指定だと "Parameter verification failed" / "The condition planType is not met" を返す.
+    # demo 実機 probe で動作確認済の planType:
+    # - normal_plan: 通常 trigger order
+    # - profit_loss: TP/SL 統合 plan order
+    # - track_plan: trailing stop
+    PLAN_TYPES = %w[normal_plan profit_loss track_plan].freeze
+
+    # 未トリガー Algo 注文一覧を取得する(reconciliation / kill_switch 用)
     #
+    # @param plan_type [String] PLAN_TYPES 内の値.必須(V2 仕様)
     # @param symbol [String, nil]
     # @return [Hash]
-    def orders_plan_pending(symbol: nil)
-      params = { productType: PRODUCT_TYPE }
+    # @raise [ArgumentError] plan_type が PLAN_TYPES 外の場合
+    def orders_plan_pending(plan_type:, symbol: nil)
+      assert_valid_plan_type!(plan_type)
+      params = { productType: PRODUCT_TYPE, planType: plan_type }
       params[:symbol] = symbol if symbol
       get(PATH_ORDERS_PLAN_PENDING, params: params, endpoint_key: :orders_plan_pending)
     end
@@ -149,11 +160,15 @@ module Infrastructure
     #
     # @param start_time [Integer] Unix ms
     # @param end_time [Integer] Unix ms
+    # @param plan_type [String] PLAN_TYPES 内の値.必須(V2 仕様)
     # @param symbol [String, nil]
     # @return [Hash]
-    def orders_plan_history(start_time:, end_time:, symbol: nil)
+    # @raise [ArgumentError] plan_type が PLAN_TYPES 外の場合
+    def orders_plan_history(start_time:, end_time:, plan_type:, symbol: nil)
+      assert_valid_plan_type!(plan_type)
       params = {
         productType: PRODUCT_TYPE,
+        planType: plan_type,
         startTime: start_time,
         endTime: end_time
       }
@@ -201,6 +216,11 @@ module Infrastructure
     private
 
     attr_reader :rest_client
+
+    def assert_valid_plan_type!(plan_type)
+      return if PLAN_TYPES.include?(plan_type)
+      raise ArgumentError, "plan_type must be one of #{PLAN_TYPES.inspect} but got #{plan_type.inspect}"
+    end
 
     def get(path, params:, endpoint_key:)
       rest_client.request(:get, path, params: params, auth: true, endpoint_key: endpoint_key)

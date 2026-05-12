@@ -1667,4 +1667,62 @@ RSpec.describe LiveTradingWorker do
       end
     end
   end
+
+  # E2E 検証で発見: build_rest_client が paptrading_enabled を渡しておらず,
+  # demo credential で production endpoint を叩いて "exchange environment is incorrect" 失敗.
+  describe "#build_rest_client(Bitget demo paptrading wiring)" do
+    let(:rest_client_double) { instance_double(Infrastructure::BitgetRestClient) }
+    let(:bitget_credentials) do
+      { api_key: "demo_key", secret_key: "demo_secret", passphrase: "demo_pass",
+        paptrading_enabled: paptrading_enabled }
+    end
+
+    before do
+      allow(Rails.application.credentials).to receive(:dig).and_call_original
+      allow(Rails.application.credentials).to receive(:dig).with(:bitget, :api_key).and_return(bitget_credentials[:api_key])
+      allow(Rails.application.credentials).to receive(:dig).with(:bitget, :secret_key).and_return(bitget_credentials[:secret_key])
+      allow(Rails.application.credentials).to receive(:dig).with(:bitget, :passphrase).and_return(bitget_credentials[:passphrase])
+      allow(Rails.application.credentials).to receive(:dig).with(:bitget, :paptrading_enabled).and_return(bitget_credentials[:paptrading_enabled])
+      allow(Infrastructure::BitgetRestClient).to receive(:new).and_return(rest_client_double)
+    end
+
+    context "credentials の paptrading_enabled が true(demo)の場合" do
+      let(:paptrading_enabled) { true }
+
+      it "BitgetRestClient.new に paptrading_enabled: true を渡す" do
+        described_class.new.send(:build_rest_client)
+
+        expect(Infrastructure::BitgetRestClient).to have_received(:new).with(
+          api_key: "demo_key",
+          secret_key: "demo_secret",
+          passphrase: "demo_pass",
+          paptrading_enabled: true
+        )
+      end
+    end
+
+    context "credentials の paptrading_enabled が false(production)の場合" do
+      let(:paptrading_enabled) { false }
+
+      it "BitgetRestClient.new に paptrading_enabled: false を渡す" do
+        described_class.new.send(:build_rest_client)
+
+        expect(Infrastructure::BitgetRestClient).to have_received(:new).with(
+          hash_including(paptrading_enabled: false)
+        )
+      end
+    end
+
+    context "credentials の paptrading_enabled が未設定(nil)の場合" do
+      let(:paptrading_enabled) { nil }
+
+      it "BitgetRestClient.new に paptrading_enabled: false を渡す(== true 比較で false 化)" do
+        described_class.new.send(:build_rest_client)
+
+        expect(Infrastructure::BitgetRestClient).to have_received(:new).with(
+          hash_including(paptrading_enabled: false)
+        )
+      end
+    end
+  end
 end
