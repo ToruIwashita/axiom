@@ -387,5 +387,134 @@ RSpec.describe Domain::StrategyScriptAstValidatorService do
         end
       end
     end
+
+    # Phase 3 末 multi-agent review 2 周目 高 R1 反映: :COLON3 (top-level ::Const) バイパス遮断
+    %w[Marshal YAML PStore Tempfile DRb GC Kernel File Dir IO Net Socket].each do |const|
+      context ":COLON3 経由 RCE バイパス: ::#{const} 経由のメソッド呼び出し" do
+        let(:script_content) do
+          <<~RUBY
+            class Foo < Domain::TradingScriptBase
+              def on_tick(ctx, candle)
+                ::#{const}.load("payload")
+              end
+            end
+          RUBY
+        end
+
+        it "failed を返す(top-level prefix によるバイパスを遮断)" do
+          expect(subject.status).to eq(:failed)
+          expect(subject.report).to include("forbidden call via top-level constant: ::#{const}")
+        end
+      end
+    end
+
+    context ":COLON3 経由 単独参照: ::Marshal" do
+      let(:script_content) do
+        <<~RUBY
+          class Foo < Domain::TradingScriptBase
+            def on_tick(ctx, candle)
+              ::Marshal
+            end
+          end
+        RUBY
+      end
+
+      it "failed を返す(top-level constant 単独参照も遮断)" do
+        expect(subject.status).to eq(:failed)
+        expect(subject.report).to include("forbidden top-level constant: ::Marshal")
+      end
+    end
+
+    context ":COLON3 + COLON2 ネスト: ::Marshal::Foo.load" do
+      let(:script_content) do
+        <<~RUBY
+          class Foo < Domain::TradingScriptBase
+            def on_tick(ctx, candle)
+              ::Marshal::FORMAT_VERSION
+            end
+          end
+        RUBY
+      end
+
+      it "failed を返す(`:COLON3` を root に持つ COLON2 もネームスペース遮断)" do
+        expect(subject.status).to eq(:failed)
+        expect(subject.report).to include("forbidden namespace: Marshal::*")
+      end
+    end
+
+    # Phase 3 末 multi-agent review 2 周目 中 (ii) 反映: Object/BasicObject/Module 経由のメタプロ遮断
+    %w[Object BasicObject Module].each do |const|
+      context "メタプロ経路: #{const}.send(:eval, ...)" do
+        let(:script_content) do
+          <<~RUBY
+            class Foo < Domain::TradingScriptBase
+              def on_tick(ctx, candle)
+                #{const}.const_get(:Marshal).load("x")
+              end
+            end
+          RUBY
+        end
+
+        it "failed を返す(#{const} を介したメタプロ経由 RCE を遮断)" do
+          expect(subject.status).to eq(:failed)
+          expect(subject.report).to include("forbidden call via constant: #{const}")
+        end
+      end
+    end
+
+    # Phase 3 末 multi-agent review 2 周目 高 R2 反映: 動的補間 Symbol (:DSYM) のリフレクションバイパス遮断
+    context "動的補間 Symbol: `:\"#{"#"}{name}_call\"` (:DSYM)" do
+      let(:script_content) do
+        <<~RUBY
+          class Foo < Domain::TradingScriptBase
+            def on_tick(ctx, candle)
+              name = "se"
+              [ctx].each(&:"\#{name}nd")
+            end
+          end
+        RUBY
+      end
+
+      it "failed を返す(動的 Symbol 構築は AI 生成戦略に正当用途無し)" do
+        expect(subject.status).to eq(:failed)
+        expect(subject.report).to include("forbidden dynamic symbol literal")
+      end
+    end
+
+    # Phase 3 末 multi-agent review 2 周目 中 (ix) 反映: COLON2 経由の Marshal::Const 境界 spec
+    context "COLON2 単独参照(top-level prefix 無し): Marshal::FORMAT_VERSION" do
+      let(:script_content) do
+        <<~RUBY
+          class Foo < Domain::TradingScriptBase
+            def on_tick(ctx, candle)
+              Marshal::FORMAT_VERSION
+            end
+          end
+        RUBY
+      end
+
+      it "failed を返す(Marshal:: 名前空間参照も遮断)" do
+        expect(subject.status).to eq(:failed)
+        expect(subject.report).to include("forbidden namespace: Marshal::*")
+      end
+    end
+
+    # Phase 3 末 multi-agent review 2 周目 中 (viii) 反映: 通常 method 呼出経由(obj.to_proc)も検証
+    context "obj.to_proc 経由(:CALL)も DANGEROUS_METHOD_NAMES で遮断" do
+      let(:script_content) do
+        <<~RUBY
+          class Foo < Domain::TradingScriptBase
+            def on_tick(ctx, candle)
+              :send.to_proc.call(ctx)
+            end
+          end
+        RUBY
+      end
+
+      it "failed を返す(`:CALL` 経由 `to_proc` も `DANGEROUS_METHOD_NAMES` で遮断される)" do
+        expect(subject.status).to eq(:failed)
+        expect(subject.report).to include("forbidden")
+      end
+    end
   end
 end
