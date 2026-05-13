@@ -74,17 +74,20 @@ module Domain
 
     # Phase 3 末 multi-agent review #5 反映:
     # Marshal / YAML / PStore / Tempfile / DRb / GC / Kernel を追加(任意オブジェクト復元 RCE / DoS の遮断)
+    # Phase 3 末 multi-agent review 2 周目 中 (ii) 反映:
+    # Object / BasicObject / Module を追加(`Object.const_get` / `BasicObject.send` 等のメタプロ経由遮断)
     DANGEROUS_TOP_CONSTS = %i[
       File Dir IO Pathname Process Thread Fiber Mutex ObjectSpace
       Net Socket TCPSocket UDPSocket URI Faraday HTTP FFI Fiddle
       Marshal YAML PStore Tempfile DRb GC Kernel
+      Object BasicObject Module
     ].to_set.freeze
     private_constant :DANGEROUS_TOP_CONSTS
 
     # Phase 3 末 multi-agent review #4 反映:
     # Symbol literal が `&:method` の引数として使われ DANGEROUS_METHOD_NAMES と一致する場合に
-    # リフレクションバイパスを禁止する.
-    DANGEROUS_SYMBOL_LITERALS = DANGEROUS_METHOD_NAMES.dup.freeze
+    # リフレクションバイパスを禁止する(method 集合と意図的に同期).
+    DANGEROUS_SYMBOL_LITERALS = DANGEROUS_METHOD_NAMES
     private_constant :DANGEROUS_SYMBOL_LITERALS
 
     DYNAMIC_CLASS_FACTORIES = %i[Class Module].to_set.freeze
@@ -113,6 +116,13 @@ module Domain
       when :CONST
         const_name = node.children.first
         return "forbidden constant: #{const_name}" if %i[FFI Fiddle].include?(const_name)
+      when :COLON3
+        # Phase 3 末 multi-agent review 2 周目 高 R1 反映:
+        # top-level `::Const` 形式は `:COLON3` node で表現される.
+        # `::Marshal.load(payload)` のような top-level prefix 経由のバイパスを遮断する.
+        const_name = node.children.first
+        return "forbidden top-level constant: ::#{const_name}" if DANGEROUS_TOP_CONSTS.include?(const_name)
+        return "forbidden top-level constant: ::#{const_name}" if %i[FFI Fiddle].include?(const_name)
       when :COLON2
         root = colon2_root_const(node)
         return "forbidden namespace: #{root}::*" if root && DANGEROUS_TOP_CONSTS.include?(root)
@@ -120,12 +130,17 @@ module Domain
         return "shell execution literal (backtick or %x{...})"
       when :SYM
         # Phase 3 末 multi-agent review #4 反映:
-        # Symbol literal(Ruby 3.x の :SYM node)が DANGEROUS_SYMBOL_LITERALS と一致する場合は
-        # `&:send` / `&:eval` 等のリフレクションバイパス経路として遮断する.
+        # Symbol literal(Ruby 3.x の :SYM node / クォート静的形式 `:"send"` も折り畳まれて :SYM)が
+        # DANGEROUS_SYMBOL_LITERALS と一致する場合は `&:send` 等のリフレクションバイパスとして遮断する.
         sym = node.children.first
         if sym.is_a?(Symbol) && DANGEROUS_SYMBOL_LITERALS.include?(sym)
           return "forbidden symbol literal: :#{sym} (reflection bypass)"
         end
+      when :DSYM
+        # Phase 3 末 multi-agent review 2 周目 高 R2 反映:
+        # 動的補間 Symbol(`:"#{var}_send"` 等)は実行時まで method 名が不明.
+        # AI 生成戦略スクリプトに動的 Symbol 構築の正当用途は無いため全面遮断する.
+        return "forbidden dynamic symbol literal (reflection bypass)"
       end
       nil
     end
@@ -141,20 +156,33 @@ module Domain
         elsif DANGEROUS_TOP_CONSTS.include?(const_name)
           "forbidden call via constant: #{const_name}.#{method_name}"
         end
+      when :COLON3
+        # Phase 3 末 multi-agent review 2 周目 高 R1 反映:
+        # `::Marshal.load(...)` のような top-level prefix 経由の call を遮断する.
+        const_name = receiver.children.first
+        if DYNAMIC_CLASS_FACTORIES.include?(const_name) && method_name == :new
+          "dynamic code generation: ::#{const_name}.new"
+        elsif DANGEROUS_TOP_CONSTS.include?(const_name)
+          "forbidden call via top-level constant: ::#{const_name}.#{method_name}"
+        end
       when :COLON2
         root = colon2_root_const(receiver)
         "forbidden call via namespace: #{root}::*##{method_name}" if root && DANGEROUS_TOP_CONSTS.include?(root)
       end
     end
 
+    # Phase 3 末 multi-agent review 2 周目 中 (i) 反映:
+    # `::Marshal::Foo` のような最深が `:COLON3` のケースでも root を返すよう拡張.
     def colon2_root_const(node)
       return nil unless node.is_a?(RubyVM::AbstractSyntaxTree::Node)
 
       current = node
       current = current.children.first while current.is_a?(RubyVM::AbstractSyntaxTree::Node) && current.type == :COLON2
-      return nil unless current.is_a?(RubyVM::AbstractSyntaxTree::Node) && current.type == :CONST
+      return nil unless current.is_a?(RubyVM::AbstractSyntaxTree::Node)
 
-      current.children.first
+      case current.type
+      when :CONST, :COLON3 then current.children.first
+      end
     end
 
     def live_forbidden_input?(node)

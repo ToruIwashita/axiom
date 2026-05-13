@@ -36,24 +36,27 @@ class BacktestingRunsController < ApplicationController
 
   def create
     @definition = definition_service.get(definition_id: params[:strategy_definition_id].to_i)
+    # Phase 3 末 multi-agent review 2 周目 高 R3 反映:
+    # 親 Hash 自体が nil の場合の NoMethodError → 500 を防ぐため Strong Parameters で require.
+    bt_params = params.require(:backtesting_run)
     run = service.enqueue_backtest(
       definition_id: @definition.id,
-      strategy_revision_id: params[:backtesting_run][:strategy_revision_id].to_i,
-      risk_policy_id: params[:backtesting_run][:risk_policy_id].to_i,
-      symbol: params[:backtesting_run][:symbol],
-      granularity: params[:backtesting_run][:granularity],
-      period_from: Time.parse(params[:backtesting_run][:period_from].to_s),
-      period_to: Time.parse(params[:backtesting_run][:period_to].to_s),
-      fee_rate: BigDecimal(params[:backtesting_run][:fee_rate].to_s),
-      slippage_rate: BigDecimal(params[:backtesting_run][:slippage_rate].to_s),
-      include_funding_rate: params[:backtesting_run][:include_funding_rate] == "1",
-      use_mark_basis: params[:backtesting_run][:use_mark_basis] == "1",
-      use_spot_basis: params[:backtesting_run][:use_spot_basis] == "1"
+      strategy_revision_id: bt_params[:strategy_revision_id].to_i,
+      risk_policy_id: bt_params[:risk_policy_id].to_i,
+      symbol: bt_params[:symbol],
+      granularity: bt_params[:granularity],
+      period_from: Time.parse(bt_params[:period_from].to_s),
+      period_to: Time.parse(bt_params[:period_to].to_s),
+      fee_rate: BigDecimal(bt_params[:fee_rate].to_s),
+      slippage_rate: BigDecimal(bt_params[:slippage_rate].to_s),
+      include_funding_rate: bt_params[:include_funding_rate] == "1",
+      use_mark_basis: bt_params[:use_mark_basis] == "1",
+      use_spot_basis: bt_params[:use_spot_basis] == "1"
     )
     redirect_to backtesting_run_path(run), notice: "Enqueued"
   rescue ActiveRecord::RecordNotFound => e
     redirect_to strategy_definition_path(@definition), alert: e.message
-  rescue ArgumentError => e
+  rescue ArgumentError, ActionController::ParameterMissing => e
     redirect_to new_strategy_definition_backtesting_run_path(@definition), alert: e.message
   end
 

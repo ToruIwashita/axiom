@@ -97,6 +97,27 @@ RSpec.describe "Api::V1::BacktestingRuns", type: :request do
         expect(response).to have_http_status(:not_found)
       end
     end
+
+    # Phase 3 末 multi-agent review 2 周目 高 R4 反映: API V1 側の nil 防御対称性確保
+    context "period_from が nil の場合(`Time.parse(nil)` を防御)" do
+      let(:create_params) { super().merge(period_from: nil) }
+
+      it "400 Bad Request を返す(500 化しない)" do
+        subject
+        expect(response).to have_http_status(:bad_request)
+        expect(response.parsed_body["error"]).to be_present
+      end
+    end
+
+    context "period_to が nil の場合(period_from と対称)" do
+      let(:create_params) { super().merge(period_to: nil) }
+
+      it "400 Bad Request を返す(500 化しない)" do
+        subject
+        expect(response).to have_http_status(:bad_request)
+        expect(response.parsed_body["error"]).to be_present
+      end
+    end
   end
 
   describe "GET /api/v1/backtesting_runs/:id" do

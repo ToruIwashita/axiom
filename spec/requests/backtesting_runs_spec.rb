@@ -121,6 +121,44 @@ RSpec.describe "BacktestingRuns(View)", type: :request do
         expect(flash[:alert]).to be_present
       end
     end
+
+    # Phase 3 末 multi-agent review 2 周目 高 R4 反映(対称性): period_to も同様にガード
+    context "period_to が nil の場合(period_from と対称)" do
+      subject do
+        post strategy_definition_backtesting_runs_path(definition), params: {
+          backtesting_run: {
+            strategy_revision_id: approved_revision.id,
+            risk_policy_id: risk_policy.id,
+            symbol: "BTCUSDT",
+            granularity: "1H",
+            period_from: "2026-01-01T00:00:00Z",
+            period_to: nil,
+            fee_rate: "0.001",
+            slippage_rate: "0.0005"
+          }
+        }
+      end
+
+      it "Run 作成せず redirect + flash alert(500 化しない)" do
+        expect { subject }.not_to change { Backtesting::Run.count }
+        expect(response).to have_http_status(:redirect)
+        expect(flash[:alert]).to be_present
+      end
+    end
+
+    # Phase 3 末 multi-agent review 2 周目 高 R3 反映:
+    # `params[:backtesting_run]` 親 Hash 自体が nil の場合の NoMethodError → 500 を防ぐ.
+    context "backtesting_run キー自体が欠落した場合(親 Hash nil)" do
+      subject do
+        post strategy_definition_backtesting_runs_path(definition), params: {}
+      end
+
+      it "Run 作成せず ParameterMissing 経由で redirect + flash alert(500 化しない)" do
+        expect { subject }.not_to change { Backtesting::Run.count }
+        expect(response).to have_http_status(:redirect)
+        expect(flash[:alert]).to be_present
+      end
+    end
   end
 
   describe "POST /backtesting_runs/:id/cancel" do
