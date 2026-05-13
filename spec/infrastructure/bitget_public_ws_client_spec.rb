@@ -638,6 +638,18 @@ RSpec.describe Infrastructure::BitgetPublicWsClient do
           expect(first_close_idx).to be < first_sleep_idx
         end
       end
+
+      # peer AI sub-commit 1.3 新-中-2 反映: close 例外を吸収して spawn thread の死亡を防ぐ
+      context "旧 ws.close が例外を raise した場合" do
+        before do
+          allow(ws).to receive(:close).and_raise(StandardError, "close failed unexpectedly")
+        end
+
+        it "logger.warn でログ出力し reconnect ループを継続する(spawn thread の死亡防止)" do
+          expect { subject }.not_to raise_error
+          expect(logger).to have_received(:warn).with(a_string_including("old ws close failed", "close failed unexpectedly"))
+        end
+      end
     end
 
     # Phase 4.0 #1 + 低-8 反映 + peer AI sub-commit 1.2 中-2 強化反映:

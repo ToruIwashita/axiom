@@ -371,12 +371,17 @@ module Infrastructure
         break if stop_requested
 
         # 旧 ws を mutex 内で取り外して close 完了待機(race 解消 / sub-commit 1.3 反映)
+        # peer AI 新-中-2 反映: close 自体の例外を吸収して spawn thread の死亡を防ぐ
         old_ws = mutex.synchronize do
           ws_to_abandon = @ws
           @ws = nil
           ws_to_abandon
         end
-        old_ws&.close
+        begin
+          old_ws&.close
+        rescue StandardError => e
+          logger.warn("[BitgetPublicWsClient] old ws close failed: #{e.message}")
+        end
 
         sleep(interval)
         break if stop_requested
