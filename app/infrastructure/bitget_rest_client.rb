@@ -1,11 +1,17 @@
 module Infrastructure
   class BitgetRestClient
     DEFAULT_BASE_URL = "https://api.bitget.com".freeze
+    # Phase 4.0 #3 反映: 5xx ステータス(502 Bad Gateway / 503 Service Unavailable / 504 Gateway Timeout)
+    # を retry 対象に追加. Bitget API のリリース時間帯不安定で例外握りつぶしリスクを解消する.
+    # idempotency 根拠(01_§2.3):
+    #   - POST `place_order`: clientOid 必須(LiveTradingWorker#deterministic_client_oid で生成)→ 二重発注防止
+    #   - POST `cancel_order` / `cancel_plan_order`: order_id / clientOid で既存検索 → 二重キャンセル無害
+    #   - GET 系全般: 完全冪等
     DEFAULT_RETRY_OPTIONS = {
       max: 5,
       interval: 0.5,
       backoff_factor: 2,
-      retry_statuses: [ 429 ],
+      retry_statuses: [ 429, 502, 503, 504 ],
       retry_exceptions: [ Faraday::TimeoutError, Faraday::ConnectionFailed ]
     }.freeze
     RETRYABLE_BITGET_CODES = %w[45001 40725 40808 40015].freeze

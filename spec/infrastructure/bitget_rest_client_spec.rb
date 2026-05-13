@@ -114,6 +114,29 @@ RSpec.describe Infrastructure::BitgetRestClient do
       end
     end
 
+    # Phase 4.0 #3 反映: 5xx ステータス(502 / 503 / 504)も retry 対象に追加
+    [ 502, 503, 504 ].each do |status_code|
+      context "HTTP #{status_code} が返る場合" do
+        subject { client.request(:get, path) }
+
+        before do
+          stub_request(:get, "#{base_url}#{path}").to_return(
+            { status: status_code, body: "" },
+            {
+              status: 200,
+              body: { code: "00000", data: {} }.to_json,
+              headers: { "Content-Type" => "application/json" }
+            }
+          )
+        end
+
+        it "自動リトライして最終的に成功する" do
+          subject
+          expect(WebMock).to have_requested(:get, "#{base_url}#{path}").twice
+        end
+      end
+    end
+
     context "リトライ不可エラー code=40001 の場合" do
       subject { client.request(:get, path) }
 
