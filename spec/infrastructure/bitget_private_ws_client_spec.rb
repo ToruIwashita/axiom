@@ -293,4 +293,61 @@ RSpec.describe Infrastructure::BitgetPrivateWsClient do
       end
     end
   end
+
+  # peer AI sub-commit 1.2 中-1 反映: Private 側でも spawn 経由検証(Public 同等 / 対称性確保)
+  describe "#trigger_reconnect での BackgroundThreadRegistry.spawn 経由起動" do
+    let(:background_thread_registry) { instance_double(Domain::BackgroundThreadRegistry) }
+    let(:client_with_btr) do
+      described_class.new(
+        api_key: "test_api_key",
+        passphrase: "test_passphrase",
+        signer: instance_double(Infrastructure::BitgetSigner, sign: "signed-base64-string"),
+        paptrading_enabled: true,
+        ws_factory: ws_factory,
+        clock: clock,
+        logger: logger,
+        background_thread_registry: background_thread_registry
+      )
+    end
+
+    before do
+      allow(client_with_btr).to receive(:reconnect_with_backoff)
+      allow(background_thread_registry).to receive(:spawn)
+    end
+
+    context "background_thread_registry が DI されている場合" do
+      subject { client_with_btr.send(:trigger_reconnect, :close) }
+
+      it "background_thread_registry.spawn が bitget_private_ws_reconnect label で呼ばれる" do
+        subject
+        expect(background_thread_registry).to have_received(:spawn).with("bitget_private_ws_reconnect")
+      end
+
+      it "trigger_reconnect 自体は reconnect_with_backoff を同期実行しない(callback スレッド即返却)" do
+        subject
+        expect(client_with_btr).not_to have_received(:reconnect_with_backoff)
+      end
+    end
+
+    context "background_thread_registry が nil の場合(LiveTradingWorker DI 接続前 既存挙動互換 / 低-1)" do
+      subject { client.send(:trigger_reconnect, :close) }
+
+      before do
+        allow(client).to receive(:reconnect_with_backoff)
+      end
+
+      it "reconnect_with_backoff を同期実行する(既存挙動維持)" do
+        subject
+        expect(client).to have_received(:reconnect_with_backoff)
+      end
+    end
+
+    context "callback 連続発火しても受信スレッドが健全性を維持する場合(中-2 強化)" do
+      it "handle_disconnection を 5 連続発火しても各々 spawn が呼ばれ callback スレッド即返却" do
+        5.times { client_with_btr.send(:handle_disconnection, :close) }
+        expect(background_thread_registry).to have_received(:spawn)
+          .with("bitget_private_ws_reconnect").exactly(5).times
+      end
+    end
+  end
 end

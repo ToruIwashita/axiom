@@ -394,11 +394,21 @@ module Infrastructure
       end
     end
 
-    # 指数バックオフで再接続 + 自動 login + 既存購読 resubscribe
+    # 指数バックオフで再接続 + 自動 login + 既存購読 resubscribe.
+    # Phase 4.0 #1 sub-commit 1.3 反映: ループ冒頭で旧 ws を mutex 内で取り外し → close 完了待機.
+    # これにより旧 ws と新 ws の race(callback 重複登録 / push 受信ハンドラ重複)を解消する.
     def reconnect_with_backoff
       interval = reconnect_initial_interval
       loop do
         break if stop_requested
+
+        # 旧 ws を mutex 内で取り外して close 完了待機(race 解消 / sub-commit 1.3 反映)
+        old_ws = mutex.synchronize do
+          ws_to_abandon = @ws
+          @ws = nil
+          ws_to_abandon
+        end
+        old_ws&.close
 
         sleep(interval)
         break if stop_requested

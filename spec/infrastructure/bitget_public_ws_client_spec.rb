@@ -640,12 +640,47 @@ RSpec.describe Infrastructure::BitgetPublicWsClient do
       end
     end
 
-    # Phase 4.0 #1 + 低-8 反映: callback 連続発火耐性 race spec
+    # Phase 4.0 #1 + 低-8 反映 + peer AI sub-commit 1.2 中-2 強化反映:
+    # client_with_btr ベースで実 spawn 経由を検証(stub なし / race window 健全性実証)
     describe "callback 連続発火しても受信スレッドが健全性を維持する場合" do
-      it "handle_disconnection を 5 連続発火しても各々 background_thread_registry.spawn 経由で起動され同期ブロックしない" do
-        allow(client).to receive(:trigger_reconnect)
-        5.times { client.send(:handle_disconnection, :close) }
-        expect(client).to have_received(:trigger_reconnect).exactly(5).times
+      let(:background_thread_registry) { instance_double(Domain::BackgroundThreadRegistry) }
+      let(:client_with_btr) do
+        described_class.new(
+          paptrading_enabled: paptrading_enabled,
+          url: url_override,
+          ws_factory: ws_factory,
+          clock: clock,
+          logger: logger,
+          heartbeat_interval: heartbeat_interval,
+          heartbeat_timeout: heartbeat_timeout,
+          reconnect_initial_interval: reconnect_initial_interval,
+          reconnect_max_interval: reconnect_max_interval,
+          background_thread_registry: background_thread_registry
+        )
+      end
+
+      before do
+        allow(background_thread_registry).to receive(:spawn)
+      end
+
+      it "handle_disconnection を 5 連続発火しても各々 background_thread_registry.spawn が呼ばれ callback スレッド即返却" do
+        5.times { client_with_btr.send(:handle_disconnection, :close) }
+        expect(background_thread_registry).to have_received(:spawn)
+          .with("bitget_public_ws_reconnect").exactly(5).times
+      end
+    end
+
+    # 低-1 反映(peer AI sub-commit 1.2 / 任意): default nil 経路の明示的検証
+    describe "background_thread_registry が nil の場合(LiveTradingWorker DI 接続前 既存挙動互換)" do
+      subject { client.send(:trigger_reconnect, :close) }
+
+      before do
+        allow(client).to receive(:reconnect_with_backoff)
+      end
+
+      it "reconnect_with_backoff を同期実行する(既存挙動維持)" do
+        subject
+        expect(client).to have_received(:reconnect_with_backoff)
       end
     end
 
