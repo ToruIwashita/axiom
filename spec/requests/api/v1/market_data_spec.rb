@@ -50,5 +50,42 @@ RSpec.describe "Api::V1::MarketData", type: :request do
         expect(response.parsed_body["error"]).to match(/unsupported data_types/)
       end
     end
+
+    # Phase 3 末 multi-agent review 2 周目 高 R4 反映: nil 防御の API V1 対称性確保
+    context "period_from が nil の場合(`Time.parse(nil)` を防御)" do
+      let(:params) do
+        {
+          symbol: "BTCUSDT",
+          data_types: %w[futures_candles],
+          granularity: "1H",
+          period_from: nil,
+          period_to: "2026-01-31T23:59:59Z"
+        }
+      end
+
+      it "400 Bad Request を返す(500 化しない)" do
+        subject
+        expect(response).to have_http_status(:bad_request)
+        expect(response.parsed_body["error"]).to be_present
+      end
+    end
+
+    context "period_to が nil の場合(period_from と対称)" do
+      let(:params) do
+        {
+          symbol: "BTCUSDT",
+          data_types: %w[futures_candles],
+          granularity: "1H",
+          period_from: "2026-01-01T00:00:00Z",
+          period_to: nil
+        }
+      end
+
+      it "400 Bad Request を返す(500 化しない)" do
+        subject
+        expect(response).to have_http_status(:bad_request)
+        expect(response.parsed_body["error"]).to be_present
+      end
+    end
   end
 end
