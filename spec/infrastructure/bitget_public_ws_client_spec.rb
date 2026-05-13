@@ -408,6 +408,49 @@ RSpec.describe Infrastructure::BitgetPublicWsClient do
           expect(client).not_to have_received(:trigger_reconnect)
         end
       end
+
+      # Phase 4.0 #1 + 新-中-6 反映: handle_disconnection 内で @last_disconnect_reason を記録
+      context "ws.on(:close) callback 発火時に @last_disconnect_reason が記録される場合" do
+        subject { registered_callbacks[:close].call }
+
+        it "last_disconnect_reason reader が :close を返す" do
+          allow(client).to receive(:trigger_reconnect)
+          subject
+          expect(client.last_disconnect_reason).to eq(:close)
+        end
+      end
+
+      context "ws.on(:error) callback 発火時に @last_disconnect_reason が記録される場合" do
+        let(:ws_error) { StandardError.new("ws error") }
+
+        subject { registered_callbacks[:error].call(ws_error) }
+
+        it "last_disconnect_reason reader が :error を返す" do
+          allow(client).to receive(:trigger_reconnect)
+          subject
+          expect(client.last_disconnect_reason).to eq(:error)
+        end
+      end
+
+      context "heartbeat タイムアウト経由で trigger_reconnect が呼ばれた場合の @last_disconnect_reason" do
+        subject { client.send(:handle_disconnection, :heartbeat_timeout) }
+
+        it "last_disconnect_reason reader が :heartbeat_timeout を返す" do
+          allow(client).to receive(:trigger_reconnect)
+          subject
+          expect(client.last_disconnect_reason).to eq(:heartbeat_timeout)
+        end
+      end
+
+      # peer AI レビュー 低-1 反映: Public + Private 対称性確保
+      context "stop_requested=true 状態で handle_disconnection が呼ばれた場合" do
+        it "early return で last_disconnect_reason は更新されない" do
+          client.instance_variable_set(:@stop_requested, true)
+          allow(client).to receive(:trigger_reconnect)
+          client.send(:handle_disconnection, :close)
+          expect(client.last_disconnect_reason).to be_nil
+        end
+      end
     end
 
     describe "#trigger_reconnect(レビュー obs-5 反映: error 引数を logger.warn に含める)" do
@@ -433,6 +476,24 @@ RSpec.describe Infrastructure::BitgetPublicWsClient do
           subject
           expect(logger).to have_received(:warn)
             .with(a_string_including("reconnect triggered: error", "connection reset by peer"))
+        end
+      end
+
+      # Phase 4.0 #1 + 中-1 反映: trigger_reconnect 公開シグネチャ維持 / 内部実装で background_thread_registry.spawn 経由化
+      context "BackgroundThreadRegistry.spawn 経由で reconnect_with_backoff を別スレッド起動する場合" do
+        subject { client.send(:trigger_reconnect, :close) }
+
+        it "background_thread_registry.spawn が適切な label で呼ばれる" do
+          subject
+          expect(background_thread_registry).to have_received(:spawn).with("bitget_public_ws_reconnect")
+        end
+
+        it "trigger_reconnect 自体は reconnect_with_backoff を同期実行しない(callback スレッド即返却)" do
+          # spawn の block 内で reconnect_with_backoff が起動される / 同期実行されない検証
+          subject
+          # outer before で allow(client).to receive(:reconnect_with_backoff) されているが
+          # spawn 経由のため直接呼ばれないことを検証
+          expect(client).not_to have_received(:reconnect_with_backoff)
         end
       end
     end
@@ -536,6 +597,55 @@ RSpec.describe Infrastructure::BitgetPublicWsClient do
           expect(ws_factory).to have_received(:call).at_least(3).times
           # wait_until_open 失敗時に ws.close が呼ばれる(cleanup_ws_after_open_failure 経由)
           expect(ws).to have_received(:close).at_least(:once)
+        end
+      end
+
+      # Phase 4.0 #1 + 高-1.2.4 反映: 冒頭で旧 ws.close 完了待機構造
+      context "冒頭で旧 ws を mutex 内取得して old_ws.close 完了待機してから sleep する場合" do
+        let(:old_ws) { ws }  # connect 時に設定された ws インスタンス
+
+        it "sleep より前に old_ws.close が呼ばれる(順序検証)" do
+          call_order = []
+          allow(old_ws).to receive(:close) { call_order << :close }
+          allow(client).to receive(:sleep) { |sec| call_order << :sleep; sleep_calls << sec }
+          subject
+          # close → sleep の順序(reconnect_with_backoff 冒頭で close → sleep)
+          first_close_idx = call_order.index(:close)
+          first_sleep_idx = call_order.index(:sleep)
+          expect(first_close_idx).not_to be_nil
+          expect(first_sleep_idx).not_to be_nil
+          expect(first_close_idx).to be < first_sleep_idx
+        end
+      end
+    end
+
+    # Phase 4.0 #1 + 低-8 反映: callback 連続発火耐性 race spec
+    describe "callback 連続発火しても受信スレッドが健全性を維持する場合" do
+      it "handle_disconnection を 5 連続発火しても各々 background_thread_registry.spawn 経由で起動され同期ブロックしない" do
+        allow(client).to receive(:trigger_reconnect)
+        5.times { client.send(:handle_disconnection, :close) }
+        expect(client).to have_received(:trigger_reconnect).exactly(5).times
+      end
+    end
+
+    # Phase 4.0 #1 + 新-中-6 反映: @last_disconnect_reason reader
+    describe "#last_disconnect_reason reader" do
+      context "初期状態(切断未発生)" do
+        it "nil を返す" do
+          expect(client.last_disconnect_reason).to be_nil
+        end
+      end
+
+      context "handle_disconnection 発火後" do
+        before do
+          allow(client).to receive(:trigger_reconnect)
+        end
+
+        it "最後に発火した reason を返す(mutex 同期で thread-safe)" do
+          client.send(:handle_disconnection, :close)
+          expect(client.last_disconnect_reason).to eq(:close)
+          client.send(:handle_disconnection, :error, StandardError.new("e"))
+          expect(client.last_disconnect_reason).to eq(:error)
         end
       end
     end

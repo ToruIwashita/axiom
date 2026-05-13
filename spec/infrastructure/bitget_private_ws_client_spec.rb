@@ -244,4 +244,53 @@ RSpec.describe Infrastructure::BitgetPrivateWsClient do
       end
     end
   end
+
+  # Phase 4.0 #1 + 新-中-6 反映: Private 側でも @last_disconnect_reason を記録(Public 同等の対称性)
+  describe "#handle_disconnection 経路の @last_disconnect_reason 記録" do
+    context ":close reason で handle_disconnection を呼んだ場合" do
+      it "last_disconnect_reason reader が :close を返す" do
+        allow(client).to receive(:trigger_reconnect)
+        client.send(:handle_disconnection, :close)
+        expect(client.last_disconnect_reason).to eq(:close)
+      end
+    end
+
+    context ":error reason で handle_disconnection を呼んだ場合" do
+      it "last_disconnect_reason reader が :error を返す" do
+        allow(client).to receive(:trigger_reconnect)
+        client.send(:handle_disconnection, :error, StandardError.new("e"))
+        expect(client.last_disconnect_reason).to eq(:error)
+      end
+    end
+
+    context "stop_requested=true 状態で handle_disconnection が呼ばれた場合" do
+      it "early return で last_disconnect_reason は更新されない" do
+        client.instance_variable_set(:@stop_requested, true)
+        allow(client).to receive(:trigger_reconnect)
+        client.send(:handle_disconnection, :close)
+        expect(client.last_disconnect_reason).to be_nil
+      end
+    end
+  end
+
+  describe "#last_disconnect_reason reader" do
+    context "初期状態(切断未発生)" do
+      it "nil を返す" do
+        expect(client.last_disconnect_reason).to be_nil
+      end
+    end
+
+    context "handle_disconnection 発火後" do
+      before do
+        allow(client).to receive(:trigger_reconnect)
+      end
+
+      it "最後に発火した reason を返す(mutex 同期で thread-safe)" do
+        client.send(:handle_disconnection, :close)
+        expect(client.last_disconnect_reason).to eq(:close)
+        client.send(:handle_disconnection, :error, StandardError.new("e"))
+        expect(client.last_disconnect_reason).to eq(:error)
+      end
+    end
+  end
 end

@@ -39,6 +39,9 @@ module Infrastructure
     # @param heartbeat_timeout [Float] pong 未受信タイムアウト(秒)
     # @param reconnect_initial_interval [Float] 再接続の初期 sleep 秒数
     # @param reconnect_max_interval [Float] 再接続の最大 sleep 秒数(指数バックオフの上限)
+    # @param background_thread_registry [Domain::BackgroundThreadRegistry, nil]
+    #   Phase 4.0 #1 反映: trigger_reconnect が同期実行していた reconnect_with_backoff を
+    #   別スレッドに逃がすための registry. nil 許容(後続の sub-commit 1.2 で必須化予定)
     def initialize(
       paptrading_enabled: false,
       url: nil,
@@ -49,7 +52,8 @@ module Infrastructure
       heartbeat_interval: DEFAULT_HEARTBEAT_INTERVAL,
       heartbeat_timeout: DEFAULT_HEARTBEAT_TIMEOUT,
       reconnect_initial_interval: DEFAULT_RECONNECT_INITIAL_INTERVAL,
-      reconnect_max_interval: DEFAULT_RECONNECT_MAX_INTERVAL
+      reconnect_max_interval: DEFAULT_RECONNECT_MAX_INTERVAL,
+      background_thread_registry: nil
     )
       @paptrading_enabled = paptrading_enabled
       @url_override = url
@@ -61,6 +65,7 @@ module Infrastructure
       @heartbeat_timeout = heartbeat_timeout
       @reconnect_initial_interval = reconnect_initial_interval
       @reconnect_max_interval = reconnect_max_interval
+      @background_thread_registry = background_thread_registry
       @subscriptions = {}
       @ws = nil
       @heartbeat_thread = nil
@@ -68,6 +73,9 @@ module Infrastructure
       @open_event_received = false
       @last_pong_at = nil
       @reconnect_count = 0
+      # Phase 4.0 #1 + 新-中-6 反映: 直近の disconnect 理由を保持し
+      # WsReconnectDetector#snapshot 経由で WsMetric.source_event に転記する
+      @last_disconnect_reason = nil
       @mutex = Mutex.new
     end
 
@@ -77,6 +85,12 @@ module Infrastructure
     # @return [Integer]
     def reconnect_count
       mutex.synchronize { @reconnect_count }
+    end
+
+    # Phase 4.0 #1 + 新-中-6 反映: 直近の disconnect 理由を返す(mutex 同期 / WsReconnectDetector が読む).
+    # @return [Symbol, nil] :close / :error / :heartbeat_timeout / 初期は nil
+    def last_disconnect_reason
+      mutex.synchronize { @last_disconnect_reason }
     end
 
     # WebSocket 接続を確立する。
@@ -318,9 +332,11 @@ module Infrastructure
 
     # ws.on(:close) / ws.on(:error) callback または heartbeat タイムアウトから呼ばれる切断検知ハンドラ。
     # disconnect 中(stop_requested=true)は再接続しない。
+    # Phase 4.0 #1 + 新-中-6 反映: @last_disconnect_reason に reason を記録(WsReconnectDetector が WsMetric.source_event に転記).
     def handle_disconnection(reason, error = nil)
       return if stop_requested
 
+      mutex.synchronize { @last_disconnect_reason = reason }
       trigger_reconnect(reason, error)
     end
 
