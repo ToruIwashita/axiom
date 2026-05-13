@@ -304,7 +304,12 @@ module Infrastructure
       return if last_pong_at.nil?
 
       elapsed = clock.call - last_pong_at
-      trigger_reconnect(:heartbeat_timeout) if elapsed > heartbeat_timeout
+      return unless elapsed > heartbeat_timeout
+
+      # Phase 4.0 #1 + multi-agent review 高-3 反映: heartbeat_timeout 経由でも
+      # @last_disconnect_reason を記録し WsReconnectDetector#source_event に転記可能化.
+      mutex.synchronize { @last_disconnect_reason = :heartbeat_timeout }
+      trigger_reconnect(:heartbeat_timeout)
     end
 
     def handle_message(raw)

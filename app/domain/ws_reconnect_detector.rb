@@ -27,6 +27,12 @@ module Domain
     # snapshot の戻り値: 検知結果 + 現在 count(後続 update_to に渡す用)+ source_event / target_ws.
     # Phase 4.0 #1 + 新-中-6 反映: WS Client の last_disconnect_reason を取り込み WsMetric.source_event に転記する.
     # 新々-中-3 反映: target_ws 判定ロジック(Public のみ → "public" / Private のみ → "private" / 両方 → "both").
+    #
+    # 【消費先の状態 / multi-agent review Agent 2 高-1 反映】
+    # source_event / target_ws フィールドは Phase 4.2 で LiveTrading::WsMetric.create! の
+    # 対応カラム(source_event / target_ws)に転記される計画(02_§3.7 設計書参照).
+    # Phase 4.0 範囲では Result 拡張 + WS Client 経路の Detector 取り込みのみを先行追加し,
+    # WsMetric 永続化経路への配線は Phase 4.2(SessionMonitorService + Worker 統合)で実装される.
     Result = Struct.new(:public_reconnected, :private_reconnected, :public_count, :private_count, :source_event, :target_ws, keyword_init: true) do
       def any?
         public_reconnected || private_reconnected

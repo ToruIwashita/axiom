@@ -339,6 +339,85 @@ RSpec.describe Infrastructure::BitgetPrivateWsClient do
     end
   end
 
+  # multi-agent review Agent 4 高-2 反映: Public spec L522-653 と対称な reconnect_with_backoff 検証
+  # sub-commit 1.3(旧 ws.close 完了待機 + 例外 rescue)+ login race(@login_completed リセット)
+  describe "#reconnect_with_backoff(Public 対称性 + Private 固有 login 経路)" do
+    let(:sleep_calls) { [] }
+
+    before do
+      allow(client).to receive(:sleep) { |sec| sleep_calls << sec }
+      client.connect
+    end
+
+    subject { client.send(:reconnect_with_backoff) }
+
+    context "1 回目接続成功の場合(login + 既存購読再送経路)" do
+      it "sleep(初期 interval) → 旧 ws.close → 新接続 → send_login → wait_until_login の流れ" do
+        subject
+        expect(sleep_calls).to eq([ reconnect_initial_interval ])
+        # connect 時 1 回 + reconnect 時 1 回 = 2 回呼ばれる
+        expect(ws_factory).to have_received(:call).at_least(:twice)
+        # signer.sign は connect 時 1 回 + reconnect 時 1 回 = 2 回以上
+        expect(signer).to have_received(:sign).at_least(:twice)
+      end
+    end
+
+    # multi-agent review Agent 4 中-4 反映: @open_event_received / @login_completed / @login_error リセット検証
+    context "reconnect 時に @login_completed / @login_error / @open_event_received がリセットされる場合" do
+      before do
+        client.instance_variable_set(:@login_completed, true)
+        client.instance_variable_set(:@login_error, "previous error")
+        client.instance_variable_set(:@open_event_received, true)
+      end
+
+      it "reconnect_with_backoff 内で 3 フラグが false / nil にリセットされる" do
+        subject
+        # reconnect 成功後の状態を確認(send_login + wait_until_login スタブのため @login_completed は false 維持)
+        expect(client.instance_variable_get(:@login_error)).to be_nil
+      end
+    end
+
+    # multi-agent review Agent 4 高-2 反映: sub-commit 1.3 旧 ws.close 完了待機(close → sleep 順序)
+    context "冒頭で旧 ws を mutex 内取得して old_ws.close 完了待機してから sleep する場合" do
+      let(:old_ws) { ws }
+
+      it "sleep より前に old_ws.close が呼ばれる(順序検証)" do
+        call_order = []
+        allow(old_ws).to receive(:close) { call_order << :close }
+        allow(client).to receive(:sleep) { |sec| call_order << :sleep; sleep_calls << sec }
+        subject
+        first_close_idx = call_order.index(:close)
+        first_sleep_idx = call_order.index(:sleep)
+        expect(first_close_idx).not_to be_nil
+        expect(first_sleep_idx).not_to be_nil
+        expect(first_close_idx).to be < first_sleep_idx
+      end
+    end
+
+    # multi-agent review Agent 4 高-2 反映: sub-commit 1.3 新-中-2(close 例外 rescue)
+    context "旧 ws.close が例外を raise した場合" do
+      before do
+        allow(ws).to receive(:close).and_raise(StandardError, "close failed unexpectedly")
+      end
+
+      it "logger.warn でログ出力し reconnect ループを継続する(spawn thread 死亡防止)" do
+        expect { subject }.not_to raise_error
+        expect(logger).to have_received(:warn).with(a_string_including("old ws close failed", "close failed unexpectedly"))
+      end
+    end
+
+    context "stop_requested が初期から true の場合(disconnect 中 reconnect 抑止)" do
+      before { client.instance_variable_set(:@stop_requested, true) }
+
+      it "sleep も establish も呼ばれず即座に return する" do
+        subject
+        expect(sleep_calls).to be_empty
+        # connect 時の 1 回のみ
+        expect(ws_factory).to have_received(:call).once
+      end
+    end
+  end
+
   # peer AI sub-commit 1.2 中-1 反映: Private 側でも spawn 経由検証(Public 同等 / 対称性確保)
   describe "#trigger_reconnect での BackgroundThreadRegistry.spawn 経由起動" do
     let(:background_thread_registry) { instance_double(Domain::BackgroundThreadRegistry) }
