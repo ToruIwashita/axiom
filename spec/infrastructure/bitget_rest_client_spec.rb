@@ -214,4 +214,93 @@ RSpec.describe Infrastructure::BitgetRestClient do
       end
     end
   end
+
+  # Phase 4.0 #2 sub-commit 2.1 反映: AuthenticationMiddleware が clock_sync_provider Proc 経由で
+  # synced_now を timestamp 生成に使用する(BitgetRestClient 経由 indirect テスト / private_constant 維持)
+  describe "AuthenticationMiddleware の clock_sync 連携" do
+    let(:path) { "/api/v2/mix/account/account" }
+
+    before do
+      stub_request(:get, "#{base_url}#{path}")
+        .to_return(
+          status: 200,
+          body: { code: "00000", data: {} }.to_json,
+          headers: { "Content-Type" => "application/json" }
+        )
+    end
+
+    context "BitgetRestClient.new(clock_sync: nil) で auth: true request した場合" do
+      subject { client.request(:get, path, auth: true) }
+
+      it "Time.current にフォールバックして ACCESS-TIMESTAMP ヘッダが付与される(既存挙動互換)" do
+        subject
+        expect(WebMock).to have_requested(:get, "#{base_url}#{path}") { |req|
+          !req.headers["Access-Timestamp"].to_s.empty?
+        }
+      end
+    end
+
+    context "BitgetRestClient.new(clock_sync: cs) で synced_now が呼ばれる場合" do
+      let(:clock_sync) { instance_double(Infrastructure::BitgetClockSync, synced_now: Time.at(1_700_000_000)) }
+      let(:client) do
+        described_class.new(
+          api_key:, secret_key:, passphrase:,
+          paptrading_enabled:, rate_limiter:, base_url:,
+          retry_options: { max: 3, interval: 0, backoff_factor: 1 },
+          clock_sync: clock_sync
+        )
+      end
+
+      subject { client.request(:get, path, auth: true) }
+
+      it "clock_sync.synced_now が呼ばれて offset 反映済 timestamp で signing する" do
+        subject
+        expect(clock_sync).to have_received(:synced_now)
+        expected_ms = (Time.at(1_700_000_000).to_f * 1000).to_i
+        expect(WebMock).to have_requested(:get, "#{base_url}#{path}") { |req|
+          req.headers["Access-Timestamp"] == expected_ms.to_s
+        }
+      end
+    end
+
+    context "BitgetRestClient.new 後に #attach_clock_sync された場合(遅延 Proc 参照)" do
+      let(:clock_sync) { instance_double(Infrastructure::BitgetClockSync, synced_now: Time.at(1_700_000_000)) }
+
+      subject { client.request(:get, path, auth: true) }
+
+      it "attach 後の次回 request で synced_now が呼ばれる(Proc 経由遅延参照)" do
+        client.attach_clock_sync(clock_sync)
+        subject
+        expect(clock_sync).to have_received(:synced_now)
+      end
+    end
+
+    context "BitgetRestClient.new(clock_sync: nil) で auth: false request した場合" do
+      subject { client.request(:get, "/api/v2/public/time", auth: false) }
+      let(:clock_sync) { instance_double(Infrastructure::BitgetClockSync, synced_now: Time.current) }
+      let(:client) do
+        described_class.new(
+          api_key:, secret_key:, passphrase:,
+          paptrading_enabled:, rate_limiter:, base_url:,
+          retry_options: { max: 3, interval: 0, backoff_factor: 1 },
+          clock_sync: clock_sync
+        )
+      end
+
+      before do
+        stub_request(:get, "#{base_url}/api/v2/public/time")
+          .to_return(status: 200,
+                     body: { code: "00000", data: {} }.to_json,
+                     headers: { "Content-Type" => "application/json" })
+      end
+
+      it "auth: false 経路では context[:auth_required]=false で early return / clock_sync.synced_now は呼ばれない" do
+        subject
+        expect(clock_sync).not_to have_received(:synced_now)
+        expect(WebMock).to have_requested(:get, "#{base_url}/api/v2/public/time") { |req|
+          req.headers["Access-Timestamp"].nil?
+        }
+      end
+    end
+  end
 end
