@@ -479,9 +479,31 @@ RSpec.describe Infrastructure::BitgetPublicWsClient do
         end
       end
 
-      # Phase 4.0 #1 + 中-1 反映: trigger_reconnect 公開シグネチャ維持 / 内部実装で background_thread_registry.spawn 経由化
+      # Phase 4.0 #1 sub-commit 1.2 反映: trigger_reconnect 公開シグネチャ維持 / 内部実装で background_thread_registry.spawn 経由化
+      # background_thread_registry が DI されない client(既存 spec)では同期実行を維持 / DI 版で別スレッド起動を検証
       context "BackgroundThreadRegistry.spawn 経由で reconnect_with_backoff を別スレッド起動する場合" do
-        subject { client.send(:trigger_reconnect, :close) }
+        let(:background_thread_registry) { instance_double(Domain::BackgroundThreadRegistry) }
+        let(:client_with_btr) do
+          described_class.new(
+            paptrading_enabled: paptrading_enabled,
+            url: url_override,
+            ws_factory: ws_factory,
+            clock: clock,
+            logger: logger,
+            heartbeat_interval: heartbeat_interval,
+            heartbeat_timeout: heartbeat_timeout,
+            reconnect_initial_interval: reconnect_initial_interval,
+            reconnect_max_interval: reconnect_max_interval,
+            background_thread_registry: background_thread_registry
+          )
+        end
+
+        before do
+          allow(client_with_btr).to receive(:reconnect_with_backoff)
+          allow(background_thread_registry).to receive(:spawn)
+        end
+
+        subject { client_with_btr.send(:trigger_reconnect, :close) }
 
         it "background_thread_registry.spawn が適切な label で呼ばれる" do
           subject
@@ -489,11 +511,10 @@ RSpec.describe Infrastructure::BitgetPublicWsClient do
         end
 
         it "trigger_reconnect 自体は reconnect_with_backoff を同期実行しない(callback スレッド即返却)" do
-          # spawn の block 内で reconnect_with_backoff が起動される / 同期実行されない検証
           subject
-          # outer before で allow(client).to receive(:reconnect_with_backoff) されているが
-          # spawn 経由のため直接呼ばれないことを検証
-          expect(client).not_to have_received(:reconnect_with_backoff)
+          # spawn の block 内で reconnect_with_backoff が起動される設計のため,
+          # spawn の block 実行が走らない stub 設定下では直接呼ばれないことを検証
+          expect(client_with_btr).not_to have_received(:reconnect_with_backoff)
         end
       end
     end

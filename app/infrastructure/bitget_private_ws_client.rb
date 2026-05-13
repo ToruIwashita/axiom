@@ -179,6 +179,7 @@ module Infrastructure
                 :paptrading_enabled, :url_override, :ws_factory, :decoder, :clock, :logger,
                 :heartbeat_interval, :heartbeat_timeout,
                 :reconnect_initial_interval, :reconnect_max_interval, :login_timeout,
+                :background_thread_registry, :clock_sync,
                 :subscriptions, :mutex
     attr_accessor :ws, :heartbeat_thread, :stop_requested, :open_event_received,
                   :login_completed, :login_error, :last_pong_at
@@ -375,11 +376,22 @@ module Infrastructure
       trigger_reconnect(reason, error)
     end
 
+    # Phase 4.0 #1 sub-commit 1.2 反映: callback スレッドブロック解消のため
+    # background_thread_registry が DI されている場合は `reconnect_with_backoff` を別スレッドで起動.
+    # nil の場合は既存挙動(同期呼び出し)を維持 / LiveTradingWorker から DI 接続される sub-commit 2.3 で
+    # 全経路 spawn 経由化される.
     def trigger_reconnect(reason, error = nil)
       message = "[BitgetPrivateWsClient] reconnect triggered: #{reason}"
       message += " (#{error.message})" if error
       logger.warn(message)
-      reconnect_with_backoff
+
+      if background_thread_registry
+        background_thread_registry.spawn("bitget_private_ws_reconnect") do
+          reconnect_with_backoff
+        end
+      else
+        reconnect_with_backoff
+      end
     end
 
     # 指数バックオフで再接続 + 自動 login + 既存購読 resubscribe
