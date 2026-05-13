@@ -222,8 +222,11 @@ module Infrastructure
 
     # login メッセージ送信(設計書 05_§3.4 / Bitget V2 WS Private API 仕様)
     # preHash: timestamp(秒) + "GET" + "/user/verify"
+    # Phase 4.0 #2 sub-commit 2.2 反映: timestamp 生成を clock_sync.synced_now 経由化.
+    # wallclock 直接使用による Bitget 30005 timestamp invalid 永続化を回避.
+    # clock_sync nil 時は Time.current にフォールバック(LiveTradingWorker DI 未接続段階での既存挙動互換).
     def send_login
-      timestamp = Time.now.to_i
+      timestamp = (clock_sync&.synced_now || Time.current).to_i
       sign = signer.sign(
         timestamp: timestamp,
         method: "GET",

@@ -105,6 +105,51 @@ RSpec.describe Infrastructure::BitgetPrivateWsClient do
       end
     end
 
+    # Phase 4.0 #2 sub-commit 2.2 反映: send_login 内で clock_sync.synced_now 経由 timestamp 生成
+    # connect 経由ではなく send_login を private 呼び出しで直接検証(wait_until_login の永久 sleep 回避)
+    context "clock_sync が DI されている場合の login メッセージ timestamp" do
+      let(:clock_sync) { instance_double(Infrastructure::BitgetClockSync, synced_now: Time.at(1_700_000_005)) }
+      let(:client_with_cs) do
+        described_class.new(
+          api_key:, passphrase:, signer:,
+          paptrading_enabled:, ws_factory:, clock:, logger:,
+          clock_sync: clock_sync
+        )
+      end
+
+      before do
+        client_with_cs.instance_variable_set(:@ws, ws)
+      end
+
+      it "send_login で clock_sync.synced_now が呼ばれて offset 反映済 timestamp で signing する" do
+        expect(signer).to receive(:sign).with(
+          timestamp: 1_700_000_005,
+          method: "GET",
+          request_path: "/user/verify"
+        ).and_return("signed-base64-string")
+
+        client_with_cs.send(:send_login)
+
+        expect(clock_sync).to have_received(:synced_now)
+      end
+    end
+
+    context "clock_sync が nil の場合の login メッセージ timestamp(既存挙動互換)" do
+      before do
+        client.instance_variable_set(:@ws, ws)
+      end
+
+      it "Time.current にフォールバックして send_login が動作する" do
+        expect(signer).to receive(:sign).with(
+          timestamp: an_instance_of(Integer),
+          method: "GET",
+          request_path: "/user/verify"
+        ).and_return("signed-base64-string")
+
+        expect { client.send(:send_login) }.not_to raise_error
+      end
+    end
+
     context "既に接続中の場合" do
       before { client.connect }
 
