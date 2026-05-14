@@ -1639,6 +1639,50 @@ RSpec.describe LiveTradingWorker do
         end
       end
 
+      # Phase 4.2 + 高-2 + 新-中-4 + 新-中-6 反映: WsMetric 永続化経路
+      describe "#handle_ws_reconnect_snapshot(WsMetric.create! 経由)" do
+        let(:result) do
+          Domain::WsReconnectDetector::Result.new(
+            public_reconnected: true, private_reconnected: false,
+            public_count: 3, private_count: 0,
+            source_event: "close", target_ws: "public"
+          )
+        end
+
+        before do
+          worker.instance_variable_set(:@worker_instance_id, "test-worker-123")
+          worker.instance_variable_set(:@last_recorded_public_count, 0)
+          worker.instance_variable_set(:@last_recorded_private_count, 0)
+        end
+
+        it "WsMetric を作成し worker_instance_id / source_event / target_ws / delta を記録" do
+          expect { worker.send(:handle_ws_reconnect_snapshot, session, result) }.to change(LiveTrading::WsMetric, :count).by(1)
+          metric = LiveTrading::WsMetric.last
+          expect(metric.worker_instance_id).to eq("test-worker-123")
+          expect(metric.public_count_since_start).to eq(3)
+          expect(metric.private_count_since_start).to eq(0)
+          expect(metric.delta_public).to eq(3)
+          expect(metric.delta_private).to eq(0)
+          expect(metric.source_event).to eq("close")
+          expect(metric.target_ws).to eq("public")
+        end
+
+        it "@last_recorded_*_count が更新される" do
+          worker.send(:handle_ws_reconnect_snapshot, session, result)
+          expect(worker.instance_variable_get(:@last_recorded_public_count)).to eq(3)
+          expect(worker.instance_variable_get(:@last_recorded_private_count)).to eq(0)
+        end
+
+        context "Worker 跨ぎで result.public_count < @last_recorded_public_count の場合(高-2 反映 / delta 0 クランプ)" do
+          before { worker.instance_variable_set(:@last_recorded_public_count, 10) }
+
+          it "delta_public は 0(negative にならない)" do
+            worker.send(:handle_ws_reconnect_snapshot, session, result)
+            expect(LiveTrading::WsMetric.last.delta_public).to eq(0)
+          end
+        end
+      end
+
       describe "#run_reconciliation_after_reconnect が reconciliation_coordinator.run_after_reconnect に委譲" do
         let(:reconciliation_coordinator) { instance_double(Domain::ReconciliationCoordinator) }
 

@@ -151,6 +151,10 @@ class LiveTradingWorker
     @heartbeat_scheduler = heartbeat_scheduler_lazy
     # Phase 3.4b Step 0a 反映: kill-switch 実行を Domain::KillSwitchExecutorService に委譲.
     @kill_switch_executor = kill_switch_executor_lazy
+    # Phase 4.2 + 高-2 反映: WsMetric の累積カウントは Worker perform 開始時に 0 起点(Worker 寿命内累積).
+    # DB の最新 WsMetric は参照せず, Worker 再起動跨ぎでも新 Worker の perform 内で 0 から再開する.
+    @last_recorded_public_count = 0
+    @last_recorded_private_count = 0
 
     bootstrap_session(session_id)
     enter_main_loop
@@ -249,6 +253,39 @@ class LiveTradingWorker
       run_reconciliation_after_reconnect(session_reloaded)
       @ws_reconnect_detector.update_to(public_count: result.public_count, private_count: result.private_count)
     end
+
+    # Phase 4.2 + 高-2 + 新-中-4 + 新-中-6 反映: WS reconnect メトリクスを WsMetric に永続化.
+    # `@worker_instance_id`(line 133 既存変数)を流用し,Worker 跨ぎ識別子として転記する.
+    handle_ws_reconnect_snapshot(@session, result)
+  end
+
+  # Phase 4.2 + 高-2 反映: WS reconnect 検知時の WsMetric 永続化.
+  # delta は Worker ローカル変数 `@last_recorded_*` を起点に算出 / 0 でクランプ(Worker 跨ぎでも negative にならない).
+  # `source_event` / `target_ws` は WsReconnectDetector が WS Client `@last_disconnect_reason` から取り込む(新-中-6).
+  def handle_ws_reconnect_snapshot(session, result)
+    # nil 防御: perform 経由でない直接呼び出し(spec 等)でも動作するよう ||= 初期化.
+    @last_recorded_public_count ||= 0
+    @last_recorded_private_count ||= 0
+    @worker_instance_id ||= "fallback-#{Process.pid}-#{SecureRandom.hex(4)}"
+    delta_public = [ result.public_count - @last_recorded_public_count, 0 ].max
+    delta_private = [ result.private_count - @last_recorded_private_count, 0 ].max
+
+    run_in_db_thread("ws_metric_record") do
+      LiveTrading::WsMetric.create!(
+        live_trading_session_id: session.id,
+        detected_at: Time.current,
+        public_count_since_start: result.public_count,
+        private_count_since_start: result.private_count,
+        delta_public: delta_public,
+        delta_private: delta_private,
+        source_event: result.source_event,
+        target_ws: result.target_ws,
+        worker_instance_id: @worker_instance_id
+      )
+    end
+
+    @last_recorded_public_count = result.public_count
+    @last_recorded_private_count = result.private_count
   end
 
   # reconnect 後の reconciliation 再実行.
