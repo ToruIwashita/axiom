@@ -1,0 +1,30 @@
+<% content_for :title, "AI Invocation Log ##{@log.id}" %>
+
+<h1>AI Invocation Log #<%= @log.id %></h1>
+
+<dl>
+  <dt><strong>Context Type</strong></dt>
+  <dd><%= @log.context_type %></dd>
+
+  <dt><strong>Status</strong></dt>
+  <dd><%= render "status_badge", log: @log %></dd>
+
+  <dt><strong>Latency (ms)</strong></dt>
+  <dd><%= @log.latency_ms %></dd>
+
+  <dt><strong>Created At</strong></dt>
+  <dd><%= @log.created_at.iso8601 %></dd>
+
+  <dt><strong>Updated At</strong></dt>
+  <dd><%= @log.updated_at.iso8601 %></dd>
+</dl>
+
+<h2>Prompt</h2>
+<pre style="background: #f5f5f5; padding: 1em; border-radius: 4px; overflow-x: auto; white-space: pre-wrap; word-break: break-word;"><%= @log.prompt %></pre>
+
+<h2>Response</h2>
+<pre style="background: #f5f5f5; padding: 1em; border-radius: 4px; overflow-x: auto; white-space: pre-wrap; word-break: break-word;"><%= @log.response %></pre>
+
+<p style="margin-top: 1.5em;">
+  <%= link_to "← 一覧へ戻る", integration_ai_invocation_logs_path %>
+</p>

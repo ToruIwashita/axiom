@@ -42,6 +42,13 @@ Rails.application.routes.draw do
       resources :live_trading_trades, only: %i[show]
 
       post "market_data/sync", to: "market_data#sync"
+
+      # Phase 4.1: Integration::AiInvocationLog 可視化 API
+      namespace :integration do
+        resources :ai_invocation_logs, only: %i[index show] do
+          collection { get :aggregate }
+        end
+      end
     end
   end
 
@@ -70,6 +77,11 @@ Rails.application.routes.draw do
 
   # Phase 3.4b Step 3.4-12: LiveTrading::Trade 単体表示 UI ルート
   resources :live_trading_trades, only: %i[show]
+
+  # Phase 4.1: Integration::AiInvocationLog 可視化 UI
+  namespace :integration do
+    resources :ai_invocation_logs, only: %i[index show]
+  end
 
   # Defines the root path route ("/")
   root "backtesting_runs#index"

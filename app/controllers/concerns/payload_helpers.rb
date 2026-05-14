@@ -245,4 +245,32 @@ module PayloadHelpers
       updated_at: serialize_datetime(revision.updated_at)
     }
   end
+
+  # Phase 4.1 + peer AI レビュー 低-2 反映: AiInvocationLog 一覧用 payload(prompt/response を冒頭 200 文字 truncate).
+  # 一覧 API で N 件 × 各 10_000 char(prompt + response 計 20K char)= 50 件で 1MB+ ペイロード問題を回避する.
+  def ai_invocation_log_list_payload(log)
+    {
+      id: log.id,
+      context_type: log.context_type,
+      status: log.status,
+      prompt_excerpt: log.prompt&.truncate(200),
+      response_excerpt: log.response&.truncate(200),
+      latency_ms: log.latency_ms,
+      created_at: serialize_datetime(log.created_at)
+    }
+  end
+
+  # Phase 4.1 + peer AI レビュー 低-2 反映: AiInvocationLog 詳細用 payload(prompt/response 全文).
+  def ai_invocation_log_detail_payload(log)
+    {
+      id: log.id,
+      context_type: log.context_type,
+      status: log.status,
+      prompt: log.prompt,
+      response: log.response,
+      latency_ms: log.latency_ms,
+      created_at: serialize_datetime(log.created_at),
+      updated_at: serialize_datetime(log.updated_at)
+    }
+  end
 end
