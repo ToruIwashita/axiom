@@ -183,6 +183,26 @@ RSpec.describe "LiveTradingSessions(View)", type: :request do
       end
     end
 
+    # Phase 4.2 multi-agent review followup(高-1):
+    # acquire 直後 lease は renewed_at が nil で生成される(SessionLease#acquire! の仕様)
+    # _lease_current_state.html.erb で nil 安全に表示できることを保証する回帰テスト
+    context "renew 未実施 lease(renewed_at: nil)を持つ session の場合" do
+      before do
+        LiveTrading::SessionLease.acquire!(
+          session_id: session.id,
+          worker_instance_id: "test-worker"
+        )
+      end
+
+      subject { get live_trading_session_path(session) }
+
+      it "200 OK + Lease 現状セクションが描画される(NoMethodError なし)" do
+        subject
+        expect(response).to have_http_status(:ok)
+        expect(response.body).to include("Lease 現状")
+      end
+    end
+
     # Phase 4.2 + 新-中-5 反映: alert banner 表示(heartbeat timeout 60+ 秒未受信)
     context "heartbeat 100 秒未受信で alert banner 表示" do
       before do

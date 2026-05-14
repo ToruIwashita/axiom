@@ -11,12 +11,10 @@ module Domain
   #   で show 画面 partial 用データ提供 + memoize(新-中-5 反映)
   class SessionMonitorService
     HEARTBEAT_TIMEOUT_SECONDS = 65    # 60 + α
-    LEASE_WARN_THRESHOLD_SECONDS = 60
     WS_CONSECUTIVE_THRESHOLD = 5
     WS_CONSECUTIVE_WINDOW_SECONDS = 300
 
     private_constant :HEARTBEAT_TIMEOUT_SECONDS,
-                     :LEASE_WARN_THRESHOLD_SECONDS,
                      :WS_CONSECUTIVE_THRESHOLD,
                      :WS_CONSECUTIVE_WINDOW_SECONDS
 
@@ -86,10 +84,18 @@ module Domain
     end
 
     def heartbeat_elapsed_seconds
-      last = session.session_heartbeats.recent(1).first
-      return nil unless last
+      last_pulsed = last_heartbeat_at
+      return nil unless last_pulsed
 
-      (clock.call - last.pulsed_at).to_i
+      (clock.call - last_pulsed).to_i
+    end
+
+    # multi-agent review followup(中-1 / 中-5 反映):
+    # detail payload で recent_heartbeats(1) 経由 memoize を効かせるための accessor.
+    # session.session_heartbeats.recent(1) を payload_helpers で直接呼ぶと
+    # heartbeat_elapsed_seconds と合計 2 SQL になる二重発行を解消する.
+    def last_heartbeat_at
+      recent_heartbeats(1).first&.pulsed_at
     end
 
     def lease_remaining_seconds

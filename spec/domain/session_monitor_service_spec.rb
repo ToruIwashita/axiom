@@ -221,6 +221,76 @@ RSpec.describe Domain::SessionMonitorService do
         expect(subject[s2.id][:alerts]).to eq([])
       end
     end
+
+    # multi-agent review followup(spec 高-1):
+    # 「4 SQL で N session 一括取得」が設計の中核要件であることをクエリ計測で固定化する.
+    # 計測対象は bulk_monitor 内部のクエリのみで,呼出側の sessions 取得 SQL は含めない
+    # (controller では sessions = .order.page.per で事前に取得済).
+    context "5 session を bulk_monitor すると SQL 発行数が 4 件以内(N+1 回避)" do
+      let!(:sessions) { Array.new(5) { create_session } }
+      # sessions を Array(評価済)で渡し,計測前に確実に展開する
+      let(:loaded_sessions) { LiveTrading::Session.where(id: sessions.map(&:id)).to_a }
+
+      it "session 数によらず SQL 発行数が 4 件以内" do
+        loaded_sessions # 事前評価
+        query_count = 0
+        callback = lambda do |_name, _start, _finish, _id, payload|
+          next if payload[:name] == "SCHEMA"
+          next if %w[TRANSACTION BEGIN COMMIT ROLLBACK].include?(payload[:name])
+
+          query_count += 1
+        end
+        ActiveSupport::Notifications.subscribed(callback, "sql.active_record") do
+          described_class.bulk_monitor(sessions: loaded_sessions)
+        end
+        expect(query_count).to be <= 4
+      end
+    end
+  end
+
+  # multi-agent review followup(spec 高-3):
+  # bulk_monitor 内 compute_monitor_hash は instance method の alerts と独立した重複実装のため,
+  # 各 alert(:heartbeat_timeout / :lease_expired / :ws_consecutive_reconnect)が
+  # bulk_monitor 経由でも発火することを明示的に固定化する(両経路の乖離防止).
+  describe ".bulk_monitor 経由の alerts 分岐検証" do
+    let!(:session) { create_session }
+    subject { described_class.bulk_monitor(sessions: LiveTrading::Session.where(id: [ session.id ]))[session.id][:alerts] }
+
+    context "heartbeat 100 秒未受信" do
+      before { create_heartbeat(session, pulsed_at: 100.seconds.ago) }
+
+      it ":heartbeat_timeout を含む" do
+        expect(subject).to include(:heartbeat_timeout)
+      end
+    end
+
+    context "active lease かつ expires_at 過去" do
+      before { create_lease(session, expires_at: 1.minute.ago) }
+
+      it ":lease_expired を含む" do
+        expect(subject).to include(:lease_expired)
+      end
+    end
+
+    context "5 分以内 WS reconnect delta sum >= 5" do
+      before { create_ws_metric(session, delta_public: 3, delta_private: 2, detected_at: 1.minute.ago) }
+
+      it ":ws_consecutive_reconnect を含む" do
+        expect(subject).to include(:ws_consecutive_reconnect)
+      end
+    end
+
+    context "3 種 alert が同時発生" do
+      before do
+        create_heartbeat(session, pulsed_at: 100.seconds.ago)
+        create_lease(session, expires_at: 1.minute.ago)
+        create_ws_metric(session, delta_public: 3, delta_private: 2, detected_at: 1.minute.ago)
+      end
+
+      it ":heartbeat_timeout / :lease_expired / :ws_consecutive_reconnect すべて含む" do
+        expect(subject).to contain_exactly(:heartbeat_timeout, :lease_expired, :ws_consecutive_reconnect)
+      end
+    end
   end
 
   describe "#recent_heartbeats / #lease_events / #recent_ws_metrics_grouped_by_worker(新-中-5 反映)" do

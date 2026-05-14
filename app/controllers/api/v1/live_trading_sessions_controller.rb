@@ -7,7 +7,9 @@ module Api
 
       def index
         # Phase 4.2 + 高-3 反映: bulk_monitor で N+1 回避 + kaminari paginate
-        sessions = LiveTrading::Session.includes(:session_lease).order(id: :desc).page(params[:page]).per(50)
+        # multi-agent review followup(中-2): bulk_monitor 内で SessionLease を独自取得するため
+        # ここでの includes(:session_lease) は使われず無駄な eager load 1 SQL となるため削除
+        sessions = LiveTrading::Session.order(id: :desc).page(params[:page]).per(50)
         monitor_map = Domain::SessionMonitorService.bulk_monitor(sessions: sessions)
         render json: {
           sessions: sessions.map { |s| live_trading_session_list_payload(s, monitor_map[s.id]) },

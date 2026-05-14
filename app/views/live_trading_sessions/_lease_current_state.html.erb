@@ -15,7 +15,7 @@
         <tr>
           <td><%= lease.acquired_at.iso8601 %></td>
           <td><%= lease.expires_at.iso8601 %></td>
-          <td><%= lease.renewed_at.iso8601 %></td>
+          <td><%= lease.renewed_at&.iso8601 || "—" %></td>
           <td><%= lease.status %></td>
           <td><code><%= lease.worker_instance_id %></code></td>
         </tr>

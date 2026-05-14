@@ -242,7 +242,7 @@ module PayloadHelpers
   def live_trading_session_detail_payload(session, monitor)
     live_trading_session_payload(session).merge(
       heartbeat_elapsed_seconds: monitor.heartbeat_elapsed_seconds,
-      last_heartbeat_at: serialize_datetime(session.session_heartbeats.recent(1).first&.pulsed_at),
+      last_heartbeat_at: serialize_datetime(monitor.last_heartbeat_at),
       lease_remaining_seconds: monitor.lease_remaining_seconds,
       lease_status: session.session_lease&.status,
       lease_expires_at: serialize_datetime(session.session_lease&.expires_at),
