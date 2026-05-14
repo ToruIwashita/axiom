@@ -248,6 +248,11 @@ module PayloadHelpers
 
   # Phase 4.1 + peer AI レビュー 低-2 反映: AiInvocationLog 一覧用 payload(prompt/response を冒頭 200 文字 truncate).
   # 一覧 API で N 件 × 各 10_000 char(prompt + response 計 20K char)= 50 件で 1MB+ ペイロード問題を回避する.
+  # multi-agent review Agent 2 中-5 反映:
+  # 他 payload(run_payload / live_trading_session_payload 等)は list/detail 同型で `updated_at` を含む.
+  # AiInvocationLog では list/detail 分離(低-2 反映)を採用したため,対称性確保のため list payload にも
+  # `updated_at` を含める.一覧での値は created_at とほぼ同値(AiInvocationLog は immutable な記録のため
+  # 通常 created_at == updated_at)だが,他 payload との対称性 + 監査用途を優先する.
   def ai_invocation_log_list_payload(log)
     excerpt_length = ::Integration::AiInvocationLog::LIST_EXCERPT_LENGTH
     {
@@ -257,7 +262,8 @@ module PayloadHelpers
       prompt_excerpt: log.prompt&.truncate(excerpt_length),
       response_excerpt: log.response&.truncate(excerpt_length),
       latency_ms: log.latency_ms,
-      created_at: serialize_datetime(log.created_at)
+      created_at: serialize_datetime(log.created_at),
+      updated_at: serialize_datetime(log.updated_at)
     }
   end
 

@@ -56,6 +56,23 @@ RSpec.describe ApplicationServices::AiInvocationLogService do
       end
     end
 
+    # multi-agent review Agent 2 中-2 反映: enum allow-list 違反時の Fail Fast 検証
+    context "filter 値が enum CONTEXT_TYPES 外の場合" do
+      let(:filters) { { context_type: "unknown_type" } }
+
+      it "ArgumentError を raise する" do
+        expect { subject }.to raise_error(ArgumentError, /context_type must be one of/)
+      end
+    end
+
+    context "filter 値が enum STATUSES 外の場合" do
+      let(:filters) { { status: "unknown_status" } }
+
+      it "ArgumentError を raise する" do
+        expect { subject }.to raise_error(ArgumentError, /status must be one of/)
+      end
+    end
+
     context "kaminari .page chain との互換性" do
       before { 3.times { create_log } }
 

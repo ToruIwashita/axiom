@@ -10,11 +10,18 @@ module ApplicationServices
   class AiInvocationLogService
     # 一覧取得(filter + 時系列降順).
     #
+    # multi-agent review Agent 2 中-2 反映: enum allow-list 検証(Fail Fast).
+    # `?context_type=unknown` 等の不正値が AR scope に流れることを防ぐ.
+    #
     # @param filters [Hash] フィルタ条件.
     #   - `:context_type` [String, nil] CONTEXT_TYPES のいずれか.空文字 / nil 時は無効.
     #   - `:status` [String, nil] STATUSES のいずれか.空文字 / nil 時は無効.
     # @return [ActiveRecord::Relation] kaminari `.page(N).per(M)` を chain 可能.
+    # @raise [ArgumentError] filter 値が CONTEXT_TYPES / STATUSES に含まれない場合.
     def list(filters: {})
+      assert_valid_filter!(:context_type, filters[:context_type], Integration::AiInvocationLog::CONTEXT_TYPES)
+      assert_valid_filter!(:status, filters[:status], Integration::AiInvocationLog::STATUSES)
+
       scope = Integration::AiInvocationLog.order(created_at: :desc)
       scope = scope.where(context_type: filters[:context_type]) if filters[:context_type].present?
       scope = scope.where(status: filters[:status]) if filters[:status].present?
@@ -64,7 +71,7 @@ module ApplicationServices
 
     def compute_stats(context_type, counts_by_ctype_status, avg_latency_by_ctype, latencies)
       total = Integration::AiInvocationLog::STATUSES.sum { |st| counts_by_ctype_status[[ context_type, st ]] || 0 }
-      success = counts_by_ctype_status[[ context_type, "success" ]] || 0
+      success = counts_by_ctype_status[[ context_type, Integration::AiInvocationLog::SUCCESS_STATUS ]] || 0
       avg = avg_latency_by_ctype[context_type]&.to_f&.round(0) || 0
       {
         total_count: total,
@@ -78,12 +85,22 @@ module ApplicationServices
     end
 
     # latencies は事前に sort 済前提.
+    # 算定方式: nearest-rank(`(N * ratio).floor` インデックスの値を採用).
+    # サンプル少時は p99 が最大値に張り付く特性あり(N=10 で idx=9 = 最大値).
+    # 線形補間 / 連続分布を求める場合は Phase 5b で再設計検討(02_§9 引き継ぎ事項).
     # @return [Integer]
     def percentile(sorted_latencies, ratio)
       return 0 if sorted_latencies.empty?
 
       idx = (sorted_latencies.size * ratio).floor.clamp(0, sorted_latencies.size - 1)
       sorted_latencies[idx]
+    end
+
+    # multi-agent review Agent 2 中-2 反映: enum allow-list で Fail Fast.
+    def assert_valid_filter!(name, value, allow_list)
+      return if value.blank? || allow_list.include?(value)
+
+      raise ArgumentError, "#{name} must be one of #{allow_list.inspect} but got #{value.inspect}"
     end
   end
 end

@@ -30,15 +30,28 @@ RSpec.describe "Api::V1::Integration::AiInvocationLogs", type: :request do
       let!(:log_old) { create_log(latency_ms: 50, created_at: 2.hours.ago) }
       let!(:log_new) { create_log(latency_ms: 200, created_at: 1.hour.ago) }
 
-      it "list payload(prompt_excerpt / response_excerpt)で時系列降順返却" do
+      it "list payload(prompt_excerpt / response_excerpt + updated_at)で時系列降順返却" do
         subject
         expect(response).to have_http_status(:ok)
         body = JSON.parse(response.body)
         expect(body["logs"].map { |l| l["id"] }).to eq([ log_new.id, log_old.id ])
         first = body["logs"].first
-        expect(first.keys).to match_array(%w[id context_type status prompt_excerpt response_excerpt latency_ms created_at])
+        # multi-agent review Agent 2 中-5 反映: updated_at も含む(他 payload との対称性)
+        expect(first.keys).to match_array(%w[id context_type status prompt_excerpt response_excerpt latency_ms created_at updated_at])
         expect(first["prompt_excerpt"]).to be_a(String)
         expect(first).not_to have_key("prompt")  # 全文は含まれない
+      end
+    end
+
+    # multi-agent review Agent 2 中-2 反映: enum allow-list 違反時の 400
+    context "context_type が enum 外の場合" do
+      let(:params) { { context_type: "unknown_type" } }
+
+      it "400 bad_request + error メッセージ" do
+        subject
+        expect(response).to have_http_status(:bad_request)
+        body = JSON.parse(response.body)
+        expect(body["error"]).to match(/context_type must be one of/)
       end
     end
 
