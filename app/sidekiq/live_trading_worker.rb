@@ -406,8 +406,15 @@ class LiveTradingWorker
   end
 
   # step 5: server_time 同期. clock_sync.sync! は失敗時 nil を返すため raise に昇格させる.
+  # Phase 4.0 #2 sub-commit 2.3 反映: sync! 成功後に build_rest_client へ clock_sync を attach する.
+  # AuthenticationMiddleware は Proc 経由(`-> { @clock_sync }`)で参照するため,
+  # 以降の signing 必須 request で synced_now 経由の timestamp 生成が有効化される.
+  # multi-agent review 中-9 反映: clock_sync の 2 回呼び出しを局所変数化して可読性向上.
   def sync_clock_or_raise!
-    raise StandardError, "clock sync failed (server_time API)" if clock_sync.sync!.nil?
+    cs = clock_sync
+    raise StandardError, "clock sync failed (server_time API)" if cs.sync!.nil?
+
+    build_rest_client.attach_clock_sync(cs)
   end
 
   # step 6: contract_metadata 取得(tick_size 等). 戻り値は 3.3-10 メインループで使用予定.
@@ -962,15 +969,19 @@ class LiveTradingWorker
   # WS factory は Proc を保持し step 9/10 内で `.call` で遅延生成する
   # (Sidekiq Job Worker.new 時点での副作用 connect / 24h reconnect 時の既存 instance 再利用不可を防ぐ
   # / 3.3-9a peer review 重要 obs 2 反映).
+  # Phase 4.0 #1 sub-commit 2.3 反映: background_thread_registry を DI して reconnect_with_backoff の callback スレッドブロック解消.
   def public_ws_factory
     @public_ws_factory ||= lambda do
       Infrastructure::BitgetPublicWsClient.new(
         paptrading_enabled: bitget_paptrading_enabled?,
-        logger: logger
+        logger: logger,
+        background_thread_registry: @background_thread_registry
       )
     end
   end
 
+  # Phase 4.0 #1 sub-commit 2.3 反映: background_thread_registry を DI.
+  # Phase 4.0 #2 sub-commit 2.3 反映: clock_sync を DI して send_login signing で synced_now 経由化.
   def private_ws_factory
     @private_ws_factory ||= lambda do
       Infrastructure::BitgetPrivateWsClient.new(
@@ -978,7 +989,9 @@ class LiveTradingWorker
         passphrase: bitget_credentials.fetch(:passphrase),
         signer: Infrastructure::BitgetSigner.new(secret_key: bitget_credentials.fetch(:secret_key)),
         paptrading_enabled: bitget_paptrading_enabled?,
-        logger: logger
+        logger: logger,
+        background_thread_registry: @background_thread_registry,
+        clock_sync: clock_sync
       )
     end
   end

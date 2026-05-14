@@ -41,6 +41,10 @@ module Infrastructure
     # @param reconnect_initial_interval [Float] 再接続の初期 sleep 秒数
     # @param reconnect_max_interval [Float] 再接続の最大 sleep 秒数
     # @param login_timeout [Float] login レスポンス待機タイムアウト
+    # @param background_thread_registry [Domain::BackgroundThreadRegistry, nil]
+    #   Phase 4.0 #1 反映: reconnect_with_backoff を別スレッドに逃がすための registry(sub-commit 1.2 で必須化予定)
+    # @param clock_sync [Infrastructure::BitgetClockSync, nil]
+    #   Phase 4.0 #2 反映: WS login signing 時の wallclock 直接使用回避(sub-commit 2.2 で `send_login` から参照)
     def initialize(
       api_key:,
       passphrase:,
@@ -55,7 +59,9 @@ module Infrastructure
       heartbeat_timeout: DEFAULT_HEARTBEAT_TIMEOUT,
       reconnect_initial_interval: DEFAULT_RECONNECT_INITIAL_INTERVAL,
       reconnect_max_interval: DEFAULT_RECONNECT_MAX_INTERVAL,
-      login_timeout: DEFAULT_LOGIN_TIMEOUT
+      login_timeout: DEFAULT_LOGIN_TIMEOUT,
+      background_thread_registry: nil,
+      clock_sync: nil
     )
       @api_key = api_key
       @passphrase = passphrase
@@ -71,6 +77,8 @@ module Infrastructure
       @reconnect_initial_interval = reconnect_initial_interval
       @reconnect_max_interval = reconnect_max_interval
       @login_timeout = login_timeout
+      @background_thread_registry = background_thread_registry
+      @clock_sync = clock_sync
       @subscriptions = {}
       @ws = nil
       @heartbeat_thread = nil
@@ -80,6 +88,8 @@ module Infrastructure
       @login_error = nil
       @last_pong_at = nil
       @reconnect_count = 0
+      # Phase 4.0 #1 + 新-中-6 反映: 直近 disconnect 理由を保持(WsReconnectDetector が WsMetric.source_event に転記)
+      @last_disconnect_reason = nil
       @mutex = Mutex.new
     end
 
@@ -89,6 +99,12 @@ module Infrastructure
     # @return [Integer]
     def reconnect_count
       mutex.synchronize { @reconnect_count }
+    end
+
+    # Phase 4.0 #1 + 新-中-6 反映: 直近の disconnect 理由を返す(mutex 同期 / WsReconnectDetector が読む).
+    # @return [Symbol, nil] :close / :error / :heartbeat_timeout / 初期は nil
+    def last_disconnect_reason
+      mutex.synchronize { @last_disconnect_reason }
     end
 
     # WebSocket 接続を確立し,login + 既存購読の resubscribe を行う。
@@ -163,6 +179,7 @@ module Infrastructure
                 :paptrading_enabled, :url_override, :ws_factory, :decoder, :clock, :logger,
                 :heartbeat_interval, :heartbeat_timeout,
                 :reconnect_initial_interval, :reconnect_max_interval, :login_timeout,
+                :background_thread_registry, :clock_sync,
                 :subscriptions, :mutex
     attr_accessor :ws, :heartbeat_thread, :stop_requested, :open_event_received,
                   :login_completed, :login_error, :last_pong_at
@@ -205,8 +222,11 @@ module Infrastructure
 
     # login メッセージ送信(設計書 05_§3.4 / Bitget V2 WS Private API 仕様)
     # preHash: timestamp(秒) + "GET" + "/user/verify"
+    # Phase 4.0 #2 sub-commit 2.2 反映: timestamp 生成を clock_sync.synced_now 経由化.
+    # wallclock 直接使用による Bitget 30005 timestamp invalid 永続化を回避.
+    # clock_sync nil 時は Time.current にフォールバック(LiveTradingWorker DI 未接続段階での既存挙動互換).
     def send_login
-      timestamp = Time.now.to_i
+      timestamp = (clock_sync&.synced_now || Time.current).to_i
       sign = signer.sign(
         timestamp: timestamp,
         method: "GET",
@@ -284,7 +304,12 @@ module Infrastructure
       return if last_pong_at.nil?
 
       elapsed = clock.call - last_pong_at
-      trigger_reconnect(:heartbeat_timeout) if elapsed > heartbeat_timeout
+      return unless elapsed > heartbeat_timeout
+
+      # Phase 4.0 #1 + multi-agent review 高-3 反映: heartbeat_timeout 経由でも
+      # @last_disconnect_reason を記録し WsReconnectDetector#source_event に転記可能化.
+      mutex.synchronize { @last_disconnect_reason = :heartbeat_timeout }
+      trigger_reconnect(:heartbeat_timeout)
     end
 
     def handle_message(raw)
@@ -350,24 +375,53 @@ module Infrastructure
       nil
     end
 
+    # ws.on(:close) / ws.on(:error) callback または heartbeat タイムアウトから呼ばれる切断検知ハンドラ。
+    # Phase 4.0 #1 + 新-中-6 反映: @last_disconnect_reason に reason を記録(WsReconnectDetector が WsMetric.source_event に転記).
     def handle_disconnection(reason, error = nil)
       return if stop_requested
 
+      mutex.synchronize { @last_disconnect_reason = reason }
       trigger_reconnect(reason, error)
     end
 
+    # Phase 4.0 #1 sub-commit 1.2 反映: callback スレッドブロック解消のため
+    # background_thread_registry が DI されている場合は `reconnect_with_backoff` を別スレッドで起動.
+    # nil の場合は既存挙動(同期呼び出し)を維持 / LiveTradingWorker から DI 接続される sub-commit 2.3 で
+    # 全経路 spawn 経由化される.
     def trigger_reconnect(reason, error = nil)
       message = "[BitgetPrivateWsClient] reconnect triggered: #{reason}"
       message += " (#{error.message})" if error
       logger.warn(message)
-      reconnect_with_backoff
+
+      if background_thread_registry
+        background_thread_registry.spawn("bitget_private_ws_reconnect") do
+          reconnect_with_backoff
+        end
+      else
+        reconnect_with_backoff
+      end
     end
 
-    # 指数バックオフで再接続 + 自動 login + 既存購読 resubscribe
+    # 指数バックオフで再接続 + 自動 login + 既存購読 resubscribe.
+    # Phase 4.0 #1 sub-commit 1.3 反映: ループ冒頭で旧 ws を mutex 内で取り外し → close 完了待機.
+    # これにより旧 ws と新 ws の race(callback 重複登録 / push 受信ハンドラ重複)を解消する.
     def reconnect_with_backoff
       interval = reconnect_initial_interval
       loop do
         break if stop_requested
+
+        # 旧 ws を mutex 内で取り外して close 完了待機(race 解消 / sub-commit 1.3 反映)
+        # peer AI 新-中-2 反映: close 自体の例外を吸収して spawn thread の死亡を防ぐ
+        old_ws = mutex.synchronize do
+          ws_to_abandon = @ws
+          @ws = nil
+          ws_to_abandon
+        end
+        begin
+          old_ws&.close
+        rescue StandardError => e
+          logger.warn("[BitgetPrivateWsClient] old ws close failed: #{e.message}")
+        end
 
         sleep(interval)
         break if stop_requested

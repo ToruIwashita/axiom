@@ -112,6 +112,83 @@ RSpec.describe Domain::WsReconnectDetector do
     end
   end
 
+  # Phase 4.0 #1 + 新-中-6 反映 / multi-agent review 高-1 + 高-2 反映:
+  # Result.source_event / target_ws の検証(WS Client の last_disconnect_reason を取り込み転記)
+  describe "#snapshot で source_event / target_ws が返却される場合" do
+    before { detector.reset(public_ws: pub_with_reason(nil, 0), private_ws: pub_with_reason(nil, 0)) }
+
+    # WS Client double に last_disconnect_reason メソッドを生やすヘルパ
+    def pub_with_reason(reason, count)
+      double("WsClient", reconnect_count: count, last_disconnect_reason: reason)
+    end
+
+    context "public_ws のみ reconnect 検知 + last_disconnect_reason=:close の場合" do
+      let(:pub) { pub_with_reason(:close, 1) }
+      let(:pri) { pub_with_reason(nil, 0) }
+
+      it "source_event = 'close'(String 化)/ target_ws = 'public'" do
+        result = detector.snapshot(public_ws: pub, private_ws: pri)
+        expect(result.source_event).to eq("close")
+        expect(result.target_ws).to eq("public")
+      end
+    end
+
+    context "private_ws のみ reconnect 検知 + last_disconnect_reason=:error の場合" do
+      let(:pub) { pub_with_reason(nil, 0) }
+      let(:pri) { pub_with_reason(:error, 2) }
+
+      it "source_event = 'error'(String 化)/ target_ws = 'private'" do
+        result = detector.snapshot(public_ws: pub, private_ws: pri)
+        expect(result.source_event).to eq("error")
+        expect(result.target_ws).to eq("private")
+      end
+    end
+
+    context "両方 reconnect 検知 + public_ws.last_disconnect_reason=:heartbeat_timeout の場合" do
+      let(:pub) { pub_with_reason(:heartbeat_timeout, 1) }
+      let(:pri) { pub_with_reason(:close, 1) }
+
+      it "source_event = 'heartbeat_timeout'(Public 優先 / 新々-中-3 反映)/ target_ws = 'both'" do
+        result = detector.snapshot(public_ws: pub, private_ws: pri)
+        expect(result.source_event).to eq("heartbeat_timeout")
+        expect(result.target_ws).to eq("both")
+      end
+    end
+
+    context "reconnect 検知なしの場合" do
+      let(:pub) { pub_with_reason(:close, 0) }
+      let(:pri) { pub_with_reason(:error, 0) }
+
+      it "source_event = nil / target_ws = nil(both delta = 0)" do
+        result = detector.snapshot(public_ws: pub, private_ws: pri)
+        expect(result.source_event).to be_nil
+        expect(result.target_ws).to be_nil
+      end
+    end
+
+    context "reconnect 検知 + last_disconnect_reason が nil の場合(WS Client が記録未完)" do
+      let(:pub) { pub_with_reason(nil, 1) }
+      let(:pri) { pub_with_reason(nil, 0) }
+
+      it "source_event = nil(空文字に変換しない)/ target_ws = 'public'" do
+        result = detector.snapshot(public_ws: pub, private_ws: pri)
+        expect(result.source_event).to be_nil
+        expect(result.target_ws).to eq("public")
+      end
+    end
+
+    context "reconnect 検知 + last_disconnect_reason に respond しない WS Client(既存 mock 互換)" do
+      let(:pub) { ws_double(1) }   # last_disconnect_reason 未実装 mock
+      let(:pri) { ws_double(0) }
+
+      it "source_event = nil(respond_to? 防御)/ target_ws = 'public'" do
+        result = detector.snapshot(public_ws: pub, private_ws: pri)
+        expect(result.source_event).to be_nil
+        expect(result.target_ws).to eq("public")
+      end
+    end
+  end
+
   describe "thread-safety" do
     it "並列 snapshot / update_to / reset を交錯させても raise しない + 最終 snapshot 整合性確認" do
       target_detector = detector

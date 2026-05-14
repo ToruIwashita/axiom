@@ -8,7 +8,11 @@ module Infrastructure
     # Bitget V2 API リクエスト用の HMAC-SHA256 + Base64 署名を生成する
     # preHash 仕様: timestamp + method.upcase + request_path + (?query_string) + body
     #
-    # @param timestamp [Integer] Unix epoch ミリ秒(13桁)
+    # @param timestamp [Integer] Unix epoch timestamp.
+    #   Bitget V2 仕様で経路ごとに精度が異なる:
+    #   - REST 認証: ミリ秒(13桁 / `BitgetRestClient::AuthenticationMiddleware`)
+    #   - WS Private login: 秒(10桁 / `BitgetPrivateWsClient#send_login`)
+    #   呼び出し側で適切な精度に変換した値を渡すこと(本メソッドは値を変換しない).
     # @param method [String] HTTPメソッド(例: 'GET' / 'POST'。小文字でも可,内部で upcase)
     # @param request_path [String] APIパス(例: '/api/v2/mix/market/history-candles')
     # @param query_string [String, nil] URLクエリ文字列(nil/空文字は ?無しで扱う)

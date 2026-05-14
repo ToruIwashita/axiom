@@ -1736,4 +1736,36 @@ RSpec.describe LiveTradingWorker do
       end
     end
   end
+
+  # multi-agent review Agent 2 高-3 反映: sync_clock_or_raise! 内 attach_clock_sync 統合 spec
+  describe "#sync_clock_or_raise!(Phase 4.0 #2 attach_clock_sync 統合)" do
+    let(:worker) { described_class.new }
+    let(:rest_client_double) { instance_double(Infrastructure::BitgetRestClient, attach_clock_sync: nil) }
+    let(:clock_sync_double) { instance_double(Infrastructure::BitgetClockSync, sync!: 0.5) }
+
+    before do
+      allow(worker).to receive(:build_rest_client).and_return(rest_client_double)
+      allow(worker).to receive(:clock_sync).and_return(clock_sync_double)
+    end
+
+    subject { worker.send(:sync_clock_or_raise!) }
+
+    context "clock_sync.sync! が成功する場合" do
+      it "sync! 後に build_rest_client.attach_clock_sync(clock_sync) が呼ばれる" do
+        subject
+        expect(rest_client_double).to have_received(:attach_clock_sync).with(clock_sync_double)
+      end
+    end
+
+    context "clock_sync.sync! が nil を返した場合(失敗)" do
+      before do
+        allow(clock_sync_double).to receive(:sync!).and_return(nil)
+      end
+
+      it "StandardError を raise して attach_clock_sync は呼ばれない" do
+        expect { subject }.to raise_error(StandardError, /clock sync failed/)
+        expect(rest_client_double).not_to have_received(:attach_clock_sync)
+      end
+    end
+  end
 end

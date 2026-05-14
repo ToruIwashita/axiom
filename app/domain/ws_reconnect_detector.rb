@@ -24,8 +24,16 @@ module Domain
   #
   # R-6 #10 反映: count update は reconciliation 完了後に行う(thread 例外時 carry 漏れ防止).
   class WsReconnectDetector
-    # snapshot の戻り値: 検知結果 + 現在 count(後続 update_to に渡す用).
-    Result = Struct.new(:public_reconnected, :private_reconnected, :public_count, :private_count, keyword_init: true) do
+    # snapshot の戻り値: 検知結果 + 現在 count(後続 update_to に渡す用)+ source_event / target_ws.
+    # Phase 4.0 #1 + 新-中-6 反映: WS Client の last_disconnect_reason を取り込み WsMetric.source_event に転記する.
+    # 新々-中-3 反映: target_ws 判定ロジック(Public のみ → "public" / Private のみ → "private" / 両方 → "both").
+    #
+    # 【消費先の状態 / multi-agent review Agent 2 高-1 反映】
+    # source_event / target_ws フィールドは Phase 4.2 で LiveTrading::WsMetric.create! の
+    # 対応カラム(source_event / target_ws)に転記される計画(02_§3.7 設計書参照).
+    # Phase 4.0 範囲では Result 拡張 + WS Client 経路の Detector 取り込みのみを先行追加し,
+    # WsMetric 永続化経路への配線は Phase 4.2(SessionMonitorService + Worker 統合)で実装される.
+    Result = Struct.new(:public_reconnected, :private_reconnected, :public_count, :private_count, :source_event, :target_ws, keyword_init: true) do
       def any?
         public_reconnected || private_reconnected
       end
@@ -63,11 +71,27 @@ module Domain
         [ @last_public_count, @last_private_count ]
       end
 
+      public_reconnected = public_count > last_public
+      private_reconnected = private_count > last_private
+
+      # 新々-中-3 反映: target_ws を delta の発生側で決定. 両方 delta > 0 の場合は "both".
+      target_ws = compute_target_ws(public_reconnected:, private_reconnected:)
+      # 新-中-6 反映: source_event は対応 WS Client の last_disconnect_reason を読み取る.
+      # 両方発生時(both)は Public 優先(Public/Private 同時切断時は通常 Public 側で先にイベント発火するため).
+      source_event = compute_source_event(
+        public_ws: public_ws,
+        private_ws: private_ws,
+        public_reconnected: public_reconnected,
+        private_reconnected: private_reconnected
+      )
+
       Result.new(
-        public_reconnected: public_count > last_public,
-        private_reconnected: private_count > last_private,
+        public_reconnected: public_reconnected,
+        private_reconnected: private_reconnected,
         public_count: public_count,
-        private_count: private_count
+        private_count: private_count,
+        source_event: source_event,
+        target_ws: target_ws
       )
     end
 
@@ -99,6 +123,38 @@ module Domain
       return 0 unless ws&.respond_to?(:reconnect_count)
 
       ws.reconnect_count.to_i
+    end
+
+    # 新々-中-3 反映: target_ws 決定ロジック.
+    # @return [String, nil] "public" / "private" / "both" / 検知なし時 nil
+    def compute_target_ws(public_reconnected:, private_reconnected:)
+      return "both" if public_reconnected && private_reconnected
+      return "public" if public_reconnected
+      return "private" if private_reconnected
+
+      nil
+    end
+
+    # 新-中-6 反映: source_event 決定ロジック. delta 発生側 WS Client の last_disconnect_reason を採用.
+    # 両方発生(both)時は Public 優先(同時切断は通常 Public 側で先にイベント発火 / 詳細追跡は Phase 5b で
+    # callback push 化により Public/Private 個別記録に再設計).
+    # @return [String, nil] "close" / "error" / "heartbeat_timeout" / 検知なしや WS Client 未対応時 nil
+    #   (read_disconnect_reason 内で WS Client の Symbol を `&.to_s` で String 化済 / WsMetric.source_event カラム互換)
+    def compute_source_event(public_ws:, private_ws:, public_reconnected:, private_reconnected:)
+      return read_disconnect_reason(public_ws) if public_reconnected
+      return read_disconnect_reason(private_ws) if private_reconnected
+
+      nil
+    end
+
+    # WS Client から last_disconnect_reason を安全に取得する(respond_to? 防御 / 既存 WS Client 互換).
+    # peer AI レビュー 中-1 反映: WS Client 内部は Symbol(:close / :error / :heartbeat_timeout)で保持し,
+    # Detector で String 化することで WsMetric DB カラム(varchar / SOURCE_EVENTS = %w[close error heartbeat_timeout])
+    # との型一致 + inclusion validation との整合性を Detector 境界で確保する.
+    def read_disconnect_reason(ws)
+      return nil unless ws&.respond_to?(:last_disconnect_reason)
+
+      ws.last_disconnect_reason&.to_s
     end
   end
 end

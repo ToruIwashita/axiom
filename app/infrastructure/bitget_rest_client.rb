@@ -1,11 +1,17 @@
 module Infrastructure
   class BitgetRestClient
     DEFAULT_BASE_URL = "https://api.bitget.com".freeze
+    # Phase 4.0 #3 反映: 5xx ステータス(502 Bad Gateway / 503 Service Unavailable / 504 Gateway Timeout)
+    # を retry 対象に追加. Bitget API のリリース時間帯不安定で例外握りつぶしリスクを解消する.
+    # idempotency 根拠(01_§2.3):
+    #   - POST `place_order`: clientOid 必須(LiveTradingWorker#deterministic_client_oid で生成)→ 二重発注防止
+    #   - POST `cancel_order` / `cancel_plan_order`: order_id / clientOid で既存検索 → 二重キャンセル無害
+    #   - GET 系全般: 完全冪等
     DEFAULT_RETRY_OPTIONS = {
       max: 5,
       interval: 0.5,
       backoff_factor: 2,
-      retry_statuses: [ 429 ],
+      retry_statuses: [ 429, 502, 503, 504 ],
       retry_exceptions: [ Faraday::TimeoutError, Faraday::ConnectionFailed ]
     }.freeze
     RETRYABLE_BITGET_CODES = %w[45001 40725 40808 40015].freeze
@@ -19,6 +25,10 @@ module Infrastructure
     # @param signer [Infrastructure::BitgetSigner, nil] DI 用,nil なら自動生成
     # @param rate_limiter [Infrastructure::BitgetRateLimiter, nil] DI 用,nil なら自動生成
     # @param retry_options [Hash, nil] faraday-retry オプション上書き(テスト用に interval=0 等)
+    # @param clock_sync [Infrastructure::BitgetClockSync, nil]
+    #   Phase 4.0 #2 反映: signing 時の timestamp を `clock_sync.synced_now` 経由で生成し
+    #   wallclock 直接使用による Bitget 40006 timestamp invalid 永続化を回避する.
+    #   default nil(LiveTradingWorker から `#attach_clock_sync(cs)` で後付 attach 可能).
     def initialize(
       api_key:,
       secret_key:,
@@ -27,7 +37,8 @@ module Infrastructure
       base_url: DEFAULT_BASE_URL,
       signer: nil,
       rate_limiter: nil,
-      retry_options: nil
+      retry_options: nil,
+      clock_sync: nil
     )
       @api_key = api_key
       @passphrase = passphrase
@@ -36,7 +47,18 @@ module Infrastructure
       @rate_limiter = rate_limiter || Infrastructure::BitgetRateLimiter.new
       @retry_options = DEFAULT_RETRY_OPTIONS.merge(retry_options || {})
       @base_url = base_url
+      @clock_sync = clock_sync
       @connection = build_connection
+    end
+
+    # Phase 4.0 #2 反映: clock_sync を後付 attach する setter.
+    # AuthenticationMiddleware は Proc 経由(`-> { @clock_sync }`)で参照するため,
+    # ここで `@clock_sync` を差し替えると次回 request 時に新値で評価される(遅延参照).
+    # @param clock_sync [Infrastructure::BitgetClockSync]
+    # @return [self]
+    def attach_clock_sync(clock_sync)
+      @clock_sync = clock_sync
+      self
     end
 
     # Bitget V2 API へリクエストを発行する。
@@ -80,12 +102,19 @@ module Infrastructure
     private
 
     attr_reader :api_key, :passphrase, :paptrading_enabled, :signer, :rate_limiter,
-                :retry_options, :base_url, :connection
+                :retry_options, :base_url, :connection, :clock_sync
 
     def build_connection
+      # Phase 4.0 #2 反映: clock_sync_provider に `-> { clock_sync }` を渡し
+      # 後付 attach された @clock_sync を Proc 経由で遅延参照する(循環依存回避).
+      provider = -> { clock_sync }
       Faraday.new(url: base_url) do |conn|
         conn.request :json
-        conn.use AuthenticationMiddleware, signer: signer, api_key: api_key, passphrase: passphrase
+        conn.use AuthenticationMiddleware,
+                 signer: signer,
+                 api_key: api_key,
+                 passphrase: passphrase,
+                 clock_sync_provider: provider
         conn.use PaptradingMiddleware, paptrading_enabled: paptrading_enabled
         conn.response :json, content_type: /\bjson$/
       end
@@ -112,18 +141,23 @@ module Infrastructure
     end
 
     class AuthenticationMiddleware < Faraday::Middleware
-      def initialize(app, signer:, api_key:, passphrase:)
+      # Phase 4.0 #2 反映: clock_sync_provider (Proc / nil 可) を受け取り
+      # `current_time_for_signing` で `synced_now` 経由の timestamp 生成を行う.
+      # Proc 経由のため BitgetRestClient 側で `@clock_sync` を後付 attach すると次回 request で反映される.
+      def initialize(app, signer:, api_key:, passphrase:, clock_sync_provider: nil)
         super(app)
         @signer = signer
         @api_key = api_key
         @passphrase = passphrase
+        @clock_sync_provider = clock_sync_provider
       end
 
       def on_request(env)
+        # 新-高-1 反映: 既存実装の context キー `:auth_required` + Hash type guard を完全維持
         context = env.request.context
         return unless context.is_a?(Hash) && context[:auth_required]
 
-        timestamp_ms = (Time.now.to_f * 1000).to_i
+        timestamp_ms = (current_time_for_signing.to_f * 1000).to_i
         body_str = env.body.is_a?(String) ? env.body : env.body&.to_json
         signature = @signer.sign(
           timestamp: timestamp_ms,
@@ -136,6 +170,16 @@ module Infrastructure
         env.request_headers["ACCESS-SIGN"] = signature
         env.request_headers["ACCESS-TIMESTAMP"] = timestamp_ms.to_s
         env.request_headers["ACCESS-PASSPHRASE"] = @passphrase
+      end
+
+      private
+
+      attr_reader :signer, :api_key, :passphrase, :clock_sync_provider
+
+      # Phase 4.0 #2 反映: Proc を毎回呼び出して最新の clock_sync を参照(後付 attach 対応).
+      # clock_sync nil 時は wallclock(Time.current)にフォールバック.
+      def current_time_for_signing
+        clock_sync_provider&.call&.synced_now || Time.current
       end
     end
     private_constant :AuthenticationMiddleware
