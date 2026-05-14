@@ -269,6 +269,50 @@ RSpec.describe Infrastructure::BitgetPrivateWsClient do
     end
   end
 
+  # multi-agent review 再実施 NEW-高-1 反映: Public spec 対称性確保
+  # check_pong_timeout 経路の @last_disconnect_reason 直接記録(handle_disconnection を経由しない設計)を検証
+  describe "pong タイムアウト判定(check_pong_timeout 単体)" do
+    before do
+      client.instance_variable_set(:@last_pong_at, 0.0)
+    end
+
+    subject { client.send(:check_pong_timeout) }
+
+    context "経過時間が heartbeat_timeout 以下の場合" do
+      before { current_time[0] = 30.0 }
+
+      it "trigger_reconnect は呼ばれない / @last_disconnect_reason は更新されない" do
+        allow(client).to receive(:trigger_reconnect)
+        subject
+        expect(client).not_to have_received(:trigger_reconnect)
+        expect(client.last_disconnect_reason).to be_nil
+      end
+    end
+
+    context "経過時間が heartbeat_timeout を超えた場合" do
+      before { current_time[0] = heartbeat_timeout + 1.0 }
+
+      it "trigger_reconnect(:heartbeat_timeout) が呼ばれる" do
+        allow(client).to receive(:trigger_reconnect)
+        subject
+        expect(client).to have_received(:trigger_reconnect).with(:heartbeat_timeout)
+      end
+
+      it "@last_disconnect_reason が :heartbeat_timeout で直接記録される" do
+        allow(client).to receive(:trigger_reconnect)
+        subject
+        expect(client.last_disconnect_reason).to eq(:heartbeat_timeout)
+      end
+
+      it "handle_disconnection は経由されない(直接記録設計の検証)" do
+        allow(client).to receive(:trigger_reconnect)
+        allow(client).to receive(:handle_disconnection).and_call_original
+        subject
+        expect(client).not_to have_received(:handle_disconnection)
+      end
+    end
+  end
+
   describe "#disconnect" do
     subject { client.disconnect(thread_join_timeout: 0.01) }
 

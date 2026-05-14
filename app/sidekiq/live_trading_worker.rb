@@ -409,10 +409,12 @@ class LiveTradingWorker
   # Phase 4.0 #2 sub-commit 2.3 反映: sync! 成功後に build_rest_client へ clock_sync を attach する.
   # AuthenticationMiddleware は Proc 経由(`-> { @clock_sync }`)で参照するため,
   # 以降の signing 必須 request で synced_now 経由の timestamp 生成が有効化される.
+  # multi-agent review 中-9 反映: clock_sync の 2 回呼び出しを局所変数化して可読性向上.
   def sync_clock_or_raise!
-    raise StandardError, "clock sync failed (server_time API)" if clock_sync.sync!.nil?
+    cs = clock_sync
+    raise StandardError, "clock sync failed (server_time API)" if cs.sync!.nil?
 
-    build_rest_client.attach_clock_sync(clock_sync)
+    build_rest_client.attach_clock_sync(cs)
   end
 
   # step 6: contract_metadata 取得(tick_size 等). 戻り値は 3.3-10 メインループで使用予定.

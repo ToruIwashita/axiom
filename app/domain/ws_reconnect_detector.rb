@@ -138,7 +138,8 @@ module Domain
     # 新-中-6 反映: source_event 決定ロジック. delta 発生側 WS Client の last_disconnect_reason を採用.
     # 両方発生(both)時は Public 優先(同時切断は通常 Public 側で先にイベント発火 / 詳細追跡は Phase 5b で
     # callback push 化により Public/Private 個別記録に再設計).
-    # @return [Symbol, nil] :close / :error / :heartbeat_timeout / 検知なしや WS Client 未対応時 nil
+    # @return [String, nil] "close" / "error" / "heartbeat_timeout" / 検知なしや WS Client 未対応時 nil
+    #   (read_disconnect_reason 内で WS Client の Symbol を `&.to_s` で String 化済 / WsMetric.source_event カラム互換)
     def compute_source_event(public_ws:, private_ws:, public_reconnected:, private_reconnected:)
       return read_disconnect_reason(public_ws) if public_reconnected
       return read_disconnect_reason(private_ws) if private_reconnected

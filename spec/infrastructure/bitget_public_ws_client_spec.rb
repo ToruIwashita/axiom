@@ -360,6 +360,21 @@ RSpec.describe Infrastructure::BitgetPublicWsClient do
           subject
           expect(client).to have_received(:trigger_reconnect).with(:heartbeat_timeout)
         end
+
+        # multi-agent review 再実施 NEW-高-1 反映: check_pong_timeout 経路の
+        # @last_disconnect_reason 直接記録(handle_disconnection を経由しない設計)を spec で検証
+        it "@last_disconnect_reason が :heartbeat_timeout で直接記録される" do
+          allow(client).to receive(:trigger_reconnect)
+          subject
+          expect(client.last_disconnect_reason).to eq(:heartbeat_timeout)
+        end
+
+        it "handle_disconnection は経由されない(直接記録設計の検証)" do
+          allow(client).to receive(:trigger_reconnect)
+          allow(client).to receive(:handle_disconnection).and_call_original
+          subject
+          expect(client).not_to have_received(:handle_disconnection)
+        end
       end
     end
   end
