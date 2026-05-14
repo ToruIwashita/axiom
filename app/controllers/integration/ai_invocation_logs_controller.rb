@@ -18,6 +18,12 @@ module Integration
       redirect_to integration_ai_invocation_logs_path, alert: "ログが見つかりませんでした"
     end
 
+    # GET /integration/ai_invocation_logs/aggregate
+    def aggregate
+      @stats = service.aggregate
+      @context_types = ::Integration::AiInvocationLog::CONTEXT_TYPES
+    end
+
     private
 
     def service

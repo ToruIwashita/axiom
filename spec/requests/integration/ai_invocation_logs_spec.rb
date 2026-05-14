@@ -77,4 +77,25 @@ RSpec.describe "Integration::AiInvocationLogs(View)", type: :request do
       end
     end
   end
+
+  describe "GET /integration/ai_invocation_logs/aggregate" do
+    subject { get "/integration/ai_invocation_logs/aggregate" }
+
+    context "ログ存在の場合" do
+      before do
+        create_log(context_type: "entry_filter", status: "success", latency_ms: 100)
+        create_log(context_type: "entry_filter", status: "timeout", latency_ms: 200)
+      end
+
+      it "200 OK + 集計テーブル表示(7 context_type 全件)" do
+        subject
+        expect(response).to have_http_status(:ok)
+        expect(response.body).to include("AI Invocation Log 集計")
+        expect(response.body).to include("entry_filter")
+        Integration::AiInvocationLog::CONTEXT_TYPES.each do |ct|
+          expect(response.body).to include(ct)
+        end
+      end
+    end
+  end
 end

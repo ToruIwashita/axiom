@@ -80,7 +80,9 @@ Rails.application.routes.draw do
 
   # Phase 4.1: Integration::AiInvocationLog 可視化 UI
   namespace :integration do
-    resources :ai_invocation_logs, only: %i[index show]
+    resources :ai_invocation_logs, only: %i[index show] do
+      collection { get :aggregate }
+    end
   end
 
   # Defines the root path route ("/")
