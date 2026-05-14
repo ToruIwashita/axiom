@@ -4,12 +4,21 @@ module Integration
   class AiInvocationLog < ApplicationRecord
     self.table_name = "integration_ai_invocation_logs"
 
+    # 定数の公開 / 非公開基準(multi-agent review 再実施 Agent 1 中-1 反映):
+    # - public: 外部(Service / PayloadHelpers / Controller / View)から直接参照する定数
+    #   (CONTEXT_TYPES / STATUSES / SUCCESS_STATUS / LIST_EXCERPT_LENGTH)
+    # - private_constant: モデル内部実装詳細のみで参照する定数
+    #   (PROMPT_RESPONSE_MAX_LENGTH = before_validation の truncate 用 / 内部完結)
     CONTEXT_TYPES = %w[
       script_generation backtest_analysis strategy_improvement
       entry_filter position_sizing exception_close daily_review
     ].freeze
     STATUSES = %w[success timeout error validation_failed].freeze
+    # Phase 4.1 + multi-agent review Agent 2 中-3 反映: 集計時の "success" 文字列リテラル散在を回避.
+    SUCCESS_STATUS = "success".freeze
     PROMPT_RESPONSE_MAX_LENGTH = 10_000
+    # Phase 4.1 + multi-agent review Agent 2 低 反映: 一覧 API での truncate 文字数を定数化.
+    LIST_EXCERPT_LENGTH = 200
 
     private_constant :PROMPT_RESPONSE_MAX_LENGTH
 

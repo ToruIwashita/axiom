@@ -1,0 +1,12 @@
+<%
+  color = case log.status
+          when "success"           then "#2e7d32"
+          when "timeout"           then "#ef6c00"
+          when "error"             then "#c62828"
+          when "validation_failed" then "#6a1b9a"
+          else "#666"
+          end
+%>
+<span style="display:inline-block; padding:2px 8px; border-radius:4px; background:<%= color %>; color:#fff; font-size:0.85em;">
+  <%= log.status %>
+</span>

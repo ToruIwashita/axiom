@@ -1,0 +1,41 @@
+<% content_for :title, "AI Invocation Log 集計" %>
+
+<h1>AI Invocation Log 集計</h1>
+
+<p style="color: #666;">
+  context_type 別 success rate / latency 統計(平均 / p50 / p99)
+</p>
+
+<table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; width: 100%;">
+  <thead style="background: #eee;">
+    <tr>
+      <th>Context Type</th>
+      <th>Total</th>
+      <th>Success</th>
+      <th>Failure</th>
+      <th>Success Rate (%)</th>
+      <th>Avg Latency (ms)</th>
+      <th>P50 (ms)</th>
+      <th>P99 (ms)</th>
+    </tr>
+  </thead>
+  <tbody>
+    <% @context_types.each do |ct| %>
+      <% stats = @stats[ct] %>
+      <tr>
+        <td><strong><%= ct %></strong></td>
+        <td><%= stats[:total_count] %></td>
+        <td><%= stats[:success_count] %></td>
+        <td><%= stats[:failure_count] %></td>
+        <td><%= stats[:success_rate] %></td>
+        <td><%= stats[:avg_latency] %></td>
+        <td><%= stats[:p50_latency] %></td>
+        <td><%= stats[:p99_latency] %></td>
+      </tr>
+    <% end %>
+  </tbody>
+</table>
+
+<p style="margin-top: 1.5em;">
+  <%= link_to "← 一覧へ戻る", integration_ai_invocation_logs_path %>
+</p>
