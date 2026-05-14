@@ -218,5 +218,30 @@ RSpec.describe ApplicationServices::BacktestingRunService do
         expect(subject).to contain_exactly(run_pending, run_completed)
       end
     end
+
+    # Phase 4.3 03_§4.5 反映: created_at range filter
+    context "filters: { from: 36.hours.ago } の場合" do
+      subject { service.list(filters: { from: 36.hours.ago }).to_a }
+
+      it "from 以降に created された Run のみ返す(run_completed のみ / run_pending は 2 日前)" do
+        expect(subject).to contain_exactly(run_completed)
+      end
+    end
+
+    context "filters: { to: 36.hours.ago } の場合" do
+      subject { service.list(filters: { to: 36.hours.ago }).to_a }
+
+      it "to 以前に created された Run のみ返す(run_pending のみ)" do
+        expect(subject).to contain_exactly(run_pending)
+      end
+    end
+
+    context "filters: { from:, to: } 両指定の場合" do
+      subject { service.list(filters: { from: 36.hours.ago, to: 12.hours.ago }).to_a }
+
+      it "範囲内の Run のみ返す(run_completed のみ)" do
+        expect(subject).to contain_exactly(run_completed)
+      end
+    end
   end
 end
