@@ -55,6 +55,45 @@ RSpec.describe "Api::V1::Integration::AiInvocationLogs", type: :request do
       end
     end
 
+    # multi-agent review 再実施 Agent 4 M-2 反映: status 側の enum 違反対称性
+    context "status が enum 外の場合" do
+      let(:params) { { status: "unknown_status" } }
+
+      it "400 bad_request + error メッセージ" do
+        subject
+        expect(response).to have_http_status(:bad_request)
+        body = JSON.parse(response.body)
+        expect(body["error"]).to match(/status must be one of/)
+      end
+    end
+
+    # multi-agent review 再実施 Agent 4 M-3 反映: kaminari 異常 page 値ガード検証
+    context "params[:page] が異常値の場合" do
+      before { 3.times { create_log } }
+
+      context "page='abc' の非数値文字列" do
+        let(:params) { { page: "abc" } }
+
+        it "200 OK で 1 ページ目を返す(kaminari fallback)" do
+          subject
+          expect(response).to have_http_status(:ok)
+          body = JSON.parse(response.body)
+          expect(body["total"]).to eq(3)
+        end
+      end
+
+      context "page=99999 の max_pages 超過" do
+        let(:params) { { page: 99999 } }
+
+        it "200 OK + 空配列(max_pages=1000 ガード or 範囲外)" do
+          subject
+          expect(response).to have_http_status(:ok)
+          body = JSON.parse(response.body)
+          expect(body["logs"]).to eq([])
+        end
+      end
+    end
+
     context "context_type フィルタ" do
       let!(:entry_log) { create_log(context_type: "entry_filter") }
       let!(:script_log) { create_log(context_type: "script_generation") }
@@ -99,13 +138,16 @@ RSpec.describe "Api::V1::Integration::AiInvocationLogs", type: :request do
       let!(:log) { create_log(prompt: "a" * 500, response: "b" * 500) }
       let(:log_id) { log.id }
 
-      it "200 OK + detail payload(prompt/response 全文)" do
+      it "200 OK + detail payload(prompt/response 全文)+ updated_at(対称性)" do
         subject
         expect(response).to have_http_status(:ok)
         body = JSON.parse(response.body)
+        # multi-agent review 再実施 Agent 4 M-4 反映: detail payload キー集合厳密検証
+        expect(body.keys).to match_array(%w[id context_type status prompt response latency_ms created_at updated_at])
         expect(body["id"]).to eq(log.id)
         expect(body["prompt"].length).to eq(500)
         expect(body["response"].length).to eq(500)
+        expect(body["updated_at"]).to be_a(String)
         expect(body).not_to have_key("prompt_excerpt")
       end
     end

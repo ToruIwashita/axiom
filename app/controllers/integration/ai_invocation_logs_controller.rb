@@ -9,9 +9,11 @@ module Integration
       @statuses = ::Integration::AiInvocationLog::STATUSES
       @selected_context_type = params[:context_type]
       @selected_status = params[:status]
-    rescue ArgumentError => e
+    rescue ArgumentError
       # multi-agent review Agent 2 中-2 反映: enum allow-list 違反時はリダイレクト + alert
-      redirect_to integration_ai_invocation_logs_path, alert: "不正なフィルタ値: #{e.message}"
+      # 再実施 Agent 1 低-4 反映: e.message に enum 一覧 + 入力値全体が含まれるため
+      # API 静的化(Agent 3 中-1)と対称に静的メッセージ化(内部実装露出回避)
+      redirect_to integration_ai_invocation_logs_path, alert: "不正なフィルタ値が指定されました"
     end
 
     # GET /integration/ai_invocation_logs/:id

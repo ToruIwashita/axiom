@@ -67,19 +67,62 @@ RSpec.describe "Integration::AiInvocationLogs(View)", type: :request do
       it "一覧へリダイレクト + 不正フィルタ alert" do
         subject
         expect(response).to redirect_to(integration_ai_invocation_logs_path)
-        expect(flash[:alert]).to include("不正なフィルタ値")
+        expect(flash[:alert]).to eq("不正なフィルタ値が指定されました")
       end
     end
 
-    # multi-agent review Agent 2 spec 中 反映: _status_badge 4 status × 4 色分岐検証
-    context "_status_badge の 4 status 色分岐(対称性)" do
+    # multi-agent review 再実施 Agent 4 M-2 反映: status 側の enum 違反対称性
+    context "不正 status filter の場合" do
+      let(:params) { { status: "unknown_status" } }
+
+      it "一覧へリダイレクト + 不正フィルタ alert" do
+        subject
+        expect(response).to redirect_to(integration_ai_invocation_logs_path)
+        expect(flash[:alert]).to eq("不正なフィルタ値が指定されました")
+      end
+    end
+
+    # multi-agent review 再実施 Agent 4 M-3 反映: kaminari 異常 page 値ガード検証
+    context "params[:page] が異常値の場合" do
+      before { 3.times { create_log } }
+
+      context "page='abc' の非数値文字列" do
+        let(:params) { { page: "abc" } }
+
+        it "200 OK で 1 ページ目を返す(kaminari fallback)" do
+          subject
+          expect(response).to have_http_status(:ok)
+          expect(response.body).to include("AI Invocation Logs")
+        end
+      end
+
+      context "page=99999 の max_pages 超過" do
+        let(:params) { { page: 99999 } }
+
+        it "200 OK(max_pages=1000 ガード or 範囲外で空状態描画)" do
+          subject
+          expect(response).to have_http_status(:ok)
+        end
+      end
+    end
+
+    # multi-agent review Agent 2 + 再実施 Agent 4 M-6 反映:
+    # _status_badge 4 status × 4 色分岐 を厳密検証(全部同一色のリグレッション検出)
+    EXPECTED_BADGE_COLORS = {
+      "success"           => "#2e7d32",
+      "timeout"           => "#ef6c00",
+      "error"             => "#c62828",
+      "validation_failed" => "#6a1b9a"
+    }.freeze
+
+    context "_status_badge の 4 status 色分岐(色値厳密検証 / 対称性)" do
       Integration::AiInvocationLog::STATUSES.each do |status|
         context "status=#{status} の場合" do
           let!(:log) { create_log(status: status) }
 
-          it "対応色の background-color CSS が描画される" do
+          it "status 固有の background-color が描画される(全色同一リグレッション防止)" do
             subject
-            expect(response.body).to match(/background:#[0-9a-f]{6}/i)
+            expect(response.body).to include("background:#{EXPECTED_BADGE_COLORS.fetch(status)}")
             expect(response.body).to include(status)
           end
         end
@@ -128,6 +171,18 @@ RSpec.describe "Integration::AiInvocationLogs(View)", type: :request do
         expect(response).to have_http_status(:ok)
         expect(response.body).to include("AI Invocation Log 集計")
         expect(response.body).to include("entry_filter")
+        Integration::AiInvocationLog::CONTEXT_TYPES.each do |ct|
+          expect(response.body).to include(ct)
+        end
+      end
+    end
+
+    # multi-agent review 再実施 Agent 4 M-1 反映: 0 件時の集計テーブル表示(7 行 0 表示)
+    context "ログ 0 件の場合" do
+      it "200 OK + 集計テーブルは 7 context_type 行で 0 表示" do
+        subject
+        expect(response).to have_http_status(:ok)
+        expect(response.body).to include("AI Invocation Log 集計")
         Integration::AiInvocationLog::CONTEXT_TYPES.each do |ct|
           expect(response.body).to include(ct)
         end

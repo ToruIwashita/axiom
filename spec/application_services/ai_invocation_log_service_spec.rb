@@ -170,6 +170,40 @@ RSpec.describe ApplicationServices::AiInvocationLogService do
       end
     end
 
+    # multi-agent review 再実施 Agent 4 H-1 反映: transaction 境界(requires_new: true)動的検証
+    context "transaction 境界(multi-agent review Agent 2 高-1 反映)" do
+      it "Integration::AiInvocationLog.transaction(requires_new: true) で囲まれて実行される" do
+        expect(Integration::AiInvocationLog).to receive(:transaction).with(requires_new: true).and_call_original
+        subject
+      end
+    end
+
+    # multi-agent review 再実施 Agent 4 H-2 反映: failure_count 合算性質検証(4 status 混在)
+    context "4 status を全て含む混在ケース(failure_count = timeout + error + validation_failed)" do
+      before do
+        create_log(context_type: "entry_filter", status: "success", latency_ms: 100)
+        create_log(context_type: "entry_filter", status: "timeout", latency_ms: 200)
+        create_log(context_type: "entry_filter", status: "error", latency_ms: 300)
+        create_log(context_type: "entry_filter", status: "validation_failed", latency_ms: 400)
+      end
+
+      it "total=4 / success=1 / failure=3(success 以外の合計)/ success_rate=25.0" do
+        stats = subject["entry_filter"]
+        expect(stats[:total_count]).to eq(4)
+        expect(stats[:success_count]).to eq(1)
+        expect(stats[:failure_count]).to eq(3)
+        expect(stats[:success_rate]).to eq(25.0)
+      end
+    end
+
+    # multi-agent review 再実施 Agent 4 H-3 反映: SUCCESS_STATUS 定数の参照確認
+    context "SUCCESS_STATUS 定数参照(multi-agent review Agent 2 中-3 反映)" do
+      it "Integration::AiInvocationLog::SUCCESS_STATUS が \"success\" を返し frozen である" do
+        expect(Integration::AiInvocationLog::SUCCESS_STATUS).to eq("success")
+        expect(Integration::AiInvocationLog::SUCCESS_STATUS).to be_frozen
+      end
+    end
+
     # peer AI レビュー 中-2 反映: SQL group by で N+1 を起こさず少数 query で完結
     context "SQL クエリ数(N+1 検証)" do
       before do

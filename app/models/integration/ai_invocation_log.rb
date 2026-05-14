@@ -4,6 +4,11 @@ module Integration
   class AiInvocationLog < ApplicationRecord
     self.table_name = "integration_ai_invocation_logs"
 
+    # 定数の公開 / 非公開基準(multi-agent review 再実施 Agent 1 中-1 反映):
+    # - public: 外部(Service / PayloadHelpers / Controller / View)から直接参照する定数
+    #   (CONTEXT_TYPES / STATUSES / SUCCESS_STATUS / LIST_EXCERPT_LENGTH)
+    # - private_constant: モデル内部実装詳細のみで参照する定数
+    #   (PROMPT_RESPONSE_MAX_LENGTH = before_validation の truncate 用 / 内部完結)
     CONTEXT_TYPES = %w[
       script_generation backtest_analysis strategy_improvement
       entry_filter position_sizing exception_close daily_review
