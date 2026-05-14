@@ -52,6 +52,11 @@ Rails.application.routes.draw do
 
       # Phase 4.3: 横断ダッシュボード API(単一リソース / 単数 controller クラス維持)
       resource :dashboard, only: %i[show], controller: "dashboard"
+
+      # Phase 4.3: バックテスト比較 API(viewmodel 方針 / DB 永続化なし / run_ids[] パラメータ受け取り)
+      namespace :backtesting do
+        get "comparisons/show", to: "comparisons#show"
+      end
     end
   end
 
@@ -90,6 +95,12 @@ Rails.application.routes.draw do
 
   # Phase 4.3: 横断ダッシュボード UI(単一リソース / 単数 controller クラス維持)
   resource :dashboard, only: %i[show], controller: "dashboard"
+
+  # Phase 4.3: バックテスト比較 UI(viewmodel 方針 / new で Run 選択 → show で表示)
+  namespace :backtesting do
+    get "comparisons/new", to: "comparisons#new", as: :new_comparison
+    get "comparisons/show", to: "comparisons#show", as: :comparison
+  end
 
   # Defines the root path route ("/")
   root "backtesting_runs#index"

@@ -1,0 +1,41 @@
+<% content_for :title, "バックテスト比較 - Run 選択" %>
+
+<h1>バックテスト比較</h1>
+
+<p style="color: #666;">比較したい完了済 Run を 2 件以上選択してください(直近 50 件)</p>
+
+<% if @runs.any? %>
+  <%= form_with url: backtesting_comparison_path, method: :get, local: true,
+                data: { controller: "comparison-select" } do |f| %>
+    <table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse;">
+      <thead style="background: #eee;">
+        <tr>
+          <th>選択</th>
+          <th>Run ID</th>
+          <th>symbol</th>
+          <th>period</th>
+          <th>finished_at</th>
+        </tr>
+      </thead>
+      <tbody>
+        <% @runs.each do |run| %>
+          <tr>
+            <td>
+              <%= check_box_tag "run_ids[]", run.id, false,
+                                data: { comparison_select_target: "checkbox" } %>
+            </td>
+            <td>Run #<%= run.id %></td>
+            <td><%= run.symbol %></td>
+            <td><%= run.period_from.to_date %>〜<%= run.period_to.to_date %></td>
+            <td><%= run.finished_at&.iso8601 %></td>
+          </tr>
+        <% end %>
+      </tbody>
+    </table>
+    <p style="margin-top: 1em;">
+      <%= submit_tag "比較する" %>
+    </p>
+  <% end %>
+<% else %>
+  <p style="color: #999;">完了済 Run がありません</p>
+<% end %>

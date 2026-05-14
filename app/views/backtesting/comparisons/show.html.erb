@@ -1,0 +1,66 @@
+<% content_for :title, "バックテスト比較" %>
+
+<h1>バックテスト比較</h1>
+
+<p>
+  <%= link_to "選択画面に戻る", backtesting_new_comparison_path %>
+</p>
+
+<%# Phase 4.3 02_§4.4 反映: 9 項目 metrics 横並べ %>
+<section style="margin-bottom: 2em;">
+  <h2>metrics 横並べ</h2>
+  <table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse;">
+    <thead style="background: #eee;">
+      <tr>
+        <th>項目</th>
+        <% @metrics_table.each do |row| %>
+          <th><%= row[:label] %></th>
+        <% end %>
+      </tr>
+    </thead>
+    <tbody>
+      <% %w[win_rate total_pnl max_drawdown sharpe_ratio sortino_ratio volatility profit_factor total_trades avg_holding_seconds].each do |key| %>
+        <tr>
+          <th><%= key %></th>
+          <% @metrics_table.each do |row| %>
+            <td><%= row[:metrics] ? row[:metrics][key] : "—" %></td>
+          <% end %>
+        </tr>
+      <% end %>
+    </tbody>
+  </table>
+</section>
+
+<%# Phase 4.3 02_§4.4 + §4.5 反映: equity curve 重ね描き(JS / multi_equity_curve_controller.js) %>
+<section style="margin-bottom: 2em;">
+  <h2>equity curve 重ね描き</h2>
+  <div data-controller="multi-equity-curve"
+       data-multi-equity-curve-api-url-value="<%= api_v1_backtesting_comparisons_show_path(format: :json, run_ids: @run_ids) %>">
+    <canvas data-multi-equity-curve-target="canvas" width="800" height="400"></canvas>
+  </div>
+</section>
+
+<%# Phase 4.3 02_§4.4 反映: 6 項目 parameter 差分 %>
+<section style="margin-bottom: 2em;">
+  <h2>パラメータ差分</h2>
+  <table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse;">
+    <thead style="background: #eee;">
+      <tr>
+        <th>項目</th>
+        <% @parameter_diff.each do |row| %>
+          <th>Run #<%= row[:run_id] %></th>
+        <% end %>
+      </tr>
+    </thead>
+    <tbody>
+      <% %i[period_from period_to fee_rate slippage_rate risk_policy_id strategy_revision_id].each do |key| %>
+        <tr>
+          <th><%= key %></th>
+          <% @parameter_diff.each do |row| %>
+            <td><%= row[key] %></td>
+          <% end %>
+        </tr>
+      <% end %>
+    </tbody>
+  </table>
+</section>
