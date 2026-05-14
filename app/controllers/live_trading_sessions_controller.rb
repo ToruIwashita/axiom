@@ -3,11 +3,15 @@
 # stop / emergency_stop は Step 3.4-10 で追加予定.
 class LiveTradingSessionsController < ApplicationController
   def index
-    @sessions = LiveTrading::Session.order(id: :desc)
+    # Phase 4.2 + 高-3 反映: bulk_monitor で N+1 回避 + kaminari paginate + session_lease eager load
+    @sessions = LiveTrading::Session.includes(:session_lease).order(id: :desc).page(params[:page]).per(50)
+    @monitor_map = Domain::SessionMonitorService.bulk_monitor(sessions: @sessions)
   end
 
   def show
     @session = LiveTrading::Session.find(params[:id].to_i)
+    # Phase 4.2 + 新-中-5 反映: @monitor を memoize して show 内 partials で reuse
+    @monitor = Domain::SessionMonitorService.new(session: @session)
   rescue ActiveRecord::RecordNotFound
     redirect_to live_trading_sessions_path, alert: "Session not found"
   end

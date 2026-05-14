@@ -1,0 +1,19 @@
+<%
+  remaining = monitor_hash[:lease_remaining_seconds]
+  if remaining.nil?
+    color = "#999"
+    label = "—"
+  elsif remaining > 60
+    color = "#2e7d32"
+    label = "#{remaining}s"
+  elsif remaining >= 30
+    color = "#ef6c00"
+    label = "#{remaining}s"
+  else
+    color = "#c62828"
+    label = "#{remaining}s ⚠"
+  end
+%>
+<span style="display:inline-block; padding:2px 8px; border-radius:4px; background:<%= color %>; color:#fff; font-size:0.85em;">
+  <%= label %>
+</span>

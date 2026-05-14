@@ -1,0 +1,20 @@
+<% if heartbeats.any? %>
+  <table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse;">
+    <thead style="background: #eee;">
+      <tr>
+        <th>pulsed_at</th>
+        <th>worker_instance_id</th>
+      </tr>
+    </thead>
+    <tbody>
+      <% heartbeats.each do |hb| %>
+        <tr>
+          <td><%= hb.pulsed_at.iso8601 %></td>
+          <td><code><%= hb.worker_instance_id %></code></td>
+        </tr>
+      <% end %>
+    </tbody>
+  </table>
+<% else %>
+  <p style="color: #999;">heartbeat 履歴なし</p>
+<% end %>

@@ -224,6 +224,33 @@ module PayloadHelpers
     }
   end
 
+  # Phase 4.2 + 高-3 反映: 一覧用 payload(bulk_monitor 結果 Hash を merge / N+1 回避).
+  # @param session [LiveTrading::Session]
+  # @param monitor_hash [Hash] `Domain::SessionMonitorService.bulk_monitor` の戻り値の該当 session 分
+  def live_trading_session_list_payload(session, monitor_hash)
+    live_trading_session_payload(session).merge(
+      heartbeat_elapsed_seconds: monitor_hash[:heartbeat_elapsed_seconds],
+      lease_remaining_seconds: monitor_hash[:lease_remaining_seconds],
+      ws_status: monitor_hash[:ws_status],
+      alerts: monitor_hash[:alerts]
+    )
+  end
+
+  # Phase 4.2 + 高-3 反映: 詳細用 payload(SessionMonitorService インスタンス経由).
+  # @param session [LiveTrading::Session]
+  # @param monitor [Domain::SessionMonitorService] memoize された monitor インスタンス
+  def live_trading_session_detail_payload(session, monitor)
+    live_trading_session_payload(session).merge(
+      heartbeat_elapsed_seconds: monitor.heartbeat_elapsed_seconds,
+      last_heartbeat_at: serialize_datetime(session.session_heartbeats.recent(1).first&.pulsed_at),
+      lease_remaining_seconds: monitor.lease_remaining_seconds,
+      lease_status: session.session_lease&.status,
+      lease_expires_at: serialize_datetime(session.session_lease&.expires_at),
+      ws_reconnect_status: monitor.ws_reconnect_status,
+      alerts: monitor.alerts
+    )
+  end
+
   def revision_payload(revision)
     {
       id: revision.id,

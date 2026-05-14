@@ -1,0 +1,30 @@
+<%# 新々-中-2 反映: MVP は現行 lease 1 件のみ表示(履歴対応は Phase 5b で SessionLease audit log 新設後) %>
+<% if lease_events.any? %>
+  <table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse;">
+    <thead style="background: #eee;">
+      <tr>
+        <th>acquired_at</th>
+        <th>expires_at</th>
+        <th>renewed_at</th>
+        <th>status</th>
+        <th>worker_instance_id</th>
+      </tr>
+    </thead>
+    <tbody>
+      <% lease_events.each do |lease| %>
+        <tr>
+          <td><%= lease.acquired_at.iso8601 %></td>
+          <td><%= lease.expires_at.iso8601 %></td>
+          <td><%= lease.renewed_at.iso8601 %></td>
+          <td><%= lease.status %></td>
+          <td><code><%= lease.worker_instance_id %></code></td>
+        </tr>
+      <% end %>
+    </tbody>
+  </table>
+  <p style="color: #999; font-size: 0.85em;">
+    ※ MVP では現行 lease 1 件のみ表示。履歴は Phase 5b で SessionLease audit log 新設後に拡張予定。
+  </p>
+<% else %>
+  <p style="color: #999;">lease なし</p>
+<% end %>

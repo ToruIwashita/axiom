@@ -46,3 +46,17 @@
     <tr><th>updated_at</th><td><%= @session.updated_at.iso8601 %></td></tr>
   </tbody>
 </table>
+
+<%# Phase 4.2 + 高-3 + 新-中-5 反映: alert banner + timeline + Worker 別 WS 履歴 / @monitor memoize %>
+<% if (alerts = @monitor.alerts).any? %>
+  <%= render "alert_banner", alerts: alerts %>
+<% end %>
+
+<h2>Heartbeat タイムライン</h2>
+<%= render "heartbeat_timeline", heartbeats: @monitor.recent_heartbeats(10) %>
+
+<h2>Lease 現状</h2>
+<%= render "lease_current_state", lease_events: @monitor.lease_events %>
+
+<h2>WS Reconnect Timeline(Worker 別)</h2>
+<%= render "ws_reconnect_timeline", ws_metrics_by_worker: @monitor.recent_ws_metrics_grouped_by_worker(10) %>

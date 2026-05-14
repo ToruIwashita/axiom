@@ -24,13 +24,19 @@
   </div>
 </details>
 
+<%# Phase 4.2 + 高-3 反映: 件数 + kaminari paginate %>
+<p style="color: #666;">全 <%= @sessions.total_count %> 件 / 表示 <%= @sessions.size %> 件</p>
+
 <% if @sessions.any? %>
-  <table>
-    <thead>
+  <table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse; width: 100%;">
+    <thead style="background: #eee;">
       <tr>
         <th>#</th>
         <th>symbol</th>
         <th>status</th>
+        <th>Heartbeat</th>
+        <th>Lease 残り</th>
+        <th>WS Reconnect</th>
         <th>leverage</th>
         <th>margin_mode</th>
         <th>position_mode</th>
@@ -41,10 +47,14 @@
     </thead>
     <tbody>
       <% @sessions.each do |session| %>
+        <% monitor_hash = @monitor_map[session.id] %>
         <tr>
           <td><%= session.id %></td>
           <td><%= session.symbol %></td>
           <td><%= render "status_badge", session: session %></td>
+          <td><%= render "heartbeat_status", monitor_hash: monitor_hash %></td>
+          <td><%= render "lease_status", monitor_hash: monitor_hash %></td>
+          <td><%= render "ws_status", monitor_hash: monitor_hash %></td>
           <td><%= session.leverage %></td>
           <td><%= session.margin_mode %></td>
           <td><%= session.position_mode %></td>
@@ -55,6 +65,11 @@
       <% end %>
     </tbody>
   </table>
+
+  <%# Phase 4.2 + 高-3 反映: kaminari paginate %>
+  <div style="margin-top: 1em;">
+    <%= paginate @sessions %>
+  </div>
 <% else %>
   <p>セッションが登録されていません。</p>
 <% end %>

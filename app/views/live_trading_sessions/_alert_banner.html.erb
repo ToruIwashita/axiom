@@ -1,0 +1,13 @@
+<% alert_messages = {
+     heartbeat_timeout: "Heartbeat 60 秒超未受信(Worker 無応答の可能性)",
+     lease_expired: "SessionLease が期限切れ(active 状態で expires_at 経過)",
+     ws_consecutive_reconnect: "WS 5 分以内に reconnect 5 回以上(接続不安定)"
+   } %>
+<div style="background: #fff3cd; border-left: 4px solid #c62828; padding: 1em; margin: 1em 0; border-radius: 4px;">
+  <strong style="color: #c62828;">⚠ 死活監視 alert</strong>
+  <ul style="margin: 0.5em 0 0 1.5em;">
+    <% alerts.each do |a| %>
+      <li><%= alert_messages[a] || a.to_s %></li>
+    <% end %>
+  </ul>
+</div>
