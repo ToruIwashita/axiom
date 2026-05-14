@@ -100,11 +100,11 @@ RSpec.describe "Api::V1::Integration::AiInvocationLogs", type: :request do
     context "存在しない ID の場合" do
       let(:log_id) { 999_999 }
 
-      it "404 not_found + error 情報" do
+      it "404 not_found + 静的 error メッセージ(内部実装露出回避)" do
         subject
         expect(response).to have_http_status(:not_found)
         body = JSON.parse(response.body)
-        expect(body["error"]).to be_a(String)
+        expect(body["error"]).to eq("ai_invocation_log not found")
       end
     end
   end

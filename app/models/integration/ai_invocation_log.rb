@@ -10,6 +10,8 @@ module Integration
     ].freeze
     STATUSES = %w[success timeout error validation_failed].freeze
     PROMPT_RESPONSE_MAX_LENGTH = 10_000
+    # Phase 4.1 + multi-agent review Agent 2 低 反映: 一覧 API での truncate 文字数を定数化.
+    LIST_EXCERPT_LENGTH = 200
 
     private_constant :PROMPT_RESPONSE_MAX_LENGTH
 

@@ -2,6 +2,11 @@
 
 <h1>AI Invocation Logs</h1>
 
+<%# multi-agent review Agent 2 低 反映: aggregate 動線追加 %>
+<p>
+  <%= link_to "集計画面 (context_type 別 success rate / latency)", aggregate_integration_ai_invocation_logs_path %>
+</p>
+
 <%# フィルタフォーム %>
 <div style="margin-bottom: 1.5em; padding: 1em; background: #f5f5f5; border-radius: 4px;">
   <%= form_with url: integration_ai_invocation_logs_path, method: :get, local: true do |f| %>

@@ -40,16 +40,23 @@ module ApplicationServices
     #   - `:avg_latency` [Integer] ms 単位.
     #   - `:p50_latency` [Integer] ms 単位.
     #   - `:p99_latency` [Integer] ms 単位.
+    # multi-agent review Agent 2 高-1 反映:
+    # 3 SQL の間に新規 INSERT が走ると counts/avg/percentile の母集団が一致せず
+    # `total != success_count + failure_count` 等の微小不整合が起きうるため
+    # `Integration::AiInvocationLog.transaction` で囲む.
+    # MySQL 既定 isolation = REPEATABLE READ により snapshot が固定される.
     def aggregate
-      counts_by_ctype_status = Integration::AiInvocationLog.group(:context_type, :status).count
-      avg_latency_by_ctype = Integration::AiInvocationLog.group(:context_type).average(:latency_ms)
-      latencies_by_ctype = Integration::AiInvocationLog
-                             .pluck(:context_type, :latency_ms)
-                             .group_by(&:first)
-                             .transform_values { |arr| arr.map(&:last).sort }
+      Integration::AiInvocationLog.transaction(requires_new: true) do
+        counts_by_ctype_status = Integration::AiInvocationLog.group(:context_type, :status).count
+        avg_latency_by_ctype = Integration::AiInvocationLog.group(:context_type).average(:latency_ms)
+        latencies_by_ctype = Integration::AiInvocationLog
+                               .pluck(:context_type, :latency_ms)
+                               .group_by(&:first)
+                               .transform_values { |arr| arr.map(&:last).sort }
 
-      Integration::AiInvocationLog::CONTEXT_TYPES.index_with do |ct|
-        compute_stats(ct, counts_by_ctype_status, avg_latency_by_ctype, latencies_by_ctype[ct] || [])
+        Integration::AiInvocationLog::CONTEXT_TYPES.index_with do |ct|
+          compute_stats(ct, counts_by_ctype_status, avg_latency_by_ctype, latencies_by_ctype[ct] || [])
+        end
       end
     end
 

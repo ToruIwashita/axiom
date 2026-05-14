@@ -19,11 +19,12 @@ module Api
         end
 
         # GET /api/v1/integration/ai_invocation_logs/:id
+        # multi-agent review Agent 3 中-1 反映: e.message から内部実装(クラス名)露出を防ぐため静的メッセージ化.
         def show
           log = service.get(log_id: params[:id].to_i)
           render json: ai_invocation_log_detail_payload(log)
-        rescue ActiveRecord::RecordNotFound => e
-          render json: { error: e.message }, status: :not_found
+        rescue ActiveRecord::RecordNotFound
+          render json: { error: "ai_invocation_log not found" }, status: :not_found
         end
 
         # GET /api/v1/integration/ai_invocation_logs/aggregate
