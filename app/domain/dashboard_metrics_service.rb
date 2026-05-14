@@ -56,12 +56,14 @@ module Domain
     #
     # @return [Array<Hash>] [{ revision_id:, revision_label:, live_pnl:, live_count:, live_wins:, backtest_runs: }]
     def per_strategy_summary
+      # multi-agent review followup(中-2): LiveTrading::Trade に直接 strategy_revision_id カラムが
+      # あるため joins(:strategy_revision) は冗長(3 INNER JOIN を削減).group(:strategy_revision_id)
+      # で直接集計する.
       revisions = Strategy::Revision.includes(:strategy_definition).index_by(&:id)
-      base_trades = LiveTrading::Trade.joins(:strategy_revision)
-                                       .where(status: "closed")
-      pnl_by_rev = base_trades.group("strategy_revisions.id").sum(:realized_pnl)
-      count_by_rev = base_trades.group("strategy_revisions.id").count
-      wins_by_rev = base_trades.where("realized_pnl > 0").group("strategy_revisions.id").count
+      base_trades = LiveTrading::Trade.where(status: "closed")
+      pnl_by_rev = base_trades.group(:strategy_revision_id).sum(:realized_pnl)
+      count_by_rev = base_trades.group(:strategy_revision_id).count
+      wins_by_rev = base_trades.where("realized_pnl > 0").group(:strategy_revision_id).count
       bt_runs_by_rev = Backtesting::Run.where(status: "completed").group(:strategy_revision_id).count
 
       revisions.map do |rev_id, rev|

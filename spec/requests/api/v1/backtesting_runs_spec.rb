@@ -205,6 +205,28 @@ RSpec.describe "Api::V1::BacktestingRuns", type: :request do
         expect(runs.first["status"]).to eq("pending")
       end
     end
+
+    # Phase 4.3 multi-agent review followup(code-reviewer 高-1):
+    # BacktestingRunService#list の :from / :to filter が controller 経由で到達する事を確認
+    context "?from=ISO8601 フィルタ(36 時間以前を除外)" do
+      subject { get "/api/v1/backtesting_runs", params: { from: 36.hours.ago.iso8601 }, as: :json }
+
+      it "from 以降に created された Run のみ返す(run_completed のみ)" do
+        subject
+        runs = response.parsed_body["runs"]
+        expect(runs.map { |r| r["status"] }).to contain_exactly("completed")
+      end
+    end
+
+    context "?to=ISO8601 フィルタ" do
+      subject { get "/api/v1/backtesting_runs", params: { to: 36.hours.ago.iso8601 }, as: :json }
+
+      it "to 以前に created された Run のみ返す(run_pending のみ)" do
+        subject
+        runs = response.parsed_body["runs"]
+        expect(runs.map { |r| r["status"] }).to contain_exactly("pending")
+      end
+    end
   end
 
   describe "POST /api/v1/backtesting_runs/:id/cancel" do

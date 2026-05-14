@@ -110,6 +110,25 @@ RSpec.describe Domain::DashboardMetricsService do
         expect(subject[:live_trading]).to eq(BigDecimal("5"))
       end
     end
+
+    # multi-agent review followup(spec coverage 高-1):
+    # since 境界フィルタ(range: 30.days)外の Run / Trade が除外される事を保証
+    context "range 外の Run / Trade は集計に含まれない" do
+      let!(:session) { create_session }
+      before do
+        # range 外(31 日前)
+        create_backtest_run(total_pnl: BigDecimal("999"), finished_at: 31.days.ago)
+        create_live_trade(session, realized_pnl: BigDecimal("999"), exit_at: 31.days.ago)
+        # range 内
+        create_backtest_run(total_pnl: BigDecimal("100"), finished_at: 1.day.ago)
+        create_live_trade(session, realized_pnl: BigDecimal("10"))
+      end
+
+      it "range 外(since 以前)を除外し range 内のみ sum する" do
+        expect(subject[:backtesting]).to eq(BigDecimal("100"))
+        expect(subject[:live_trading]).to eq(BigDecimal("10"))
+      end
+    end
   end
 
   describe "#uptime_seconds" do
@@ -221,6 +240,20 @@ RSpec.describe Domain::DashboardMetricsService do
       rev1_summary = subject.find { |s| s[:revision_id] == revision.id }
       expect(rev1_summary[:revision_label]).to be_a(String)
       expect(rev1_summary[:revision_label]).to include("Dash Strat")
+    end
+
+    # multi-agent review followup(spec coverage 高-2):
+    # backtest_runs カウントは completed のみで running / failed は除外される事を保証
+    context "backtest_runs カウントは completed のみ集計" do
+      before do
+        create_backtest_run(total_pnl: BigDecimal("999"), status: "running", finished_at: nil)
+        create_backtest_run(total_pnl: BigDecimal("999"), status: "failed", finished_at: 1.hour.ago)
+      end
+
+      it "running / failed Run は backtest_runs から除外され completed のみ計上(rev1 = 2)" do
+        rev1_summary = subject.find { |s| s[:revision_id] == revision.id }
+        expect(rev1_summary[:backtest_runs]).to eq(2)
+      end
     end
 
     # 新-中-2 反映: N+1 回避(group by 4 query 程度で完結)

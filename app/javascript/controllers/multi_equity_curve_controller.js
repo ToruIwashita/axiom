@@ -13,7 +13,9 @@ export default class extends Controller {
   static targets = ["canvas"]
 
   async connect() {
-    const url = `${this.apiUrlValue}&sample_size=${this.sampleSizeValue}`
+    // multi-agent review followup(API compat 中-2): apiUrlValue が `?` を含むかで連結子を切替
+    const sep = this.apiUrlValue.includes("?") ? "&" : "?"
+    const url = `${this.apiUrlValue}${sep}sample_size=${this.sampleSizeValue}`
     const response = await fetch(url)
     const data = await response.json()
     this.renderChart(data.equity_curves || [])

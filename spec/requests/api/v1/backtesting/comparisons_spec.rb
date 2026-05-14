@@ -56,5 +56,13 @@ RSpec.describe "Api::V1::Backtesting::Comparisons", type: :request do
       get "/api/v1/backtesting/comparisons/show", params: { run_ids: [] }, as: :json
       expect(response).to have_http_status(:bad_request)
     end
+
+    # multi-agent review followup(architecture M-4 + API compat 低-2):
+    # viewmodel 方針 / 部分マッチ許容 / 全件不存在でも 200 + 空配列を仕様として固定
+    it "存在しない run_id のみ指定された場合 200 OK + 空 metrics_table(部分マッチ許容仕様)" do
+      get "/api/v1/backtesting/comparisons/show", params: { run_ids: [ 99_999_999 ] }, as: :json
+      expect(response).to have_http_status(:ok)
+      expect(response.parsed_body["metrics_table"]).to eq([])
+    end
   end
 end

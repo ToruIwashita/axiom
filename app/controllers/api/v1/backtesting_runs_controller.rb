@@ -50,8 +50,14 @@ module Api
         @service ||= ApplicationServices::BacktestingRunService.new
       end
 
+      # Phase 4.3 multi-agent review followup(code-reviewer 高-1):
+      # BacktestingRunService#list の :from / :to filter を controller から到達可能にする.
+      # Dashboard / Comparison 画面の期間絞り込みで利用される.
       def list_filters
-        params.permit(:strategy_definition_id, :status).to_h.symbolize_keys
+        raw = params.permit(:strategy_definition_id, :status, :from, :to).to_h.symbolize_keys
+        raw[:from] = Time.parse(raw[:from]) if raw[:from].present?
+        raw[:to] = Time.parse(raw[:to]) if raw[:to].present?
+        raw
       end
     end
   end
