@@ -1,0 +1,17 @@
+<%
+  ws_status = monitor_hash[:ws_status]
+  if ws_status.nil?
+    color = "#999"
+    label = "—"
+  else
+    pub = ws_status[:public_count_since_start]
+    pri = ws_status[:private_count_since_start]
+    has_alert = monitor_hash[:alerts].include?(:ws_consecutive_reconnect)
+    color = has_alert ? "#c62828" : "#1976d2"
+    label = "P:#{pub} / V:#{pri}"
+    label += " ⚠" if has_alert
+  end
+%>
+<span style="display:inline-block; padding:2px 8px; border-radius:4px; background:<%= color %>; color:#fff; font-size:0.85em;">
+  <%= label %>
+</span>

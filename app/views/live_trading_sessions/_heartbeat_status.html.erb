@@ -1,0 +1,19 @@
+<%
+  elapsed = monitor_hash[:heartbeat_elapsed_seconds]
+  if elapsed.nil?
+    color = "#999"
+    label = "—"
+  elsif elapsed < 5
+    color = "#2e7d32"
+    label = "#{elapsed}s"
+  elsif elapsed <= 60
+    color = "#ef6c00"
+    label = "#{elapsed}s"
+  else
+    color = "#c62828"
+    label = "#{elapsed}s ⚠"
+  end
+%>
+<span style="display:inline-block; padding:2px 8px; border-radius:4px; background:<%= color %>; color:#fff; font-size:0.85em;">
+  <%= label %>
+</span>

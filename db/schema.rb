@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_05_05_140009) do
+ActiveRecord::Schema[8.1].define(version: 2026_05_14_000001) do
   create_table "backtesting_equity_curve_points", charset: "utf8mb4", collation: "utf8mb4_0900_ai_ci", force: :cascade do |t|
     t.bigint "backtesting_run_id", null: false
     t.datetime "created_at", null: false
@@ -256,6 +256,23 @@ ActiveRecord::Schema[8.1].define(version: 2026_05_05_140009) do
     t.index ["strategy_revision_id"], name: "index_live_trading_trades_on_strategy_revision_id"
   end
 
+  create_table "live_trading_ws_metrics", charset: "utf8mb4", collation: "utf8mb4_0900_ai_ci", force: :cascade do |t|
+    t.datetime "created_at", null: false
+    t.integer "delta_private", default: 0, null: false
+    t.integer "delta_public", default: 0, null: false
+    t.datetime "detected_at", null: false
+    t.bigint "live_trading_session_id", null: false
+    t.integer "private_count_since_start", default: 0, null: false
+    t.integer "public_count_since_start", default: 0, null: false
+    t.string "source_event", limit: 32
+    t.string "target_ws", limit: 16
+    t.datetime "updated_at", null: false
+    t.string "worker_instance_id", limit: 64, null: false
+    t.index ["live_trading_session_id", "detected_at"], name: "idx_lt_ws_metrics_session_detected_at"
+    t.index ["live_trading_session_id", "worker_instance_id", "detected_at"], name: "idx_lt_ws_metrics_session_worker_detected_at"
+    t.index ["live_trading_session_id"], name: "index_live_trading_ws_metrics_on_live_trading_session_id"
+  end
+
   create_table "market_data_funding_rate_histories", charset: "utf8mb4", collation: "utf8mb4_0900_ai_ci", force: :cascade do |t|
     t.datetime "created_at", null: false
     t.decimal "funding_rate", precision: 12, scale: 8, null: false
@@ -385,5 +402,6 @@ ActiveRecord::Schema[8.1].define(version: 2026_05_05_140009) do
   add_foreign_key "live_trading_sessions", "strategy_revisions"
   add_foreign_key "live_trading_trades", "live_trading_sessions"
   add_foreign_key "live_trading_trades", "strategy_revisions"
+  add_foreign_key "live_trading_ws_metrics", "live_trading_sessions"
   add_foreign_key "strategy_revisions", "strategy_definitions"
 end

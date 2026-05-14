@@ -6,15 +6,25 @@ module Api
       include PayloadHelpers
 
       def index
-        sessions = LiveTrading::Session.order(id: :desc)
-        render json: { sessions: sessions.map { |s| live_trading_session_payload(s) } }
+        # Phase 4.2 + 高-3 反映: bulk_monitor で N+1 回避 + kaminari paginate
+        # multi-agent review followup(中-2): bulk_monitor 内で SessionLease を独自取得するため
+        # ここでの includes(:session_lease) は使われず無駄な eager load 1 SQL となるため削除
+        sessions = LiveTrading::Session.order(id: :desc).page(params[:page]).per(50)
+        monitor_map = Domain::SessionMonitorService.bulk_monitor(sessions: sessions)
+        render json: {
+          sessions: sessions.map { |s| live_trading_session_list_payload(s, monitor_map[s.id]) },
+          total: sessions.total_count
+        }
       end
 
       def show
         session = LiveTrading::Session.find(params[:id].to_i)
-        render json: live_trading_session_payload(session)
-      rescue ActiveRecord::RecordNotFound => e
-        render json: { error: e.message }, status: :not_found
+        # Phase 4.2 + 新-中-5 反映: monitor を memoize して detail payload 経由で渡す
+        monitor = Domain::SessionMonitorService.new(session: session)
+        render json: live_trading_session_detail_payload(session, monitor)
+      rescue ActiveRecord::RecordNotFound
+        # Phase 4.1 Agent 3 中-1 同流儀: 内部実装露出回避のため静的メッセージ化
+        render json: { error: "live_trading_session not found" }, status: :not_found
       end
 
       def create

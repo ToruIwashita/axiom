@@ -1,0 +1,34 @@
+<%# 新-中-4 反映: WsMetric を worker_instance_id 別にグループ化表示(Worker 跨ぎ「単調減少」回避) %>
+<% if ws_metrics_by_worker.any? %>
+  <% ws_metrics_by_worker.each do |worker_id, metrics| %>
+    <h3 style="margin-top: 1em;">Worker: <code><%= worker_id %></code></h3>
+    <table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse;">
+      <thead style="background: #eee;">
+        <tr>
+          <th>detected_at</th>
+          <th>public_count</th>
+          <th>private_count</th>
+          <th>delta_public</th>
+          <th>delta_private</th>
+          <th>source_event</th>
+          <th>target_ws</th>
+        </tr>
+      </thead>
+      <tbody>
+        <% metrics.each do |m| %>
+          <tr>
+            <td><%= m.detected_at.iso8601 %></td>
+            <td><%= m.public_count_since_start %></td>
+            <td><%= m.private_count_since_start %></td>
+            <td><%= m.delta_public %></td>
+            <td><%= m.delta_private %></td>
+            <td><%= m.source_event || "—" %></td>
+            <td><%= m.target_ws || "—" %></td>
+          </tr>
+        <% end %>
+      </tbody>
+    </table>
+  <% end %>
+<% else %>
+  <p style="color: #999;">WS reconnect 履歴なし</p>
+<% end %>

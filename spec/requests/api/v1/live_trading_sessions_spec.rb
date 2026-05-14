@@ -74,6 +74,14 @@ RSpec.describe "Api::V1::LiveTradingSessions", type: :request do
         "position_mode" => "one_way_mode"
       )
     end
+
+    # Phase 4.2 + 高-3 反映: list payload(monitoring fields + total)
+    it "list payload に heartbeat / lease / ws_status / alerts + total が含まれる" do
+      subject
+      payload = response.parsed_body["sessions"].find { |s| s["id"] == session1.id }
+      expect(payload).to include("heartbeat_elapsed_seconds", "lease_remaining_seconds", "ws_status", "alerts")
+      expect(response.parsed_body["total"]).to eq(2)
+    end
   end
 
   describe "GET /api/v1/live_trading_sessions/:id" do
@@ -96,14 +104,25 @@ RSpec.describe "Api::V1::LiveTradingSessions", type: :request do
           "emergency_stop_mode" => "cancel_only"
         )
       end
+
+      # Phase 4.2 + 高-3 反映: detail payload(monitoring fields)
+      it "detail payload に heartbeat / lease / ws_reconnect_status / alerts が含まれる" do
+        subject
+        expect(response.parsed_body).to include(
+          "heartbeat_elapsed_seconds", "lease_remaining_seconds",
+          "lease_status", "lease_expires_at", "last_heartbeat_at",
+          "ws_reconnect_status", "alerts"
+        )
+      end
     end
 
     context "存在しない session_id の場合" do
       subject { get "/api/v1/live_trading_sessions/0", as: :json }
 
-      it "404 Not Found を返す" do
+      it "404 Not Found + 静的メッセージ(内部実装露出回避)" do
         subject
         expect(response).to have_http_status(:not_found)
+        expect(response.parsed_body["error"]).to eq("live_trading_session not found")
       end
     end
   end

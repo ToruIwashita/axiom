@@ -69,6 +69,33 @@ RSpec.describe "LiveTradingSessions(View)", type: :request do
         expect(response.body).to include("BTCUSDT")
         expect(response.body).to include("running")
       end
+
+      # Phase 4.2 + 高-3 反映: 監視列(Heartbeat / Lease 残り / WS Reconnect)+ kaminari paginate
+      it "監視列(Heartbeat / Lease 残り / WS Reconnect)が描画される" do
+        subject
+        expect(response.body).to include("Heartbeat")
+        expect(response.body).to include("Lease 残り")
+        expect(response.body).to include("WS Reconnect")
+      end
+    end
+
+    # Phase 4.2 + 中-7 反映: kaminari ページング動作
+    context "60 件超で paginate リンク描画" do
+      before do
+        60.times do
+          LiveTrading::Session.create!(
+            strategy_definition: definition, strategy_revision: revision, risk_policy_id: risk_policy.id,
+            symbol: "BTCUSDT", leverage: 10, margin_mode: "isolated", position_mode: "one_way_mode",
+            asset_mode: "single", margin_coin: "USDT", emergency_stop_mode: "cancel_only",
+            status: "running"
+          )
+        end
+      end
+
+      it "?page=2 リンクが描画される" do
+        subject
+        expect(response.body).to include("page=2")
+      end
     end
   end
 
@@ -145,6 +172,53 @@ RSpec.describe "LiveTradingSessions(View)", type: :request do
         expect(response.body).to include("BTCUSDT")
         expect(response.body).to include("running")
         expect(response.body).to include(session.id.to_s)
+      end
+
+      # Phase 4.2 + 高-3 + 新-中-5 反映: timeline + WS reconnect Worker 別履歴セクション表示
+      it "Heartbeat タイムライン / Lease 現状 / WS Reconnect Timeline セクションが描画される" do
+        subject
+        expect(response.body).to include("Heartbeat タイムライン")
+        expect(response.body).to include("Lease 現状")
+        expect(response.body).to include("WS Reconnect Timeline")
+      end
+    end
+
+    # Phase 4.2 multi-agent review followup(高-1):
+    # acquire 直後 lease は renewed_at が nil で生成される(SessionLease#acquire! の仕様)
+    # _lease_current_state.html.erb で nil 安全に表示できることを保証する回帰テスト
+    context "renew 未実施 lease(renewed_at: nil)を持つ session の場合" do
+      before do
+        LiveTrading::SessionLease.acquire!(
+          session_id: session.id,
+          worker_instance_id: "test-worker"
+        )
+      end
+
+      subject { get live_trading_session_path(session) }
+
+      it "200 OK + Lease 現状セクションが描画される(NoMethodError なし)" do
+        subject
+        expect(response).to have_http_status(:ok)
+        expect(response.body).to include("Lease 現状")
+      end
+    end
+
+    # Phase 4.2 + 新-中-5 反映: alert banner 表示(heartbeat timeout 60+ 秒未受信)
+    context "heartbeat 100 秒未受信で alert banner 表示" do
+      before do
+        LiveTrading::SessionHeartbeat.pulse!(
+          session_id: session.id,
+          worker_instance_id: "test-worker",
+          pulsed_at: 100.seconds.ago
+        )
+      end
+
+      subject { get live_trading_session_path(session) }
+
+      it "死活監視 alert banner が描画される" do
+        subject
+        expect(response.body).to include("死活監視 alert")
+        expect(response.body).to include("Heartbeat 60 秒超未受信")
       end
     end
 

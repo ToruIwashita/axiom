@@ -60,6 +60,11 @@ module LiveTrading
              class_name: "Exchange::PositionSnapshot",
              foreign_key: :live_trading_session_id,
              dependent: :delete_all
+    # Phase 4.2: WS reconnect メトリクス(SessionMonitorService が UI 表示で参照)
+    has_many :ws_metrics,
+             class_name: "LiveTrading::WsMetric",
+             foreign_key: :live_trading_session_id,
+             dependent: :delete_all
 
     validates :symbol, presence: true, length: { maximum: 32 }
     validates :leverage, presence: true,
