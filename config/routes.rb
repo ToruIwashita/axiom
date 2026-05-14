@@ -49,6 +49,9 @@ Rails.application.routes.draw do
           collection { get :aggregate }
         end
       end
+
+      # Phase 4.3: 横断ダッシュボード API(単一リソース / 単数 controller クラス維持)
+      resource :dashboard, only: %i[show], controller: "dashboard"
     end
   end
 
@@ -84,6 +87,9 @@ Rails.application.routes.draw do
       collection { get :aggregate }
     end
   end
+
+  # Phase 4.3: 横断ダッシュボード UI(単一リソース / 単数 controller クラス維持)
+  resource :dashboard, only: %i[show], controller: "dashboard"
 
   # Defines the root path route ("/")
   root "backtesting_runs#index"
