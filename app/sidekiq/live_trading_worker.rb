@@ -701,7 +701,10 @@ class LiveTradingWorker
       reduce_only: intent.fetch("reduce_only", "NO"),
       client_oid: intent["client_oid"] || deterministic_client_oid(session, candle, idx),
       trade_side: intent["trade_side"],
-      price: intent["price"]&.to_s,
+      # 戦略 DSL（LiveContext::OrderProxy#entry）は limit 価格を "limit_price" キーで
+      # 生成する（"price" ではない）.誤キー参照では limit 注文の価格が常に欠落するため
+      # "limit_price" を参照する.
+      price: intent["limit_price"]&.to_s,
       preset_stop_surplus_price: intent["tp"]&.to_s,
       preset_stop_loss_price: intent["sl"]&.to_s
     )
