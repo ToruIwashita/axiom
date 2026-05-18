@@ -1408,10 +1408,10 @@ RSpec.describe LiveTradingWorker do
             }
           end
 
-          it "place_order は呼ばれず logger.warn に ArgumentError が落ちる" do
+          it "place_order は呼ばれず契約違反として logger.error に fail-fast 明示で reject される" do
             subject
             expect(order_endpoint_di).not_to have_received(:place_order)
-            expect(logger).to have_received(:warn).with(/unsupported order intent side/)
+            expect(logger).to have_received(:error).with(%r{unsupported side.*contract violation / fail-fast})
           end
         end
 
