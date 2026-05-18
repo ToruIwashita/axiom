@@ -1289,20 +1289,21 @@ RSpec.describe LiveTradingWorker do
           "open" => "50000", "high" => "50100", "low" => "49900", "close" => "50050"
         }
       end
-      # 戦略 DSL(LiveContext#entry)が生成する intent の side は long / short.
-      # Bitget place-order の buy / sell へは place_order_for_intent が変換する.
+      # 戦略 DSL(LiveContext#entry)が生成する intent のキーに合わせる.
+      # side は long / short(Bitget の buy / sell へは place_order_for_intent が変換),
+      # limit 価格は "limit_price" キー("price" ではない).
       let(:order_intent) do
         {
           "side" => "long",
           "order_type" => "limit",
           "size" => "0.01",
-          "price" => "49900",
+          "limit_price" => "49900",
           "client_oid" => "intent-001"
         }
       end
       let(:intent_without_client_oid) do
         {
-          "side" => "long", "order_type" => "limit", "size" => "0.01", "price" => "49900"
+          "side" => "long", "order_type" => "limit", "size" => "0.01", "limit_price" => "49900"
         }
       end
       let(:state_diff) do
