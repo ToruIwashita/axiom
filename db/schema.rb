@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_05_14_000001) do
+ActiveRecord::Schema[8.1].define(version: 2026_05_19_000001) do
   create_table "backtesting_equity_curve_points", charset: "utf8mb4", collation: "utf8mb4_0900_ai_ci", force: :cascade do |t|
     t.bigint "backtesting_run_id", null: false
     t.datetime "created_at", null: false
@@ -247,9 +247,11 @@ ActiveRecord::Schema[8.1].define(version: 2026_05_14_000001) do
     t.decimal "quantity", precision: 30, scale: 12, null: false
     t.decimal "realized_pnl", precision: 30, scale: 12
     t.string "side", limit: 8, null: false
+    t.decimal "sl_pct", precision: 30, scale: 12
     t.string "status", limit: 16, null: false
     t.bigint "strategy_revision_id", null: false
     t.string "symbol", limit: 32, null: false
+    t.decimal "tp_pct", precision: 30, scale: 12
     t.datetime "updated_at", null: false
     t.index ["live_trading_session_id"], name: "index_live_trading_trades_on_live_trading_session_id"
     t.index ["status"], name: "index_live_trading_trades_on_status"
