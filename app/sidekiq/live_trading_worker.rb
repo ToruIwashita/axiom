@@ -641,7 +641,8 @@ class LiveTradingWorker
 
   # 1 件の order_intent を side 検証 → AI filter → RiskGuard → 発注の順に評価する.
   # いずれかで否決された場合は place_order を呼ばない.
-  # 単一 intent 内の transient 例外は logger.warn に落として他 intent の処理を妨げない.
+  # 単一 intent 内で送出された例外は logger.warn に落として他 intent の処理を妨げない
+  # (side の契約違反は valid_intent_side? で事前排除済 / それ以外の例外種別の精緻な分類は本 subtask 範囲外).
   # candle / idx は client_oid 決定論的生成(R-1 #3 反映)に利用.
   def process_order_intent(session, revision, intent, candle, idx)
     return unless valid_intent_side?(intent)
@@ -739,12 +740,12 @@ class LiveTradingWorker
   # 戦略 DSL(OrderIntentValueObject)はトレーダー視点の long / short / close を扱い,
   # Bitget v2 mix place-order は buy / sell を要求するため,この境界で変換する.
   # one_way_mode 前提(戦略 DSL は hedge_mode のポジション区別を持たない).
+  # side の妥当性検証は process_order_intent 入口の valid_intent_side? に集約済のため,
+  # 本メソッドは long / short の純変換に徹する(close は place_order_for_intent で close 経路へ分岐済).
   def bitget_order_side(intent_side)
     case intent_side
     when "long" then "buy"
     when "short" then "sell"
-    else
-      raise ArgumentError, "unsupported order intent side: #{intent_side.inspect}"
     end
   end
 
