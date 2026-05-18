@@ -682,11 +682,19 @@ class LiveTradingWorker
   # (R-1 #3 反映: SecureRandom.uuid フォールバックは Worker 再起動 / WS reconnect 後の同 candle 再処理時に
   # 毎回別 uuid となり Bitget の冪等チェック通過 → 二重発注事故になるため決定論的生成に変更).
   def place_order_for_intent(session, intent, candle, idx)
+    # close intent(`ctx.order.close`)は close-positions エンドポイントで成行クローズする.
+    # 戦略 DSL の close は size 情報を持たない(`{ "side" => "close", "size" => "0" }`)ため
+    # place-order ではなく close-positions を使う.one_way_mode は hold_side 不要.
+    if intent["side"] == "close"
+      order_endpoint.close_positions(symbol: session.symbol)
+      return
+    end
+
     order_endpoint.place_order(
       symbol: session.symbol,
       margin_mode: session.margin_mode,
       margin_coin: session.margin_coin,
-      side: intent["side"],
+      side: bitget_order_side(intent["side"]),
       order_type: intent["order_type"],
       size: intent["size"].to_s,
       force: intent.fetch("force", "gtc"),
@@ -697,6 +705,19 @@ class LiveTradingWorker
       preset_stop_surplus_price: intent["tp"]&.to_s,
       preset_stop_loss_price: intent["sl"]&.to_s
     )
+  end
+
+  # 戦略 DSL の方向(long / short)を Bitget place-order の side(buy / sell)に変換する.
+  # 戦略 DSL(OrderIntentValueObject)はトレーダー視点の long / short / close を扱い,
+  # Bitget v2 mix place-order は buy / sell を要求するため,この境界で変換する.
+  # one_way_mode 前提(戦略 DSL は hedge_mode のポジション区別を持たない).
+  def bitget_order_side(intent_side)
+    case intent_side
+    when "long" then "buy"
+    when "short" then "sell"
+    else
+      raise ArgumentError, "unsupported order intent side: #{intent_side.inspect}"
+    end
   end
 
   # 同一 candle / 同一 intent index に対しては再起動後も同じ client_oid を返す決定論生成.

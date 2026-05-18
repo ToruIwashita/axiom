@@ -1289,9 +1289,11 @@ RSpec.describe LiveTradingWorker do
           "open" => "50000", "high" => "50100", "low" => "49900", "close" => "50050"
         }
       end
+      # 戦略 DSL(LiveContext#entry)が生成する intent の side は long / short.
+      # Bitget place-order の buy / sell へは place_order_for_intent が変換する.
       let(:order_intent) do
         {
-          "side" => "buy",
+          "side" => "long",
           "order_type" => "limit",
           "size" => "0.01",
           "price" => "49900",
@@ -1300,7 +1302,7 @@ RSpec.describe LiveTradingWorker do
       end
       let(:intent_without_client_oid) do
         {
-          "side" => "buy", "order_type" => "limit", "size" => "0.01", "price" => "49900"
+          "side" => "long", "order_type" => "limit", "size" => "0.01", "price" => "49900"
         }
       end
       let(:state_diff) do
@@ -1347,7 +1349,7 @@ RSpec.describe LiveTradingWorker do
           expect(session.session_state.reload.state_data).to eq({ "ema" => 50_050 })
         end
 
-        it "order_intents の各 intent に対して place_order を呼ぶ" do
+        it "order_intents の各 intent に対して place_order を呼ぶ(intent side long → Bitget side buy へ変換)" do
           subject
           expect(order_endpoint_di).to have_received(:place_order).with(
             a_hash_including(
@@ -1356,6 +1358,60 @@ RSpec.describe LiveTradingWorker do
               client_oid: "intent-001", price: "49900"
             )
           )
+        end
+
+        # 実機検証で発見した side mismatch バグの回帰テスト:
+        # 戦略 DSL の long / short / close を Bitget place-order の buy / sell および
+        # close-positions エンドポイントへ正しく振り分ける
+        context "intent side が short の場合" do
+          let(:spawn_response_ok) do
+            {
+              "status" => "ok",
+              "order_intents" => [ order_intent.merge("side" => "short") ],
+              "strategy_state_diff" => state_diff, "logs" => [], "errors" => []
+            }
+          end
+
+          it "place_order に Bitget side sell が渡る" do
+            subject
+            expect(order_endpoint_di).to have_received(:place_order).with(
+              a_hash_including(side: "sell")
+            )
+          end
+        end
+
+        context "intent side が close の場合" do
+          let(:spawn_response_ok) do
+            {
+              "status" => "ok",
+              "order_intents" => [ { "side" => "close", "size" => "0", "order_type" => "market" } ],
+              "strategy_state_diff" => state_diff, "logs" => [], "errors" => []
+            }
+          end
+
+          before { allow(order_endpoint_di).to receive(:close_positions) }
+
+          it "place_order ではなく close_positions を呼ぶ" do
+            subject
+            expect(order_endpoint_di).to have_received(:close_positions).with(symbol: "BTCUSDT")
+            expect(order_endpoint_di).not_to have_received(:place_order)
+          end
+        end
+
+        context "intent side が未対応値の場合" do
+          let(:spawn_response_ok) do
+            {
+              "status" => "ok",
+              "order_intents" => [ order_intent.merge("side" => "buy") ],
+              "strategy_state_diff" => state_diff, "logs" => [], "errors" => []
+            }
+          end
+
+          it "place_order は呼ばれず logger.warn に ArgumentError が落ちる" do
+            subject
+            expect(order_endpoint_di).not_to have_received(:place_order)
+            expect(logger).to have_received(:warn).with(/unsupported order intent side/)
+          end
         end
 
         # R-1 #3 反映: client_oid 未指定時の決定論的 ID 生成
