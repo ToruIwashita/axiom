@@ -633,11 +633,19 @@ class LiveTradingWorker
     end
   end
 
-  # 1 件の order_intent を AI filter → RiskGuard → 発注の順に評価する.
+  # Bitget 発注経路(place-order / close-positions)へ振り分け可能な intent side の集合.
+  # この集合外の side は戦略 DSL / IPC プロトコルの契約違反であり,
+  # process_order_intent の入口で fail-fast reject する.
+  SUPPORTED_INTENT_SIDES = %w[long short close].freeze
+  private_constant :SUPPORTED_INTENT_SIDES
+
+  # 1 件の order_intent を side 検証 → AI filter → RiskGuard → 発注の順に評価する.
   # いずれかで否決された場合は place_order を呼ばない.
-  # 単一 intent 内例外は logger.warn に落として他 intent の処理を妨げない.
+  # 単一 intent 内で送出された例外は logger.warn に落として他 intent の処理を妨げない
+  # (side の契約違反は valid_intent_side? で事前排除済 / それ以外の例外種別の精緻な分類は本 subtask 範囲外).
   # candle / idx は client_oid 決定論的生成(R-1 #3 反映)に利用.
   def process_order_intent(session, revision, intent, candle, idx)
+    return unless valid_intent_side?(intent)
     return unless ai_filter_pass?(revision, intent)
     return unless risk_guard_pass?(session, intent)
 
@@ -647,6 +655,24 @@ class LiveTradingWorker
       "[LiveTradingWorker] process_order_intent failed (intent=#{intent.inspect}): " \
       "#{e.class.name}: #{sanitize_log_message(e.message)}"
     )
+  end
+
+  # intent の side が Bitget 発注経路へ振り分け可能か検証する(契約違反の fail-fast).
+  # 未対応 side は戦略 DSL / IPC プロトコルの契約違反(プログラミングエラー)であり,
+  # ネットワーク等の transient 障害(rescue StandardError 経由の warn 落とし)とは性質が異なる.
+  # 両者を区別するため,未対応 side は logger.error で契約違反と明示して当該 intent を確定的に reject する
+  # (bitget_order_side の ArgumentError が rescue StandardError に握られ fail-fast が成立しない問題への対処).
+  #
+  # @param intent [Hash] order_intent
+  # @return [Boolean] 発注経路へ進めてよい side なら true
+  def valid_intent_side?(intent)
+    return true if SUPPORTED_INTENT_SIDES.include?(intent["side"])
+
+    logger.error(
+      "[LiveTradingWorker] order intent rejected: unsupported side #{intent["side"].inspect} " \
+      "(contract violation / fail-fast; must be one of #{SUPPORTED_INTENT_SIDES.inspect})"
+    )
+    false
   end
 
   # AI filter 通過判定. ai_filter_enabled=false なら常に通過.
@@ -714,12 +740,12 @@ class LiveTradingWorker
   # 戦略 DSL(OrderIntentValueObject)はトレーダー視点の long / short / close を扱い,
   # Bitget v2 mix place-order は buy / sell を要求するため,この境界で変換する.
   # one_way_mode 前提(戦略 DSL は hedge_mode のポジション区別を持たない).
+  # side の妥当性検証は process_order_intent 入口の valid_intent_side? に集約済のため,
+  # 本メソッドは long / short の純変換に徹する(close は place_order_for_intent で close 経路へ分岐済).
   def bitget_order_side(intent_side)
     case intent_side
     when "long" then "buy"
     when "short" then "sell"
-    else
-      raise ArgumentError, "unsupported order intent side: #{intent_side.inspect}"
     end
   end
 
