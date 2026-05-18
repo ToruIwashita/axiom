@@ -7,7 +7,10 @@ module Api
       private_constant :DEFAULT_SAMPLE_SIZE, :MAX_SAMPLE_SIZE
 
       def show
-        run = Backtesting::Run.find(params[:backtesting_run_id])
+        # Phase 4.3 で Api::V1::Backtesting namespace を追加したため,
+        # `Backtesting::` が `Api::V1::Backtesting::` を先に解決して衝突する.
+        # トップレベル明示の `::Backtesting::Run` で参照する.
+        run = ::Backtesting::Run.find(params[:backtesting_run_id])
         sample_size = (params[:sample_size] || DEFAULT_SAMPLE_SIZE).to_i.clamp(1, MAX_SAMPLE_SIZE)
         rows = sampled_rows(run, sample_size)
         render json: { points: rows.map { |row| row_payload(row) } }

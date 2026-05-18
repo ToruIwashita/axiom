@@ -80,12 +80,17 @@ module ApplicationServices
 
     # Run の一覧を created_at 降順で返す(filters でフィルタ可能)
     #
-    # @param filters [Hash] :strategy_definition_id / :status を受け付ける
+    # Phase 4.3 03_§4.5 反映: created_at range filter(:from / :to)を追加.
+    # Dashboard / Comparison 画面の期間絞り込みで利用する.
+    #
+    # @param filters [Hash] :strategy_definition_id / :status / :from / :to を受け付ける
     # @return [ActiveRecord::Relation<Backtesting::Run>]
     def list(filters: {})
       scope = Backtesting::Run.order(created_at: :desc)
       scope = scope.where(strategy_definition_id: filters[:strategy_definition_id]) if filters[:strategy_definition_id]
       scope = scope.where(status: filters[:status]) if filters[:status]
+      scope = scope.where("created_at >= ?", filters[:from]) if filters[:from]
+      scope = scope.where("created_at <= ?", filters[:to]) if filters[:to]
       scope
     end
   end

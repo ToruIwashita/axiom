@@ -1,0 +1,88 @@
+<% content_for :title, "ダッシュボード" %>
+
+<h1>ダッシュボード</h1>
+
+<%# Phase 4.3 02_§4.3 反映: cumulative_pnl は backtesting / live_trading 個別表示
+    (中-4 反映: total フィールドなし / シミュレーションと実取引の単純加算は誤解誘発) %>
+<section style="margin-bottom: 2em;">
+  <h2>累積 PnL(直近 30 日)</h2>
+  <table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse;">
+    <thead style="background: #eee;">
+      <tr>
+        <th>区分</th>
+        <th>累積 PnL</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>backtesting(シミュレーション)</td>
+        <td><%= @cumulative_pnl[:backtesting].to_s("F") %></td>
+      </tr>
+      <tr>
+        <td>live_trading(実取引)</td>
+        <td><%= @cumulative_pnl[:live_trading].to_s("F") %></td>
+      </tr>
+    </tbody>
+  </table>
+  <p style="color: #999; font-size: 0.85em;">
+    ※ シミュレーションと実取引は意味的に異なるため合計表示しない(設計反映: 中-4)
+  </p>
+</section>
+
+<%# Phase 4.3 02_§4.3 反映: uptime_seconds は uptime_seconds_total のみ
+    (中-5 反映: 8 status 別の累積稼働は Phase 5b で audit log 新設後に対応) %>
+<section style="margin-bottom: 2em;">
+  <h2>稼働率(直近 <%= @uptime_seconds[:period_seconds] / 86_400 %> 日)</h2>
+  <table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse;">
+    <tbody>
+      <tr>
+        <th>累積稼働秒数</th>
+        <td><%= @uptime_seconds[:uptime_seconds_total] %></td>
+      </tr>
+      <tr>
+        <th>期間秒数</th>
+        <td><%= @uptime_seconds[:period_seconds] %></td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<section style="margin-bottom: 2em;">
+  <h2>戦略別成績</h2>
+  <% if @per_strategy_summary.any? %>
+    <table border="1" cellpadding="6" cellspacing="0" style="border-collapse: collapse;">
+      <thead style="background: #eee;">
+        <tr>
+          <th>Strategy Revision</th>
+          <th>live_pnl</th>
+          <th>live_count</th>
+          <th>live_wins</th>
+          <th>backtest_runs</th>
+        </tr>
+      </thead>
+      <tbody>
+        <% @per_strategy_summary.each do |s| %>
+          <tr>
+            <td><%= s[:revision_label] %></td>
+            <td><%= s[:live_pnl].to_s("F") %></td>
+            <td><%= s[:live_count] %></td>
+            <td><%= s[:live_wins] %></td>
+            <td><%= s[:backtest_runs] %></td>
+          </tr>
+        <% end %>
+      </tbody>
+    </table>
+  <% else %>
+    <p style="color: #999;">戦略別成績データなし</p>
+  <% end %>
+</section>
+
+<%# Phase 4.3 02_§4.5 反映: chart.js 描画(直近 30 日 KPI 推移は Step 6 以降で拡張)
+    既存 equity_curve_controller.js の import 方式踏襲(低-5 反映): import Chart from "chart.js/auto" %>
+<section style="margin-bottom: 2em;">
+  <h2>KPI チャート</h2>
+  <div data-controller="dashboard-chart"
+       data-dashboard-chart-api-url-value="<%= api_v1_dashboard_path(format: :json) %>">
+    <canvas data-dashboard-chart-target="canvas" width="800" height="300"></canvas>
+  </div>
+</section>
