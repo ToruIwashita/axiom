@@ -1258,10 +1258,33 @@ RSpec.describe LiveTradingWorker do
       end
 
       describe "#handle_fill_message" do
-        it "run_in_db_thread + transaction で wrap される(ラベル: fill_create)" do
-          expect(LiveTrading::Session).to receive(:transaction).and_yield
-          worker.send(:handle_fill_message, [])
+        let(:fill_recorder_service) { instance_double(Domain::FillRecorderService) }
+
+        before { worker.instance_variable_set(:@fill_recorder_service, fill_recorder_service) }
+
+        it "fill_create ラベルの run_in_db_thread 内で各 row を record_fill_from_push へ委譲する" do
+          allow(fill_recorder_service).to receive(:record_fill_from_push)
+          rows = [
+            { "orderId" => "bg-1", "tradeId" => "t-1" },
+            { "orderId" => "bg-2", "tradeId" => "t-2" }
+          ]
+          worker.send(:handle_fill_message, rows)
+
           expect(worker).to have_received(:run_in_db_thread).with("fill_create")
+          rows.each do |row|
+            expect(fill_recorder_service).to have_received(:record_fill_from_push)
+              .with(row, session: instance_of(LiveTrading::Session))
+          end
+        end
+
+        it "1 row の record_fill_from_push 失敗を logger.warn に落として他 row を処理する" do
+          allow(fill_recorder_service).to receive(:record_fill_from_push)
+            .and_raise(StandardError, "fill failure")
+          rows = [ { "orderId" => "bg-1" }, { "orderId" => "bg-2" } ]
+          worker.send(:handle_fill_message, rows)
+
+          expect(fill_recorder_service).to have_received(:record_fill_from_push).twice
+          expect(logger).to have_received(:warn).with(/record_fill_from_push failed.*fill failure/).twice
         end
       end
 
