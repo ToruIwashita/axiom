@@ -1465,6 +1465,24 @@ RSpec.describe LiveTradingWorker do
           end
         end
 
+        context "intent side が close で open Trade が存在しない場合" do
+          let(:spawn_response_ok) do
+            {
+              "status" => "ok",
+              "order_intents" => [ { "side" => "close", "size" => "0", "order_type" => "market" } ],
+              "strategy_state_diff" => state_diff, "logs" => [], "errors" => []
+            }
+          end
+
+          before { allow(order_endpoint_di).to receive(:close_positions) }
+
+          it "決済 Order を作成せず logger.warn を記録し close_positions は実行する" do
+            expect { subject }.not_to change(Exchange::Order, :count)
+            expect(logger).to have_received(:warn).with(/no single open Trade tracked/)
+            expect(order_endpoint_di).to have_received(:close_positions).with(symbol: "BTCUSDT")
+          end
+        end
+
         context "intent side が未対応値の場合" do
           let(:spawn_response_ok) do
             {

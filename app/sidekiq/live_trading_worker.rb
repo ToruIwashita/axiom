@@ -756,6 +756,8 @@ class LiveTradingWorker
         trade_side: intent["trade_side"],
         # 戦略 DSL（LiveContext::OrderProxy#entry）は limit 価格を "limit_price" キーで生成する.
         price: intent["limit_price"]&.to_s,
+        # intent["tp"]/["sl"] は誤キーで常に nil(戦略 DSL は tp_pct/sl_pct を生成).
+        # 誤キー是正 + 率→価格換算(fill 後追い送信)は subtask 5.3 で対応するため 5.0b では据置.
         preset_stop_surplus_price: intent["tp"]&.to_s,
         preset_stop_loss_price: intent["sl"]&.to_s
       )
