@@ -4,6 +4,12 @@ module Domain
   # Bitget API I/O は持たず(order_endpoint 呼出は LiveTradingWorker が担う),
   # DB レコードのライフサイクルのみを扱う stateless サービス.
   # 各メソッドは内部で LiveTrading::Session.transaction を張り Trade + Order の整合を保つ.
+  #
+  # Trade の状態遷移範囲: 本サービスは Trade を pending → entering(record_entry_open)/
+  # open → closing(record_close_open / create_lazy_close_order)まで遷移させる.
+  # entering → open / closing → closed の遷移は fill push を起点とする subtask 5.1
+  # (handle_fill_message での Trade 集計 / mark_open! / mark_closed!)の責務であり,
+  # orders push 由来の sync_order_from_push / apply_order_status は Exchange::Order の状態のみ扱う.
   class OrderLifecycleService
     # @param logger [Logger] 契約違反等の警告出力先
     def initialize(logger: Rails.logger)
@@ -90,10 +96,10 @@ module Domain
     # @return [Exchange::Order, nil] 作成した決済 Order /
     #   open Trade 不在,または open Trade が 2 件以上(1 ポジ運用前提違反 / logger.error 済)なら nil
     def record_close_open(session:)
-      trade = single_open_trade(session)
-      return nil if trade.nil?
-
       LiveTrading::Session.transaction do
+        trade = single_open_trade(session)
+        next nil if trade.nil?
+
         order = build_close_order(trade)
         trade.start_closing!
         order
@@ -131,8 +137,14 @@ module Domain
 
     # 当該 session の open な Trade を 1 件特定する.
     # 0 件は nil,複数は 1 ポジ運用前提の契約違反として logger.error + nil(record_close_open / branch b 共通).
+    # open Trade 行を SELECT ... FOR UPDATE でロックし,record_close_open(メインスレッド)と
+    # create_lazy_close_order(WS callback スレッド)の並走による決済 Order 二重作成を防ぐ.
+    # 呼出側が transaction を張っていることを前提とする(lock を有効化するため).
     def single_open_trade(session)
-      open_trades = LiveTrading::Trade.where(live_trading_session_id: session.id, status: "open").to_a
+      open_trades = LiveTrading::Trade
+        .where(live_trading_session_id: session.id, status: "open")
+        .lock
+        .to_a
       return nil if open_trades.empty?
 
       if open_trades.size > 1
@@ -146,7 +158,10 @@ module Domain
     end
 
     # 決済 Order(pending / trade_side: close)を当該 Trade から導出して作成する.
-    def build_close_order(trade)
+    # bitget_order_id: orders push 由来の遅延作成(create_lazy_close_order)では push の orderId を
+    # 即設定し,再 push を 3 段突合の 1 段目(bitget_order_id)で追えるようにして二重作成を防ぐ.
+    # 明示 close(record_close_open)では close_positions 発注前のため nil(後続 orders push で設定).
+    def build_close_order(trade, bitget_order_id: nil)
       Exchange::Order.create!(
         live_trading_trade: trade,
         strategy_revision: trade.strategy_revision,
@@ -156,7 +171,8 @@ module Domain
         order_type: "market",
         size: trade.quantity,
         status: "pending",
-        force: "gtc"
+        force: "gtc",
+        bitget_order_id: bitget_order_id
       )
     end
 
@@ -239,7 +255,7 @@ module Domain
       trade = single_open_trade(session)
       return if trade.nil?
 
-      order = build_close_order(trade)
+      order = build_close_order(trade, bitget_order_id: push_row["orderId"])
       trade.start_closing!
       apply_order_status(order, push_row)
     end

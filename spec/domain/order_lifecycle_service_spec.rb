@@ -423,5 +423,66 @@ RSpec.describe Domain::OrderLifecycleService do
         expect(new_order.live_trading_trade).to eq(open_trade)
       end
     end
+
+    context "DB 未登録の closing order push が status=init の場合(branch b)" do
+      let!(:open_trade) { create_open_trade }
+      let(:push_row) { { "orderId" => "bg-tpsl-init", "tradeSide" => "close", "status" => "init" } }
+
+      it "決済 Order を作成し bitget_order_id を即設定する(再 push を 1 段目突合で追えるようにする)" do
+        subject
+        new_order = Exchange::Order.find_by(bitget_order_id: "bg-tpsl-init")
+        expect(new_order).to be_present
+        expect(new_order).to be_trade_side_close
+        expect(new_order.live_trading_trade).to eq(open_trade)
+      end
+    end
+
+    context "placed 済の Order に status=live push が再到達した場合(冪等)" do
+      let!(:order) do
+        o = entry_order(client_oid: "live-#{session.id}-g-0")
+        service.record_entry_placed(order: o, bitget_order_id: "bg-order-7", placed_at: Time.current)
+        o
+      end
+      let(:push_row) { { "orderId" => "bg-order-7", "tradeSide" => "open", "status" => "live" } }
+
+      it "状態遷移せず placed のまま例外も出ない" do
+        expect { subject }.not_to raise_error
+        expect(order.reload).to be_state_placed
+      end
+    end
+
+    context "filled 済の Order に status=filled push が再到達した場合(冪等)" do
+      let!(:order) do
+        o = entry_order(client_oid: "live-#{session.id}-h-0")
+        service.record_entry_placed(order: o, bitget_order_id: "bg-order-8", placed_at: Time.current)
+        service.sync_order_from_push(
+          { "orderId" => "bg-order-8", "tradeSide" => "open", "status" => "filled" }, session: session
+        )
+        o
+      end
+      let(:push_row) { { "orderId" => "bg-order-8", "tradeSide" => "open", "status" => "filled" } }
+
+      it "状態遷移せず filled のまま例外も出ない" do
+        expect { subject }.not_to raise_error
+        expect(order.reload).to be_state_filled
+      end
+    end
+
+    context "filled 済の Order に status=canceled push が届いた場合(終端ガード)" do
+      let!(:order) do
+        o = entry_order(client_oid: "live-#{session.id}-i-0")
+        service.record_entry_placed(order: o, bitget_order_id: "bg-order-9", placed_at: Time.current)
+        service.sync_order_from_push(
+          { "orderId" => "bg-order-9", "tradeSide" => "open", "status" => "filled" }, session: session
+        )
+        o
+      end
+      let(:push_row) { { "orderId" => "bg-order-9", "tradeSide" => "open", "status" => "canceled" } }
+
+      it "終端状態のため遷移せず filled のまま例外も出ない" do
+        expect { subject }.not_to raise_error
+        expect(order.reload).to be_state_filled
+      end
+    end
   end
 end
