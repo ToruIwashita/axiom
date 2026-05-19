@@ -221,4 +221,137 @@ RSpec.describe Domain::OrderLifecycleService do
       end
     end
   end
+
+  describe "#sync_order_from_push" do
+    subject { service.sync_order_from_push(push_row, session: session) }
+
+    def entry_order(client_oid:)
+      service.record_entry_open(
+        session: session, revision: revision,
+        intent: { "side" => "long", "size" => "0.01", "order_type" => "market" },
+        client_oid: client_oid
+      )
+    end
+
+    def create_open_trade
+      LiveTrading::Trade.create!(
+        live_trading_session: session, strategy_revision: revision,
+        symbol: "BTCUSDT", side: "long", quantity: BigDecimal("0.01"), status: "open"
+      )
+    end
+
+    context "pending なエントリー Order に client_oid 突合で status=live push が届いた場合" do
+      let!(:order) { entry_order(client_oid: "live-#{session.id}-a-0") }
+      let(:push_row) do
+        { "orderId" => "bg-order-1", "clientOid" => order.client_oid,
+          "tradeSide" => "open", "status" => "live" }
+      end
+
+      it "Order を placed に遷移し bitget_order_id を設定する" do
+        subject
+        order.reload
+        expect(order).to be_state_placed
+        expect(order.bitget_order_id).to eq("bg-order-1")
+      end
+    end
+
+    context "placed な Order に bitget_order_id 突合で status=filled push が届いた場合" do
+      let!(:order) do
+        o = entry_order(client_oid: "live-#{session.id}-b-0")
+        service.record_entry_placed(order: o, bitget_order_id: "bg-order-2", placed_at: Time.current)
+        o
+      end
+      let(:push_row) { { "orderId" => "bg-order-2", "tradeSide" => "open", "status" => "filled" } }
+
+      it "Order を filled に遷移する" do
+        subject
+        expect(order.reload).to be_state_filled
+      end
+    end
+
+    context "pending な Order に status=filled push が届いた場合(live 取りこぼし / missed-push 補完)" do
+      let!(:order) { entry_order(client_oid: "live-#{session.id}-c-0") }
+      let(:push_row) do
+        { "orderId" => "bg-order-3", "clientOid" => order.client_oid,
+          "tradeSide" => "open", "status" => "filled" }
+      end
+
+      it "mark_placed! を補完してから filled に遷移する" do
+        subject
+        order.reload
+        expect(order).to be_state_filled
+        expect(order.bitget_order_id).to eq("bg-order-3")
+      end
+    end
+
+    context "placed な Order に status=canceled push が届いた場合" do
+      let!(:order) do
+        o = entry_order(client_oid: "live-#{session.id}-d-0")
+        service.record_entry_placed(order: o, bitget_order_id: "bg-order-4", placed_at: Time.current)
+        o
+      end
+      let(:push_row) { { "orderId" => "bg-order-4", "tradeSide" => "open", "status" => "canceled" } }
+
+      it "Order を cancelled に遷移する" do
+        subject
+        expect(order.reload).to be_state_cancelled
+      end
+    end
+
+    context "status=init push の場合" do
+      let!(:order) { entry_order(client_oid: "live-#{session.id}-e-0") }
+      let(:push_row) do
+        { "orderId" => "bg-order-5", "clientOid" => order.client_oid,
+          "tradeSide" => "open", "status" => "init" }
+      end
+
+      it "状態遷移せず pending のままとなる" do
+        subject
+        expect(order.reload).to be_state_pending
+      end
+    end
+
+    context "明示 close の決済 Order が突合 3 段目で発見される場合" do
+      let!(:open_trade) { create_open_trade }
+      let!(:close_order) { service.record_close_open(session: session) }
+      let(:push_row) do
+        { "orderId" => "bg-close-1", "clientOid" => "bitget-generated-oid",
+          "tradeSide" => "close", "status" => "filled" }
+      end
+
+      it "pending な決済 Order を発見し bitget_order_id 設定 + filled へ遷移する" do
+        subject
+        close_order.reload
+        expect(close_order).to be_state_filled
+        expect(close_order.bitget_order_id).to eq("bg-close-1")
+      end
+    end
+
+    context "DB 未登録の closing order push の場合(branch b / TP/SL トリガー由来)" do
+      let!(:open_trade) { create_open_trade }
+      let(:push_row) { { "orderId" => "bg-tpsl-1", "tradeSide" => "close", "status" => "filled" } }
+
+      it "決済 Order を新規作成し親 Trade を closing に遷移する" do
+        expect { subject }.to change(Exchange::Order, :count).by(1)
+
+        new_order = Exchange::Order.find_by(bitget_order_id: "bg-tpsl-1")
+        expect(new_order).to be_trade_side_close
+        expect(new_order).to be_state_filled
+        expect(new_order.live_trading_trade).to eq(open_trade)
+        expect(open_trade.reload).to be_state_closing
+      end
+    end
+
+    context "DB 未登録の entry order push の場合(branch c)" do
+      let(:push_row) do
+        { "orderId" => "unknown-1", "clientOid" => "unknown-coid",
+          "tradeSide" => "open", "status" => "live" }
+      end
+
+      it "Order を作成せず logger.warn で skip する" do
+        expect { subject }.not_to change(Exchange::Order, :count)
+        expect(logger).to have_received(:warn).with(/entry order not found/)
+      end
+    end
+  end
 end
