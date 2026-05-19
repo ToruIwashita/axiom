@@ -115,6 +115,16 @@ RSpec.describe Domain::OrderLifecycleService do
         expect(trade.sl_pct).to be_nil
       end
     end
+
+    context "Order の作成が検証エラーで失敗する場合(transaction 原子性)" do
+      let(:client_oid) { "x" * 65 } # Exchange::Order の client_oid 上限 64 を超過させ Order 作成を失敗させる
+      let(:intent) { { "side" => "long", "size" => "0.01", "order_type" => "market" } }
+
+      it "例外を送出し Trade も作成されずロールバックされる" do
+        expect { subject }.to raise_error(ActiveRecord::RecordInvalid)
+        expect(LiveTrading::Trade.count).to eq(0)
+      end
+    end
   end
 
   describe "#record_entry_placed" do

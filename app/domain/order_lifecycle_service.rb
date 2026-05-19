@@ -45,7 +45,7 @@ module Domain
           order_type: intent["order_type"],
           size: intent["size"],
           status: "pending",
-          force: intent.fetch("force", "gtc"),
+          force: "gtc", # 戦略 DSL(OrderProxy#entry)は force を生成しないため gtc 固定
           client_oid: client_oid,
           price: intent["limit_price"]
         )

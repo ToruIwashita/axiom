@@ -1348,7 +1348,9 @@ RSpec.describe LiveTradingWorker do
         allow(spawner).to receive(:run).and_return(spawn_response_ok)
         allow(ai_filter_service).to receive(:call).and_return({ "enter" => true })
         allow(risk_guard_service).to receive(:allow_entry?).and_return(true)
+        # place_order は成功時 code 00000 + data.orderId を含む Hash を返す(production 実戻り値).
         allow(order_endpoint_di).to receive(:place_order)
+          .and_return("code" => "00000", "data" => { "orderId" => "bg-entry-1" })
       end
 
       describe "正常パス(spawn ok)" do
@@ -1398,6 +1400,7 @@ RSpec.describe LiveTradingWorker do
           expect(order).to be_state_placed
           expect(order).to be_trade_side_open
           expect(order.client_oid).to eq("intent-001")
+          expect(order.bitget_order_id).to eq("bg-entry-1")
           expect(order.live_trading_trade).to eq(trade)
         end
 

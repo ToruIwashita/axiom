@@ -768,7 +768,7 @@ class LiveTradingWorker
       raise
     end
 
-    bitget_order_id = response.is_a?(Hash) ? response.dig("data", "orderId") : nil
+    bitget_order_id = response.dig("data", "orderId")
     order_lifecycle_service.record_entry_placed(
       order: order, bitget_order_id: bitget_order_id, placed_at: Time.current
     )
