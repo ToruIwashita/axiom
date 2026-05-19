@@ -353,5 +353,65 @@ RSpec.describe Domain::OrderLifecycleService do
         expect(logger).to have_received(:warn).with(/entry order not found/)
       end
     end
+
+    context "pending な Order に status=partially_filled push が届いた場合" do
+      let!(:order) { entry_order(client_oid: "live-#{session.id}-f-0") }
+      let(:push_row) do
+        { "orderId" => "bg-order-6", "clientOid" => order.client_oid,
+          "tradeSide" => "open", "status" => "partially_filled" }
+      end
+
+      it "mark_placed! を補完してから partially_filled に遷移する" do
+        subject
+        order.reload
+        expect(order).to be_state_partially_filled
+        expect(order.bitget_order_id).to eq("bg-order-6")
+      end
+    end
+
+    context "明示 close の決済 Order 候補が複数ある場合(3 段目突合の契約違反)" do
+      before do
+        2.times do
+          trade = LiveTrading::Trade.create!(
+            live_trading_session: session, strategy_revision: revision,
+            symbol: "BTCUSDT", side: "long", quantity: BigDecimal("0.01"), status: "closing"
+          )
+          Exchange::Order.create!(
+            live_trading_trade: trade, strategy_revision: revision,
+            symbol: "BTCUSDT", side: "long", trade_side: "close",
+            order_type: "market", size: BigDecimal("0.01"), status: "pending", force: "gtc"
+          )
+        end
+      end
+      let(:push_row) do
+        { "orderId" => "bg-x", "clientOid" => "bitget-y", "tradeSide" => "close", "status" => "filled" }
+      end
+
+      it "logger.error で契約違反を明示し決済 Order を遷移しない" do
+        subject
+        expect(logger).to have_received(:error).with(/multiple pending close orders/)
+      end
+    end
+
+    context "DB 未登録の closing order push で open Trade が存在しない場合(branch b)" do
+      let(:push_row) { { "orderId" => "bg-z", "tradeSide" => "close", "status" => "filled" } }
+
+      it "決済 Order を作成しない" do
+        expect { subject }.not_to change(Exchange::Order, :count)
+      end
+    end
+
+    context "DB 未登録の closing order push が status=canceled の場合(branch b)" do
+      let!(:open_trade) { create_open_trade }
+      let(:push_row) { { "orderId" => "bg-tpsl-cancel", "tradeSide" => "close", "status" => "canceled" } }
+
+      it "決済 Order を cancelled で作成し bitget_order_id を設定する(再 push 二重作成回避)" do
+        subject
+        new_order = Exchange::Order.find_by(bitget_order_id: "bg-tpsl-cancel")
+        expect(new_order).to be_state_cancelled
+        expect(new_order).to be_trade_side_close
+        expect(new_order.live_trading_trade).to eq(open_trade)
+      end
+    end
   end
 end

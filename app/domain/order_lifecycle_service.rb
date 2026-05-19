@@ -209,9 +209,21 @@ module Domain
         ensure_placed(order, push_row)
         order.mark_filled!(finished_at: Time.current) if order.state_placed? || order.state_partially_filled?
       when "canceled" # Bitget: canceled(L1) / Exchange::Order: cancelled(L2)
-        order.mark_cancelled!(finished_at: Time.current) unless order.terminal?
+        unless order.terminal?
+          assign_bitget_order_id_if_missing(order, push_row)
+          order.mark_cancelled!(finished_at: Time.current)
+        end
       end
       # "init" / 未知の status は意味のある DB 遷移なしのため skip
+    end
+
+    # branch b 由来の決済 Order(client_oid が内部 UUID)が canceled 経路で bitget_order_id 未設定の
+    # まま残ると,再 push 時に 3 段突合の全段から漏れて二重作成される.canceled 遷移前に
+    # bitget_order_id を設定し,再 push を 1 段目突合(bitget_order_id)で追えるようにする.
+    def assign_bitget_order_id_if_missing(order, push_row)
+      return unless order.bitget_order_id.nil? && push_row["orderId"].present?
+
+      order.update!(bitget_order_id: push_row["orderId"])
     end
 
     # Order が pending なら placed に遷移する(missed-push 補完 / placed_at は不明のため nil).
