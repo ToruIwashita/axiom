@@ -214,8 +214,9 @@ RSpec.describe Domain::OrderLifecycleService do
         create_open_trade
       end
 
-      it "logger.error で契約違反を明示し MultipleOpenTradesError を raise する" do
-        expect { subject }.to raise_error(described_class::MultipleOpenTradesError)
+      it "logger.error で契約違反を明示し Order を作成せず nil を返す" do
+        expect { subject }.not_to change(Exchange::Order, :count)
+        expect(subject).to be_nil
         expect(logger).to have_received(:error).with(/multiple open trades/)
       end
     end
