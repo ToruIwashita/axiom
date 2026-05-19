@@ -21,12 +21,17 @@ module Domain
     # 冪等に作成する.親 Order の fill 合計数量が Order.size に達したら全約定とみなし Trade を集計する
     # (orders push の filled ステータスには依存しない).
     #
+    # 親 Order は SELECT ... FOR UPDATE で行ロックする.handle_fill_message は run_in_db_thread の
+    # 別スレッドで処理されるため,同一 Order への分割約定 fill が並行到達すると,各 transaction が
+    # 自スレッドの fill のみを見て fully_filled? を誤評価し全約定の Trade 集計を取りこぼす
+    # (lost aggregation race).行ロックで同一 Order の fill 処理を直列化して防ぐ.
+    #
     # @param push_row [Hash] fill push の 1 row(orderId / tradeId / price / baseVolume / feeDetail / cTime)
     # @param session [LiveTrading::Session] 対象セッション
     # @return [void]
     def record_fill_from_push(push_row, session:)
       LiveTrading::Session.transaction do
-        order = Exchange::Order.find_by(bitget_order_id: push_row["orderId"])
+        order = Exchange::Order.lock.find_by(bitget_order_id: push_row["orderId"])
         if order.nil?
           logger.warn(
             "[FillRecorderService] fill push: parent order not found " \

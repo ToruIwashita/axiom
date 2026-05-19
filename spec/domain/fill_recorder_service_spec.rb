@@ -58,10 +58,10 @@ RSpec.describe Domain::FillRecorderService do
     )
   end
 
-  def build_order(trade:, trade_side:, size:, bitget_order_id:, status: "placed")
+  def build_order(trade:, trade_side:, size:, bitget_order_id:, status: "placed", side: "long")
     Exchange::Order.create!(
       live_trading_trade: trade, strategy_revision: revision,
-      symbol: "BTCUSDT", side: "long", trade_side: trade_side,
+      symbol: "BTCUSDT", side: side, trade_side: trade_side,
       order_type: "market", size: size, status: status,
       force: "gtc", bitget_order_id: bitget_order_id
     )
@@ -167,6 +167,38 @@ RSpec.describe Domain::FillRecorderService do
         expect(trade.exit_price).to eq(BigDecimal("51000"))
         # (51000 - 50000) * 1.0 - (25 + 25.5) = 949.5
         expect(trade.realized_pnl).to eq(BigDecimal("949.5"))
+      end
+    end
+
+    context "決済 fill で short Trade の決済 Order が全約定した場合" do
+      let!(:trade) do
+        build_trade(status: "closing", side: "short", entry_price: BigDecimal("50000"), entry_at: Time.current)
+      end
+      let!(:entry_order) do
+        o = build_order(trade: trade, trade_side: "open", size: BigDecimal("1.0"),
+                        bitget_order_id: "bg-entry-7", status: "filled", side: "short")
+        Exchange::Fill.create!(
+          exchange_order: o, bitget_fill_id: "fill-entry-7",
+          price: BigDecimal("50000"), size: BigDecimal("1.0"),
+          fee: BigDecimal("25"), fee_coin: "USDT", filled_at: Time.current
+        )
+        o
+      end
+      let!(:close_order) do
+        build_order(trade: trade, trade_side: "close", size: BigDecimal("1.0"),
+                    bitget_order_id: "bg-close-7", side: "short")
+      end
+      let(:push_row) do
+        fill_push(order_id: "bg-close-7", trade_id: "fill-close-7", price: "49000", base_volume: "1.0", fee: "24.5")
+      end
+
+      it "short の realized_pnl((entry - exit) * quantity - 総fee)で Trade を closed へ遷移する" do
+        subject
+        trade.reload
+        expect(trade).to be_state_closed
+        expect(trade.exit_price).to eq(BigDecimal("49000"))
+        # short: (50000 - 49000) * 1.0 - (25 + 24.5) = 950.5
+        expect(trade.realized_pnl).to eq(BigDecimal("950.5"))
       end
     end
 
