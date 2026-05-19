@@ -93,6 +93,7 @@ class LiveTradingWorker
     heartbeat_scheduler: nil,
     kill_switch_executor: nil,
     order_lifecycle_service: nil,
+    fill_recorder_service: nil,
     main_loop_poll_interval: DEFAULT_MAIN_LOOP_POLL_INTERVAL,
     monotonic_clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) },
     ws_disconnect_grace_seconds: WS_DISCONNECT_GRACE_SECONDS,
@@ -118,6 +119,7 @@ class LiveTradingWorker
     @heartbeat_scheduler = heartbeat_scheduler
     @kill_switch_executor = kill_switch_executor
     @order_lifecycle_service = order_lifecycle_service
+    @fill_recorder_service = fill_recorder_service
     @main_loop_poll_interval = main_loop_poll_interval
     @monotonic_clock = monotonic_clock
     @ws_disconnect_grace_seconds = ws_disconnect_grace_seconds
@@ -882,13 +884,20 @@ class LiveTradingWorker
     end
   end
 
-  # fill push: Exchange::Fill の新規記録 + 関連 Trade 集計反映.
+  # fill push: 各 row を Domain::FillRecorderService#record_fill_from_push へ委譲して
+  # Exchange::Fill を作成し Trade 集計を反映する.
+  # 外側 transaction は張らず(設計書 02_§2.3 e),transaction 境界は record_fill_from_push 内の
+  # row 単位とする.1 row の失敗は logger.warn に落として他 row の処理を妨げない.
   def handle_fill_message(data)
     run_in_db_thread("fill_create") do
-      LiveTrading::Session.transaction do
-        Array(data).each do |_row|
-          # TODO(後続 phase): Exchange::Fill create + LiveTrading::Trade 集計更新
-        end
+      session = LiveTrading::Session.find(@session.id)
+      Array(data).each do |row|
+        fill_recorder_service.record_fill_from_push(row, session: session)
+      rescue StandardError => e
+        logger.warn(
+          "[LiveTradingWorker] record_fill_from_push failed: " \
+          "#{e.class.name}: #{sanitize_log_message(e.message)}"
+        )
       end
     end
   end
@@ -1025,6 +1034,11 @@ class LiveTradingWorker
   # Trade / Order lifecycle 永続化サービス. DI されていない場合の lazy init.
   def order_lifecycle_service
     @order_lifecycle_service ||= Domain::OrderLifecycleService.new(logger: logger)
+  end
+
+  # Fill 永続化 + Trade 集計サービス. DI されていない場合の lazy init.
+  def fill_recorder_service
+    @fill_recorder_service ||= Domain::FillRecorderService.new(logger: logger)
   end
 
   def order_endpoint
