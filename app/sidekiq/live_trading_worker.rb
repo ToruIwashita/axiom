@@ -92,6 +92,7 @@ class LiveTradingWorker
     ws_reconnect_detector: nil,
     heartbeat_scheduler: nil,
     kill_switch_executor: nil,
+    order_lifecycle_service: nil,
     main_loop_poll_interval: DEFAULT_MAIN_LOOP_POLL_INTERVAL,
     monotonic_clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) },
     ws_disconnect_grace_seconds: WS_DISCONNECT_GRACE_SECONDS,
@@ -116,6 +117,7 @@ class LiveTradingWorker
     @ws_reconnect_detector = ws_reconnect_detector
     @heartbeat_scheduler = heartbeat_scheduler
     @kill_switch_executor = kill_switch_executor
+    @order_lifecycle_service = order_lifecycle_service
     @main_loop_poll_interval = main_loop_poll_interval
     @monotonic_clock = monotonic_clock
     @ws_disconnect_grace_seconds = ws_disconnect_grace_seconds
@@ -649,7 +651,7 @@ class LiveTradingWorker
     return unless ai_filter_pass?(revision, intent)
     return unless risk_guard_pass?(session, intent)
 
-    place_order_for_intent(session, intent, candle, idx)
+    place_order_for_intent(session, revision, intent, candle, idx)
   rescue StandardError => e
     logger.warn(
       "[LiveTradingWorker] process_order_intent failed (intent=#{intent.inspect}): " \
@@ -703,36 +705,72 @@ class LiveTradingWorker
     )
   end
 
-  # order_intent → BitgetOrderEndpoint#place_order マッピング.
+  # order_intent を発注経路へ振り分ける.エントリーは place-order,close は close-positions.
+  # エントリー / close とも Domain::OrderLifecycleService へ Trade / Order の永続化を委譲する(設計書 02_§2.2).
   # client_oid は intent 由来優先 / 未指定なら決定論的 ID 生成
   # (R-1 #3 反映: SecureRandom.uuid フォールバックは Worker 再起動 / WS reconnect 後の同 candle 再処理時に
   # 毎回別 uuid となり Bitget の冪等チェック通過 → 二重発注事故になるため決定論的生成に変更).
-  def place_order_for_intent(session, intent, candle, idx)
-    # close intent(`ctx.order.close`)は close-positions エンドポイントで成行クローズする.
-    # 戦略 DSL の close は size 情報を持たない(`{ "side" => "close", "size" => "0" }`)ため
-    # place-order ではなく close-positions を使う.one_way_mode は hold_side 不要.
+  def place_order_for_intent(session, revision, intent, candle, idx)
     if intent["side"] == "close"
-      order_endpoint.close_positions(symbol: session.symbol)
-      return
+      place_close_order(session)
+    else
+      client_oid = intent["client_oid"] || deterministic_client_oid(session, candle, idx)
+      place_entry_order(session, revision, intent, client_oid)
+    end
+  end
+
+  # close intent: 当該 open Trade に決済 Order を記録(OrderLifecycleService 委譲)してから
+  # close-positions エンドポイントで成行クローズする.one_way_mode は hold_side 不要.
+  # record_close_open が nil(open Trade 不在 / 複数異常)でも,close intent を尊重して
+  # close_positions は実行する(実ポジションの取り残し回避 / close_positions は 5.4 で冪等化予定).
+  def place_close_order(session)
+    close_order = order_lifecycle_service.record_close_open(session: session)
+    if close_order.nil?
+      logger.warn(
+        "[LiveTradingWorker] close intent received but no single open Trade tracked " \
+        "(session_id=#{session.id}); proceeding with close_positions"
+      )
+    end
+    order_endpoint.close_positions(symbol: session.symbol)
+  end
+
+  # エントリー intent: Trade + エントリー Order を記録 → place-order 発注 → 結果を記録する.
+  # place-order 例外は本メソッド内で rescue し record_entry_rejected を確実に呼ぶ
+  # (process_order_intent の rescue まで伝播させると Order が pending のまま残留するため / 設計書 02_§2.2 d).
+  def place_entry_order(session, revision, intent, client_oid)
+    order = order_lifecycle_service.record_entry_open(
+      session: session, revision: revision, intent: intent, client_oid: client_oid
+    )
+
+    begin
+      response = order_endpoint.place_order(
+        symbol: session.symbol,
+        margin_mode: session.margin_mode,
+        margin_coin: session.margin_coin,
+        side: bitget_order_side(intent["side"]),
+        order_type: intent["order_type"],
+        size: intent["size"].to_s,
+        force: intent.fetch("force", "gtc"),
+        reduce_only: intent.fetch("reduce_only", "NO"),
+        client_oid: client_oid,
+        trade_side: intent["trade_side"],
+        # 戦略 DSL（LiveContext::OrderProxy#entry）は limit 価格を "limit_price" キーで生成する.
+        price: intent["limit_price"]&.to_s,
+        # intent["tp"]/["sl"] は誤キーで常に nil(戦略 DSL は tp_pct/sl_pct を生成).
+        # 誤キー是正 + 率→価格換算(fill 後追い送信)は subtask 5.3 で対応するため 5.0b では据置.
+        preset_stop_surplus_price: intent["tp"]&.to_s,
+        preset_stop_loss_price: intent["sl"]&.to_s
+      )
+    rescue StandardError => e
+      order_lifecycle_service.record_entry_rejected(
+        order: order, reason: "#{e.class.name}: #{sanitize_log_message(e.message)}"
+      )
+      raise
     end
 
-    order_endpoint.place_order(
-      symbol: session.symbol,
-      margin_mode: session.margin_mode,
-      margin_coin: session.margin_coin,
-      side: bitget_order_side(intent["side"]),
-      order_type: intent["order_type"],
-      size: intent["size"].to_s,
-      force: intent.fetch("force", "gtc"),
-      reduce_only: intent.fetch("reduce_only", "NO"),
-      client_oid: intent["client_oid"] || deterministic_client_oid(session, candle, idx),
-      trade_side: intent["trade_side"],
-      # 戦略 DSL（LiveContext::OrderProxy#entry）は limit 価格を "limit_price" キーで
-      # 生成する（"price" ではない）.誤キー参照では limit 注文の価格が常に欠落するため
-      # "limit_price" を参照する.
-      price: intent["limit_price"]&.to_s,
-      preset_stop_surplus_price: intent["tp"]&.to_s,
-      preset_stop_loss_price: intent["sl"]&.to_s
+    bitget_order_id = response.dig("data", "orderId")
+    order_lifecycle_service.record_entry_placed(
+      order: order, bitget_order_id: bitget_order_id, placed_at: Time.current
     )
   end
 
@@ -780,14 +818,21 @@ class LiveTradingWorker
     )
   end
 
-  # orders push: Exchange::Order の状態更新(MVP では skeleton, 後続 phase で詳細実装).
-  # thread-safety guideline (a)(c)(d): run_in_db_thread + with_connection + transaction 隔離.
+  # orders push: 各 row を Domain::OrderLifecycleService#sync_order_from_push へ委譲して
+  # Exchange::Order の状態を更新する.
+  # 外側 transaction は張らず(設計書 02_§2.2 d-3),transaction 境界は sync_order_from_push 内の
+  # row 単位とする.1 row の失敗は logger.warn に落として他 row の処理を妨げない.
+  # thread-safety guideline (a)(b)(c): run_in_db_thread + with_connection + session reload.
   def handle_orders_message(data)
     run_in_db_thread("orders_update") do
-      LiveTrading::Session.transaction do
-        Array(data).each do |_row|
-          # TODO(後続 phase): Exchange::Order upsert(client_oid / state / filled_size / avg_price 等)
-        end
+      session = LiveTrading::Session.find(@session.id)
+      Array(data).each do |row|
+        order_lifecycle_service.sync_order_from_push(row, session: session)
+      rescue StandardError => e
+        logger.warn(
+          "[LiveTradingWorker] sync_order_from_push failed: " \
+          "#{e.class.name}: #{sanitize_log_message(e.message)}"
+        )
       end
     end
   end
@@ -975,6 +1020,11 @@ class LiveTradingWorker
 
   def risk_guard_service
     @risk_guard_service ||= Domain::RiskGuardService.new
+  end
+
+  # Trade / Order lifecycle 永続化サービス. DI されていない場合の lazy init.
+  def order_lifecycle_service
+    @order_lifecycle_service ||= Domain::OrderLifecycleService.new(logger: logger)
   end
 
   def order_endpoint

@@ -1143,10 +1143,33 @@ RSpec.describe LiveTradingWorker do
       end
 
       describe "#handle_orders_message" do
-        it "run_in_db_thread + transaction で wrap され処理が呼ばれる" do
-          expect(LiveTrading::Session).to receive(:transaction).and_yield
-          worker.send(:handle_orders_message, [ { "client_oid" => "abc" } ])
+        let(:order_lifecycle_service) { instance_double(Domain::OrderLifecycleService) }
+
+        before { worker.instance_variable_set(:@order_lifecycle_service, order_lifecycle_service) }
+
+        it "orders_update ラベルの run_in_db_thread 内で各 row を sync_order_from_push へ委譲する" do
+          allow(order_lifecycle_service).to receive(:sync_order_from_push)
+          rows = [
+            { "orderId" => "bg-1", "tradeSide" => "open", "status" => "live" },
+            { "orderId" => "bg-2", "tradeSide" => "close", "status" => "filled" }
+          ]
+          worker.send(:handle_orders_message, rows)
+
           expect(worker).to have_received(:run_in_db_thread).with("orders_update")
+          rows.each do |row|
+            expect(order_lifecycle_service).to have_received(:sync_order_from_push)
+              .with(row, session: instance_of(LiveTrading::Session))
+          end
+        end
+
+        it "1 row の sync_order_from_push 失敗を logger.warn に落として他 row を処理する" do
+          allow(order_lifecycle_service).to receive(:sync_order_from_push)
+            .and_raise(StandardError, "row failure")
+          rows = [ { "orderId" => "bg-1" }, { "orderId" => "bg-2" } ]
+          worker.send(:handle_orders_message, rows)
+
+          expect(order_lifecycle_service).to have_received(:sync_order_from_push).twice
+          expect(logger).to have_received(:warn).with(/sync_order_from_push failed.*row failure/).twice
         end
       end
 
@@ -1325,7 +1348,9 @@ RSpec.describe LiveTradingWorker do
         allow(spawner).to receive(:run).and_return(spawn_response_ok)
         allow(ai_filter_service).to receive(:call).and_return({ "enter" => true })
         allow(risk_guard_service).to receive(:allow_entry?).and_return(true)
+        # place_order は成功時 code 00000 + data.orderId を含む Hash を返す(production 実戻り値).
         allow(order_endpoint_di).to receive(:place_order)
+          .and_return("code" => "00000", "data" => { "orderId" => "bg-entry-1" })
       end
 
       describe "正常パス(spawn ok)" do
@@ -1359,6 +1384,24 @@ RSpec.describe LiveTradingWorker do
               client_oid: "intent-001", price: "49900"
             )
           )
+        end
+
+        it "エントリー intent で Trade(entering)と Order(placed)が永続化される" do
+          expect { subject }
+            .to change(LiveTrading::Trade, :count).by(1)
+            .and change(Exchange::Order, :count).by(1)
+
+          trade = LiveTrading::Trade.last
+          expect(trade).to be_state_entering
+          expect(trade).to be_side_long
+          expect(trade.live_trading_session).to eq(session)
+
+          order = Exchange::Order.last
+          expect(order).to be_state_placed
+          expect(order).to be_trade_side_open
+          expect(order.client_oid).to eq("intent-001")
+          expect(order.bitget_order_id).to eq("bg-entry-1")
+          expect(order.live_trading_trade).to eq(trade)
         end
 
         # 実機検証で発見した side mismatch バグの回帰テスト:
@@ -1396,6 +1439,50 @@ RSpec.describe LiveTradingWorker do
             subject
             expect(order_endpoint_di).to have_received(:close_positions).with(symbol: "BTCUSDT")
             expect(order_endpoint_di).not_to have_received(:place_order)
+          end
+        end
+
+        context "intent side が close で open Trade が存在する場合" do
+          let(:spawn_response_ok) do
+            {
+              "status" => "ok",
+              "order_intents" => [ { "side" => "close", "size" => "0", "order_type" => "market" } ],
+              "strategy_state_diff" => state_diff, "logs" => [], "errors" => []
+            }
+          end
+          let!(:open_trade) do
+            LiveTrading::Trade.create!(
+              live_trading_session: session, strategy_revision: revision,
+              symbol: "BTCUSDT", side: "long", quantity: BigDecimal("0.01"), status: "open"
+            )
+          end
+
+          before { allow(order_endpoint_di).to receive(:close_positions) }
+
+          it "決済 Order を作成し open Trade を closing に遷移してから close_positions を呼ぶ" do
+            subject
+            expect(open_trade.reload).to be_state_closing
+            close_order = Exchange::Order.find_by(live_trading_trade_id: open_trade.id, trade_side: "close")
+            expect(close_order).to be_present
+            expect(order_endpoint_di).to have_received(:close_positions).with(symbol: "BTCUSDT")
+          end
+        end
+
+        context "intent side が close で open Trade が存在しない場合" do
+          let(:spawn_response_ok) do
+            {
+              "status" => "ok",
+              "order_intents" => [ { "side" => "close", "size" => "0", "order_type" => "market" } ],
+              "strategy_state_diff" => state_diff, "logs" => [], "errors" => []
+            }
+          end
+
+          before { allow(order_endpoint_di).to receive(:close_positions) }
+
+          it "決済 Order を作成せず logger.warn を記録し close_positions は実行する" do
+            expect { subject }.not_to change(Exchange::Order, :count)
+            expect(logger).to have_received(:warn).with(/no single open Trade tracked/)
+            expect(order_endpoint_di).to have_received(:close_positions).with(symbol: "BTCUSDT")
           end
         end
 
@@ -1538,6 +1625,16 @@ RSpec.describe LiveTradingWorker do
 
           expect(logger).to have_received(:warn).with(/process_order_intent failed.*API error/).twice
           expect(order_endpoint_di).to have_received(:place_order).twice
+        end
+      end
+
+      describe "place_order 失敗時の Trade / Order 記録" do
+        before { allow(order_endpoint_di).to receive(:place_order).and_raise(StandardError, "Bitget down") }
+
+        it "Order を rejected,Trade を failed に遷移する" do
+          worker.send(:run_runner_child_for_tick, session, candle_payload)
+          expect(Exchange::Order.last).to be_state_rejected
+          expect(LiveTrading::Trade.last).to be_state_failed
         end
       end
     end
