@@ -1,7 +1,8 @@
 require "rails_helper"
 
 RSpec.describe Domain::OrderLifecycleService do
-  let(:service) { described_class.new }
+  let(:logger) { instance_double(Logger, error: nil, warn: nil, info: nil) }
+  let(:service) { described_class.new(logger: logger) }
 
   let(:definition) do
     Strategy::Definition.create!(name: "OLS Strat", market_type: "futures", status: "active")
@@ -164,6 +165,58 @@ RSpec.describe Domain::OrderLifecycleService do
         trade = order.live_trading_trade.reload
         expect(trade).to be_state_failed
         expect(trade.failure_reason).to eq("Bitget rejected: insufficient margin")
+      end
+    end
+  end
+
+  describe "#record_close_open" do
+    subject { service.record_close_open(session: session) }
+
+    def create_open_trade
+      LiveTrading::Trade.create!(
+        live_trading_session: session, strategy_revision: revision,
+        symbol: "BTCUSDT", side: "long", quantity: BigDecimal("0.01"), status: "open"
+      )
+    end
+
+    context "open な Trade が 1 件存在する場合" do
+      let!(:open_trade) { create_open_trade }
+
+      it "決済 Order(pending / trade_side: close)を作成し親 Trade を closing に遷移する" do
+        order = subject
+
+        expect(order).to be_a(Exchange::Order)
+        expect(order).to be_state_pending
+        expect(order).to be_trade_side_close
+        expect(order).to be_order_type_market
+        expect(order).to be_side_long
+        expect(order).to be_force_gtc
+        expect(order.symbol).to eq("BTCUSDT")
+        expect(order.size).to eq(BigDecimal("0.01"))
+        expect(order.client_oid).to be_present
+        expect(order.live_trading_trade).to eq(open_trade)
+        expect(order.strategy_revision).to eq(revision)
+
+        expect(open_trade.reload).to be_state_closing
+      end
+    end
+
+    context "open な Trade が存在しない場合" do
+      it "Order を作成せず nil を返す" do
+        expect { subject }.not_to change(Exchange::Order, :count)
+        expect(subject).to be_nil
+      end
+    end
+
+    context "open な Trade が複数存在する場合(1 ポジ運用前提の契約違反)" do
+      before do
+        create_open_trade
+        create_open_trade
+      end
+
+      it "logger.error で契約違反を明示し MultipleOpenTradesError を raise する" do
+        expect { subject }.to raise_error(described_class::MultipleOpenTradesError)
+        expect(logger).to have_received(:error).with(/multiple open trades/)
       end
     end
   end

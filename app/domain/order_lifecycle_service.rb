@@ -5,6 +5,14 @@ module Domain
   # DB レコードのライフサイクルのみを扱う stateless サービス.
   # 各メソッドは内部で LiveTrading::Session.transaction を張り Trade + Order の整合を保つ.
   class OrderLifecycleService
+    # 1 ポジ運用前提に反し open な Trade が複数検出された場合に送出する(設計書 02_§2.2 d-2).
+    class MultipleOpenTradesError < StandardError; end
+
+    # @param logger [Logger] 契約違反等の警告出力先
+    def initialize(logger: Rails.logger)
+      @logger = logger
+    end
+
     # エントリー intent から Trade(entering)とエントリー Order(pending)を作成する.
     #
     # Trade を pending で作成 → start_entering! で entering に遷移し,
@@ -70,5 +78,50 @@ module Domain
         order.live_trading_trade.mark_failed!(reason: reason)
       end
     end
+
+    # 明示 close: 当該 session の open な Trade を特定し決済 Order(pending / trade_side: close)を
+    # 作成して親 Trade を closing に遷移する(設計書 02_§2.2 d / c-2).
+    #
+    # 決済 Order の全属性は特定した open Trade から導出する(client_oid は close_positions が
+    # 非対応のため Exchange::Order の ensure_client_oid で内部 UUID 自動生成).
+    # MVP は 1 ポジ運用のため open Trade は 0 / 1 を想定し,2 件以上は契約違反として fail-fast する.
+    #
+    # @param session [LiveTrading::Session] 対象セッション
+    # @return [Exchange::Order, nil] 作成した決済 Order / open Trade 不在なら nil
+    # @raise [MultipleOpenTradesError] open Trade が 2 件以上検出された場合(1 ポジ運用前提違反)
+    def record_close_open(session:)
+      open_trades = LiveTrading::Trade.where(live_trading_session_id: session.id, status: "open").to_a
+      return nil if open_trades.empty?
+
+      if open_trades.size > 1
+        logger.error(
+          "[OrderLifecycleService] multiple open trades detected for session_id=#{session.id} " \
+          "(count=#{open_trades.size}); 1 ポジ運用前提の契約違反 / fail-fast"
+        )
+        raise MultipleOpenTradesError,
+              "multiple open trades for session_id=#{session.id} (count=#{open_trades.size})"
+      end
+
+      trade = open_trades.first
+      LiveTrading::Session.transaction do
+        order = Exchange::Order.create!(
+          live_trading_trade: trade,
+          strategy_revision: trade.strategy_revision,
+          symbol: trade.symbol,
+          side: trade.side,
+          trade_side: "close",
+          order_type: "market",
+          size: trade.quantity,
+          status: "pending",
+          force: "gtc"
+        )
+        trade.start_closing!
+        order
+      end
+    end
+
+    private
+
+    attr_reader :logger
   end
 end
