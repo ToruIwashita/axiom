@@ -67,6 +67,7 @@ module Domain
         case result["status"]
         when "ok"
           state = apply_state_diff(state, result["strategy_state_diff"])
+          open_position_before_intents = open_position
           result["order_intents"].each do |intent_hash|
             intent = Domain::OrderIntentValueObject.from_h(intent_hash)
             position, balance, open_position, closed_trade = execute_intent(
@@ -76,9 +77,11 @@ module Domain
             trades << closed_trade if closed_trade
           end
 
-          # intent 処理後に open_position が残っていれば,当該 candle で TP/SL を跨いだか評価する
-          # (エントリーした candle 内での即時 TP/SL 跨ぎも同じ経路で扱う)。
-          if open_position
+          # 前 candle 以前から継続する open_position のみを当該 candle で TP/SL 評価する。
+          # 当該 candle でエントリーした(open_position が新規生成された)場合は評価対象外とする:
+          # market エントリーの fill_price は candle close のため,その candle の high/low は
+          # エントリー前の値動きを含み,評価するとエントリー前の極値で誤決済する(設計書 02_§2.4 e)。
+          if open_position && open_position.equal?(open_position_before_intents)
             tp_sl_exit = check_tp_sl_exit(
               open_position:, candle:, fee_rate:, slippage_rate:, balance:
             )
