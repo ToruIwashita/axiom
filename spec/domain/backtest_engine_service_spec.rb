@@ -353,6 +353,209 @@ RSpec.describe Domain::BacktestEngineService do
         expect(result[:metrics]).to eq(dummy_metrics)
       end
     end
+
+    context "成行 long エントリー後に candle が TP 価格へ到達した場合" do
+      let(:candles) do
+        [
+          candle(ts: Time.utc(2026, 1, 1, 0), open: 100, high: 100, low: 100, close: 100),
+          candle(ts: Time.utc(2026, 1, 1, 1), open: 110, high: 115, low: 105, close: 110)
+        ]
+      end
+
+      before do
+        allow(spawner).to receive(:run).and_return(
+          ipc_ok(order_intents: [ {
+            "side" => "long", "size" => "1.0", "order_type" => "market",
+            "tp_pct" => "0.02", "sl_pct" => "0.01"
+          } ]),
+          ipc_ok
+        )
+      end
+
+      subject do
+        engine.run(
+          strategy_revision: revision, risk_policy: risk_policy, candles: candles,
+          fee_rate: fee_rate, slippage_rate: slippage_rate
+        )
+      end
+
+      it "TP 価格(slippage 適用)で自動決済され trade が 1 件生成される" do
+        result = subject
+        expect(result[:trades].size).to eq(1)
+        trade = result[:trades].first
+        entry_fill = BigDecimal("100") * (BigDecimal("1") + slippage_rate)
+        tp_price = entry_fill * (BigDecimal("1") + BigDecimal("0.02"))
+        expect(trade[:side]).to eq("long")
+        expect(trade[:entry_price]).to eq(entry_fill)
+        expect(trade[:exit_price]).to eq(tp_price * (BigDecimal("1") - slippage_rate))
+        expect(trade[:exit_at]).to eq(Time.utc(2026, 1, 1, 1))
+      end
+    end
+
+    context "成行 long エントリー後に candle が SL 価格へ到達した場合" do
+      let(:candles) do
+        [
+          candle(ts: Time.utc(2026, 1, 1, 0), open: 100, high: 100, low: 100, close: 100),
+          candle(ts: Time.utc(2026, 1, 1, 1), open: 95, high: 100, low: 90, close: 95)
+        ]
+      end
+
+      before do
+        allow(spawner).to receive(:run).and_return(
+          ipc_ok(order_intents: [ {
+            "side" => "long", "size" => "1.0", "order_type" => "market",
+            "tp_pct" => "0.02", "sl_pct" => "0.01"
+          } ]),
+          ipc_ok
+        )
+      end
+
+      subject do
+        engine.run(
+          strategy_revision: revision, risk_policy: risk_policy, candles: candles,
+          fee_rate: fee_rate, slippage_rate: slippage_rate
+        )
+      end
+
+      it "SL 価格(slippage 適用)で自動決済され trade が 1 件生成される" do
+        result = subject
+        expect(result[:trades].size).to eq(1)
+        trade = result[:trades].first
+        entry_fill = BigDecimal("100") * (BigDecimal("1") + slippage_rate)
+        sl_price = entry_fill * (BigDecimal("1") - BigDecimal("0.01"))
+        expect(trade[:exit_price]).to eq(sl_price * (BigDecimal("1") - slippage_rate))
+      end
+    end
+
+    context "成行 short エントリー後に candle が SL 価格へ到達した場合" do
+      let(:candles) do
+        [
+          candle(ts: Time.utc(2026, 1, 1, 0), open: 100, high: 100, low: 100, close: 100),
+          candle(ts: Time.utc(2026, 1, 1, 1), open: 105, high: 110, low: 100, close: 105)
+        ]
+      end
+
+      before do
+        allow(spawner).to receive(:run).and_return(
+          ipc_ok(order_intents: [ {
+            "side" => "short", "size" => "1.0", "order_type" => "market",
+            "tp_pct" => "0.02", "sl_pct" => "0.01"
+          } ]),
+          ipc_ok
+        )
+      end
+
+      subject do
+        engine.run(
+          strategy_revision: revision, risk_policy: risk_policy, candles: candles,
+          fee_rate: fee_rate, slippage_rate: slippage_rate
+        )
+      end
+
+      it "SL 価格(slippage 適用)で自動決済され trade が 1 件生成される" do
+        result = subject
+        expect(result[:trades].size).to eq(1)
+        trade = result[:trades].first
+        # short エントリー fill は close - slippage
+        entry_fill = BigDecimal("100") * (BigDecimal("1") - slippage_rate)
+        # short の SL は entry * (1 + sl_pct)
+        sl_price = entry_fill * (BigDecimal("1") + BigDecimal("0.01"))
+        expect(trade[:side]).to eq("short")
+        # short の close slippage は close + slippage
+        expect(trade[:exit_price]).to eq(sl_price * (BigDecimal("1") + slippage_rate))
+      end
+    end
+
+    context "同一 candle で TP 価格と SL 価格の両方を跨いだ場合" do
+      let(:candles) do
+        [
+          candle(ts: Time.utc(2026, 1, 1, 0), open: 100, high: 100, low: 100, close: 100),
+          candle(ts: Time.utc(2026, 1, 1, 1), open: 110, high: 115, low: 90, close: 110)
+        ]
+      end
+
+      before do
+        allow(spawner).to receive(:run).and_return(
+          ipc_ok(order_intents: [ {
+            "side" => "long", "size" => "1.0", "order_type" => "market",
+            "tp_pct" => "0.02", "sl_pct" => "0.01"
+          } ]),
+          ipc_ok
+        )
+      end
+
+      subject do
+        engine.run(
+          strategy_revision: revision, risk_policy: risk_policy, candles: candles,
+          fee_rate: fee_rate, slippage_rate: slippage_rate
+        )
+      end
+
+      it "SL 優先で決済される(保守的処理)" do
+        result = subject
+        expect(result[:trades].size).to eq(1)
+        trade = result[:trades].first
+        entry_fill = BigDecimal("100") * (BigDecimal("1") + slippage_rate)
+        sl_price = entry_fill * (BigDecimal("1") - BigDecimal("0.01"))
+        expect(trade[:exit_price]).to eq(sl_price * (BigDecimal("1") - slippage_rate))
+      end
+    end
+
+    context "エントリーした candle 内で即座に TP/SL を両跨ぎした場合" do
+      let(:candles) do
+        [ candle(ts: Time.utc(2026, 1, 1, 0), open: 100, high: 200, low: 50, close: 100) ]
+      end
+
+      before do
+        allow(spawner).to receive(:run).and_return(
+          ipc_ok(order_intents: [ {
+            "side" => "long", "size" => "1.0", "order_type" => "market",
+            "tp_pct" => "0.02", "sl_pct" => "0.01"
+          } ])
+        )
+      end
+
+      subject do
+        engine.run(
+          strategy_revision: revision, risk_policy: risk_policy, candles: candles,
+          fee_rate: fee_rate, slippage_rate: slippage_rate
+        )
+      end
+
+      it "エントリー candle で SL 優先決済され trade が 1 件生成される" do
+        result = subject
+        expect(result[:trades].size).to eq(1)
+        expect(result[:trades].first[:exit_at]).to eq(Time.utc(2026, 1, 1, 0))
+      end
+    end
+
+    context "tp_pct / sl_pct が未設定のエントリーで candle が価格変動した場合" do
+      let(:candles) do
+        [
+          candle(ts: Time.utc(2026, 1, 1, 0), open: 100, high: 100, low: 100, close: 100),
+          candle(ts: Time.utc(2026, 1, 1, 1), open: 110, high: 200, low: 50, close: 110)
+        ]
+      end
+
+      before do
+        allow(spawner).to receive(:run).and_return(
+          ipc_ok(order_intents: [ { "side" => "long", "size" => "1.0", "order_type" => "market" } ]),
+          ipc_ok
+        )
+      end
+
+      subject do
+        engine.run(
+          strategy_revision: revision, risk_policy: risk_policy, candles: candles,
+          fee_rate: fee_rate, slippage_rate: slippage_rate
+        )
+      end
+
+      it "TP/SL 自動決済は行われず trade が生成されない" do
+        result = subject
+        expect(result[:trades]).to be_empty
+      end
+    end
   end
 
   describe "#apply_state_diff(軽微追加 B: fail-fast 異常系)" do
