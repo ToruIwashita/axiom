@@ -67,6 +67,7 @@ module Domain
         case result["status"]
         when "ok"
           state = apply_state_diff(state, result["strategy_state_diff"])
+          open_position_before_intents = open_position
           result["order_intents"].each do |intent_hash|
             intent = Domain::OrderIntentValueObject.from_h(intent_hash)
             position, balance, open_position, closed_trade = execute_intent(
@@ -74,6 +75,23 @@ module Domain
               position:, balance:, open_position:
             )
             trades << closed_trade if closed_trade
+          end
+
+          # 前 candle 以前から継続する open_position のみを当該 candle で TP/SL 評価する。
+          # 当該 candle でエントリーした(open_position が新規生成された)場合は評価対象外とする:
+          # market エントリーの fill_price は candle close のため,その candle の high/low は
+          # エントリー前の値動きを含み,評価するとエントリー前の極値で誤決済する(設計書 02_§2.4 e)。
+          # 判定は `equal?` (オブジェクト同一性): execute_intent のエントリー経路は new_open Hash を
+          # 新規生成して返すため,当該 candle 内で生成された Hash か否かを同一性で識別できる
+          # (値比較 `==` だと再エントリーが偶然 value-equal な Hash を生んだ場合に誤判定する)。
+          if open_position && open_position.equal?(open_position_before_intents)
+            tp_sl_exit = check_tp_sl_exit(
+              open_position:, candle:, fee_rate:, slippage_rate:, balance:
+            )
+            if tp_sl_exit
+              position, balance, open_position, tp_sl_trade = tp_sl_exit
+              trades << tp_sl_trade
+            end
           end
         when "timeout", "error"
           first_error = (result["errors"] || []).first
@@ -158,7 +176,8 @@ module Domain
         side: intent.side, size: intent.size, entry_price: fill_price
       )
       new_open = {
-        side: intent.side, size: intent.size, entry_price: fill_price, entry_at: candle["ts"]
+        side: intent.side, size: intent.size, entry_price: fill_price, entry_at: candle["ts"],
+        tp_pct: intent.tp_pct, sl_pct: intent.sl_pct
       }
       [ new_position, new_balance, new_open, nil ]
     end
@@ -199,6 +218,69 @@ module Domain
         pnl: net_pnl
       }
       [ Domain::PositionValueObject.new, new_balance, nil, trade ]
+    end
+
+    # candle が open_position の TP / SL 価格を跨いだ場合に自動決済する。
+    # 両跨ぎ時は SL 優先(保守的 / バックテストの楽観バイアス排除)。
+    # tp_pct / sl_pct が共に未設定の open_position は評価対象外。
+    #
+    # @param open_position [Hash] 評価対象の open_position(side / entry_price / tp_pct / sl_pct 等)
+    # @param candle [Hash] 現在 candle({ "high", "low", "close", "ts", ... })
+    # @param fee_rate [BigDecimal] 取引手数料率
+    # @param slippage_rate [BigDecimal] slippage 率
+    # @param balance [BigDecimal] 現在残高
+    # @return [Array(PositionValueObject, BigDecimal, nil, Hash), nil]
+    #   決済された場合は close_position と同形式の戻り値,跨ぎなしは nil
+    def check_tp_sl_exit(open_position:, candle:, fee_rate:, slippage_rate:, balance:)
+      exit_price = tp_sl_exit_price(open_position:, candle:)
+      return nil if exit_price.nil?
+
+      close_position(
+        close_price: exit_price, candle:, fee_rate:, slippage_rate:,
+        balance:, open_position:
+      )
+    end
+
+    # open_position の TP / SL 価格を candle の high / low が跨いだか判定し,
+    # 跨いだ場合の決済価格(TP / SL 価格)を返す。両跨ぎは SL 優先。
+    #
+    # @param open_position [Hash] tp_pct / sl_pct / side / entry_price を含む open_position
+    # @param candle [Hash] 現在 candle({ "high", "low", ... })
+    # @return [BigDecimal, nil] 跨いだ場合の決済価格(TP / SL 価格)/ 跨ぎなしは nil
+    def tp_sl_exit_price(open_position:, candle:)
+      tp_pct = open_position[:tp_pct]
+      sl_pct = open_position[:sl_pct]
+      return nil if tp_pct.nil? && sl_pct.nil?
+
+      side = open_position[:side]
+      entry_price = open_position[:entry_price]
+      high = BigDecimal(candle["high"].to_s)
+      low = BigDecimal(candle["low"].to_s)
+
+      sl_price = sl_pct && stop_loss_calculator.calculate_sl(entry_price:, side:, sl_pct:)
+      tp_price = tp_pct && stop_loss_calculator.calculate_tp(entry_price:, side:, tp_pct:)
+
+      return sl_price if sl_price && sl_crossed?(side, sl_price, high, low)
+      return tp_price if tp_price && tp_crossed?(side, tp_price, high, low)
+
+      nil
+    end
+
+    # SL 価格を candle が跨いだか(等値で発火する閉区間判定)。
+    # long は安値が SL 以下,short は高値が SL 以上で跨いだとみなす。
+    def sl_crossed?(side, sl_price, high, low)
+      side == :long ? low <= sl_price : high >= sl_price
+    end
+
+    # TP 価格を candle が跨いだか(等値で発火する閉区間判定)。
+    # long は高値が TP 以上,short は安値が TP 以下で跨いだとみなす。
+    def tp_crossed?(side, tp_price, high, low)
+      side == :long ? high >= tp_price : low <= tp_price
+    end
+
+    # TP / SL 価格算出に用いる StopLossCalculatorService の lazy 初期化。stateless 純粋関数。
+    def stop_loss_calculator
+      @stop_loss_calculator ||= Domain::StopLossCalculatorService.new
     end
 
     def build_equity_point(candle:, balance:, position:, peak_equity:)
