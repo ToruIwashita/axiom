@@ -386,9 +386,22 @@ RSpec.describe Domain::BacktestEngineService do
         entry_fill = BigDecimal("100") * (BigDecimal("1") + slippage_rate)
         tp_price = entry_fill * (BigDecimal("1") + BigDecimal("0.02"))
         expect(trade[:side]).to eq("long")
+        expect(trade[:entry_at]).to eq(Time.utc(2026, 1, 1, 0))
         expect(trade[:entry_price]).to eq(entry_fill)
         expect(trade[:exit_price]).to eq(tp_price * (BigDecimal("1") - slippage_rate))
         expect(trade[:exit_at]).to eq(Time.utc(2026, 1, 1, 1))
+        expect(trade[:quantity]).to eq(BigDecimal("1.0"))
+      end
+
+      it "pnl は (exit_fill - entry_fill) * quantity - 両方向 fee で算出される" do
+        trade = subject[:trades].first
+        entry_fill = BigDecimal("100") * (BigDecimal("1") + slippage_rate)
+        tp_price = entry_fill * (BigDecimal("1") + BigDecimal("0.02"))
+        exit_fill = tp_price * (BigDecimal("1") - slippage_rate)
+        gross = (exit_fill - entry_fill) * BigDecimal("1.0")
+        entry_fee = BigDecimal("1.0") * entry_fill * fee_rate
+        exit_fee = BigDecimal("1.0") * exit_fill * fee_rate
+        expect(trade[:pnl]).to eq(gross - entry_fee - exit_fee)
       end
     end
 
@@ -538,11 +551,13 @@ RSpec.describe Domain::BacktestEngineService do
       end
     end
 
-    context "エントリーした candle で high/low が TP/SL 価格を跨いでいる場合" do
+    context "エントリーした candle で high/low が TP/SL を跨ぎ,次 candle で TP に到達した場合" do
       let(:candles) do
         [
+          # エントリーした candle: high/low ともに TP/SL を跨ぐ(評価対象外を検証)
           candle(ts: Time.utc(2026, 1, 1, 0), open: 100, high: 200, low: 50, close: 100),
-          candle(ts: Time.utc(2026, 1, 1, 1), open: 100, high: 100, low: 100, close: 100)
+          # 次 candle: TP のみ到達(エントリー candle スキップ後に正しく評価されることを検証)
+          candle(ts: Time.utc(2026, 1, 1, 1), open: 110, high: 115, low: 105, close: 110)
         ]
       end
 
@@ -563,9 +578,11 @@ RSpec.describe Domain::BacktestEngineService do
         )
       end
 
-      it "エントリーした candle では TP/SL を評価せず自動決済しない" do
+      it "エントリー candle はスキップされ次 candle で TP 決済される" do
         result = subject
-        expect(result[:trades]).to be_empty
+        expect(result[:trades].size).to eq(1)
+        # 決済はエントリー candle ではなく次 candle で発生する
+        expect(result[:trades].first[:exit_at]).to eq(Time.utc(2026, 1, 1, 1))
       end
     end
 
@@ -660,6 +677,146 @@ RSpec.describe Domain::BacktestEngineService do
       it "TP/SL 自動決済は行われず trade が生成されない" do
         result = subject
         expect(result[:trades]).to be_empty
+      end
+    end
+
+    context "成行 short エントリー後に candle で TP/SL を両跨ぎした場合" do
+      let(:candles) do
+        [
+          candle(ts: Time.utc(2026, 1, 1, 0), open: 100, high: 100, low: 100, close: 100),
+          # short: entry_fill=99.95,SL=100.9495,TP=97.951。
+          # candle2 high 105 >= SL,low 95 <= TP → 両跨ぎ
+          candle(ts: Time.utc(2026, 1, 1, 1), open: 100, high: 105, low: 95, close: 100)
+        ]
+      end
+
+      before do
+        allow(spawner).to receive(:run).and_return(
+          ipc_ok(order_intents: [ {
+            "side" => "short", "size" => "1.0", "order_type" => "market",
+            "tp_pct" => "0.02", "sl_pct" => "0.01"
+          } ]),
+          ipc_ok
+        )
+      end
+
+      subject do
+        engine.run(
+          strategy_revision: revision, risk_policy: risk_policy, candles: candles,
+          fee_rate: fee_rate, slippage_rate: slippage_rate
+        )
+      end
+
+      it "SL 優先で決済される(short の保守的処理)" do
+        result = subject
+        expect(result[:trades].size).to eq(1)
+        trade = result[:trades].first
+        entry_fill = BigDecimal("100") * (BigDecimal("1") - slippage_rate)
+        sl_price = entry_fill * (BigDecimal("1") + BigDecimal("0.01"))
+        expect(trade[:exit_price]).to eq(sl_price * (BigDecimal("1") + slippage_rate))
+      end
+    end
+
+    context "candle の high が TP 価格と等値の場合(閉区間判定)" do
+      let(:candles) do
+        [
+          candle(ts: Time.utc(2026, 1, 1, 0), open: 100, high: 100, low: 100, close: 100),
+          # entry_fill=100.05,TP=100.05*1.02=102.051。candle2 high を TP 価格と等値に設定。
+          candle(ts: Time.utc(2026, 1, 1, 1), open: 100, high: "102.051", low: 100, close: 100)
+        ]
+      end
+
+      before do
+        allow(spawner).to receive(:run).and_return(
+          ipc_ok(order_intents: [ {
+            "side" => "long", "size" => "1.0", "order_type" => "market",
+            "tp_pct" => "0.02", "sl_pct" => "0.01"
+          } ]),
+          ipc_ok
+        )
+      end
+
+      subject do
+        engine.run(
+          strategy_revision: revision, risk_policy: risk_policy, candles: candles,
+          fee_rate: fee_rate, slippage_rate: slippage_rate
+        )
+      end
+
+      it "等値で TP 発火し決済される" do
+        result = subject
+        expect(result[:trades].size).to eq(1)
+      end
+    end
+
+    context "同一 candle で close intent と新規 entry intent を受信した場合" do
+      let(:candles) do
+        [
+          candle(ts: Time.utc(2026, 1, 1, 0), open: 100, high: 100, low: 100, close: 100),
+          # candle1: close + 再エントリー。high/low は再エントリー後の TP/SL を跨ぐ範囲だが
+          # 再エントリーは当該 candle で評価対象外のため決済は close 由来のみ。
+          candle(ts: Time.utc(2026, 1, 1, 1), open: 200, high: 250, low: 150, close: 200)
+        ]
+      end
+
+      before do
+        allow(spawner).to receive(:run).and_return(
+          ipc_ok(order_intents: [ {
+            "side" => "long", "size" => "1.0", "order_type" => "market",
+            "tp_pct" => "0.02", "sl_pct" => "0.01"
+          } ]),
+          ipc_ok(order_intents: [
+            { "side" => "close", "size" => "0", "order_type" => "market" },
+            { "side" => "long", "size" => "1.0", "order_type" => "market", "tp_pct" => "0.02", "sl_pct" => "0.01" }
+          ])
+        )
+      end
+
+      subject do
+        engine.run(
+          strategy_revision: revision, risk_policy: risk_policy, candles: candles,
+          fee_rate: fee_rate, slippage_rate: slippage_rate
+        )
+      end
+
+      it "close 由来の trade が 1 件生成され,再エントリー Order の TP/SL は当該 candle で評価されない" do
+        result = subject
+        expect(result[:trades].size).to eq(1)
+      end
+    end
+
+    context "明示 close で position 解消後の candle に進む場合(nil ガード)" do
+      let(:candles) do
+        [
+          candle(ts: Time.utc(2026, 1, 1, 0), open: 100, high: 100, low: 100, close: 100),
+          candle(ts: Time.utc(2026, 1, 1, 1), open: 110, high: 110, low: 110, close: 110),
+          # candle2: open_position なしのため TP/SL 評価はスキップされる(極値があっても影響なし)
+          candle(ts: Time.utc(2026, 1, 1, 2), open: 50, high: 200, low: 50, close: 200)
+        ]
+      end
+
+      before do
+        allow(spawner).to receive(:run).and_return(
+          ipc_ok(order_intents: [ {
+            "side" => "long", "size" => "1.0", "order_type" => "market",
+            "tp_pct" => "0.02", "sl_pct" => "0.01"
+          } ]),
+          ipc_ok(order_intents: [ { "side" => "close", "size" => "0", "order_type" => "market" } ]),
+          ipc_ok
+        )
+      end
+
+      subject do
+        engine.run(
+          strategy_revision: revision, risk_policy: risk_policy, candles: candles,
+          fee_rate: fee_rate, slippage_rate: slippage_rate
+        )
+      end
+
+      it "close 由来の trade のみ生成され,position 解消後の candle で新たな決済は起きない" do
+        result = subject
+        expect(result[:trades].size).to eq(1)
+        expect(result[:trades].first[:exit_at]).to eq(Time.utc(2026, 1, 1, 1))
       end
     end
   end
